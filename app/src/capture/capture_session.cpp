@@ -113,7 +113,7 @@ bool autoConfirmRegion() {
 }
 } // namespace
 
-void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured) {
+void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured, bool allowEditor) {
     // 会话进行中 = 屏幕上还有遮罩(第一代 CAPTURE_BUSY 语义)
     if (pruneOverlays()) {
         qInfo() << "截图进行中,忽略本次触发";
@@ -165,7 +165,7 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured) {
         // 冻结底图已在宿主侧(QImage 隐式共享,lambda 捕获代价为 0);
         // 裁剪仍走核心 RGBA 通道 nb_capture_crop,保持"有逻辑的归 Rust"。
         QObject::connect(overlay, &OverlayWidget::regionConfirmed, overlay,
-                [frozen](const QRect& physicalRect) {
+                [frozen, allowEditor](const QRect& physicalRect) {
             const CaptureDone done = g_onCaptured;   // closeAllOverlays 会清空,先取出
             closeAllOverlays();                      // 任一屏确认即收起全部遮罩
             const QImage cropped = CoreBridge::instance().captureCrop(frozen, physicalRect);
@@ -173,7 +173,7 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured) {
                 qWarning() << "选区裁剪失败(空选区或越界)";
                 return;
             }
-            if (skipEditor()) {
+            if (!allowEditor || skipEditor()) {
                 finishCapture(cropped, done);
                 return;
             }

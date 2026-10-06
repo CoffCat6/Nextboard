@@ -1,6 +1,7 @@
 // 贴图窗口:置顶无边框,拖动/滚轮缩放/透明度/双击关闭(第一代 pin 交互语义)。
 #pragma once
 
+#include <QColor>
 #include <QWidget>
 
 namespace nb {
@@ -12,15 +13,24 @@ struct PinOptions {
     bool doubleClickClose = true;
 };
 
+/// 文本贴图的渲染样式,来自设置 `pinTextBg` / `pinTextColor` /
+/// `pinTextFontSize` / `pinTextMaxWidth` / `pinTextBgOpacity`。
+struct PinTextStyle {
+    QColor background = QColor(0x26, 0x27, 0x2E, 235);
+    QColor textColor = QColor(0xDF, 0xE1, 0xE8);
+    int fontSize = 15;
+    int maxWidth = 520;
+};
+
 class PinWindow : public QWidget {
     Q_OBJECT
 public:
     /// image:要贴出的图;options:初始透明度与双击关闭行为。
     PinWindow(QImage image, const PinOptions& options = {}, QWidget* parent = nullptr);
 
-    /// 文本条目贴图:把文本渲染成位图,复用同一套窗口与交互。
+    /// 文本条目贴图:把文本按 style 渲染成位图,复用同一套窗口与交互。
     /// 第一代允许"无图时贴最近文本内容",这里是它的渲染实现。
-    static QImage renderText(const QString& text);
+    static QImage renderText(const QString& text, const PinTextStyle& style);
 
 protected:
     void paintEvent(QPaintEvent* e) override;

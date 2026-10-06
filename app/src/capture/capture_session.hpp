@@ -25,7 +25,12 @@ using CaptureDone = std::function<void(const QString& entryId)>;
 
 /// 启动会话(Fullscreen = 光标屏整屏直通;Region = 各屏遮罩框选)。
 /// 忙碌重入检查沿用第一代 CAPTURE_BUSY 语义。
-void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured = {});
+///
+/// allowEditor:是否允许走标注编辑器(仅在 regionSkipEditor=false 时才有意义)。
+/// 截图翻译 / 截图取字是"取内容"链路,应**始终直通**——中间弹一个标注编辑器
+/// 既多余又会打断流程,故这两条链路传 false。
+void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured = {},
+                         bool allowEditor = true);
 
 /// 入库一张图片并写入系统剪贴板(截图与编辑器「完成」共用同一通道)。
 /// 返回条目 id;未入库(超大小上限)或失败时返回空串。

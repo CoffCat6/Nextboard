@@ -242,24 +242,47 @@ void CoreFacade::processCapture(const QString& id, const QString& mode) {
 
 void CoreFacade::captureOcr() {
     // 调用方(翻译抽屉)已先收起面板;这里再等窗口真正消失,避免面板被拍进画面。
+    // allowEditor=false:取字链路始终直通,不弹标注编辑器。
     QTimer::singleShot(150, [] {
         startCaptureSession(CaptureIntent::Region, [](const QString& entryId) {
             if (!entryId.isEmpty())
                 CoreFacade::instance().processCapture(entryId, QStringLiteral("ocr"));
-        });
+        }, /*allowEditor=*/false);
     });
 }
 
 namespace {
 
-/// 由条目内容得到"可贴的图":图片读 blob;文本渲染成位图(第一代允许贴文本)。
-QImage imageForEntry(const QVariantMap& entry) {
+/// 文本贴图样式取自设置(pinText*);颜色/数值非法时回退默认值。
+PinTextStyle pinTextStyleFromSettings() {
+    PinTextStyle style;
+    const QVariantMap resp = CoreFacade::instance().call("get_settings");
+    if (!resp.value("ok").toBool()) return style;
+    const QVariantMap data = resp.value("data").toMap();
+
+    const QColor background(data.value("pinTextBg").toString());
+    if (background.isValid()) {
+        QColor withAlpha = background;
+        withAlpha.setAlphaF(qBound(0, data.value("pinTextBgOpacity").toInt(), 100) / 100.0);
+        style.background = withAlpha;
+    }
+    const QColor textColor(data.value("pinTextColor").toString());
+    if (textColor.isValid()) style.textColor = textColor;
+    const int fontSize = data.value("pinTextFontSize").toInt();
+    if (fontSize > 0) style.fontSize = fontSize;
+    const int maxWidth = data.value("pinTextMaxWidth").toInt();
+    if (maxWidth > 0) style.maxWidth = maxWidth;
+    return style;
+}
+
+/// 由条目内容得到"可贴的图":图片读 blob;文本按样式渲染成位图(第一代允许贴文本)。
+QImage imageForEntry(const QVariantMap& entry, const PinTextStyle& style) {
     const QString kind = entry.value("kind").toString();
     if (kind == QLatin1String("image"))
         return CoreBridge::loadEntryImage(entry.value("blobPath").toString());
     if (kind == QLatin1String("text")) {
         const QString text = entry.value("textContent").toString();
-        if (!text.isEmpty()) return PinWindow::renderText(text);
+        if (!text.isEmpty()) return PinWindow::renderText(text, style);
     }
     return {};
 }
@@ -294,7 +317,7 @@ void CoreFacade::pinLatest() {
         emit toastMessage(QStringLiteral("没有可贴的条目"));
         return;
     }
-    const QImage image = imageForEntry(entry);
+    const QImage image = imageForEntry(entry, pinTextStyleFromSettings());
     if (image.isNull()) {
         emit toastMessage(QStringLiteral("该条目无可贴内容"));
         return;
@@ -308,7 +331,7 @@ void CoreFacade::pinEntry(const QString& id) {
         emit toastMessage(QStringLiteral("读取条目失败"));
         return;
     }
-    const QImage image = imageForEntry(resp.value("data").toMap());
+    const QImage image = imageForEntry(resp.value("data").toMap(), pinTextStyleFromSettings());
     if (image.isNull()) {
         emit toastMessage(QStringLiteral("该条目无可贴内容"));
         return;

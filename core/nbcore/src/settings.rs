@@ -40,6 +40,16 @@ pub struct Settings {
     /// 硬编码开启，本设置只是让它可配置，不改变老用户感知）。关闭后双击无动作，
     /// 关闭走工具条 ✕ 或 Esc。
     pub pin_doubleclick_close: bool,
+    /// 文本贴图的背景色（`#RRGGBB`）。文本条目贴图时渲染成位图，这里控制其底板配色。
+    pub pin_text_bg: String,
+    /// 文本贴图的文字色（`#RRGGBB`）。
+    pub pin_text_color: String,
+    /// 文本贴图的字号（像素，8 ~ 96）。
+    pub pin_text_font_size: i64,
+    /// 文本贴图的最大宽度（像素，120 ~ 2000；超出自动换行）。
+    pub pin_text_max_width: i64,
+    /// 文本贴图背景的不透明度（%，0 ~ 100）。
+    pub pin_text_bg_opacity: i64,
     /// 框选截图是否松开鼠标即自动确认（Phase 5 增强）：关闭时保留手柄微调 + Enter/双击确认。
     pub region_auto_confirm: bool,
     /// 框选确认后是否**跳过编辑器**：默认开启，确认即入库 + 写剪贴板（原 S2 直通行为），
@@ -294,6 +304,11 @@ impl Default for Settings {
             data_dir: String::new(),
             pin_default_opacity: 100,
             pin_doubleclick_close: true,
+            pin_text_bg: "#26272e".into(),
+            pin_text_color: "#dfe1e8".into(),
+            pin_text_font_size: 15,
+            pin_text_max_width: 520,
+            pin_text_bg_opacity: 92,
             region_auto_confirm: true,
             // 默认"松手即复制"：截图后立刻可粘贴，不经过编辑器
             region_skip_editor: true,
@@ -361,6 +376,30 @@ impl Settings {
             return Err(AppError::InvalidInput(
                 "贴图默认不透明度须在 30 ~ 100 之间".into(),
             ));
+        }
+        // 文本贴图样式：字号/最大宽度/背景不透明度范围 + 两个颜色须为 #RRGGBB
+        if !(8..=96).contains(&self.pin_text_font_size) {
+            return Err(AppError::InvalidInput("文本贴图字号须在 8 ~ 96 之间".into()));
+        }
+        if !(120..=2000).contains(&self.pin_text_max_width) {
+            return Err(AppError::InvalidInput(
+                "文本贴图最大宽度须在 120 ~ 2000 之间".into(),
+            ));
+        }
+        if !(0..=100).contains(&self.pin_text_bg_opacity) {
+            return Err(AppError::InvalidInput(
+                "文本贴图背景不透明度须在 0 ~ 100 之间".into(),
+            ));
+        }
+        for (label, value) in [
+            ("背景色", &self.pin_text_bg),
+            ("文字色", &self.pin_text_color),
+        ] {
+            if !is_hex_color(value) {
+                return Err(AppError::InvalidInput(format!(
+                    "文本贴图{label}须为 #RRGGBB 形式"
+                )));
+            }
         }
         // OCR：后端枚举 + 语言标签格式 + 放大倍数范围
         if !matches!(
@@ -600,6 +639,12 @@ fn is_valid_hotkey(combo: &str) -> bool {
         1 => is_function_key(parts[0]),
         _ => true,
     }
+}
+
+/// `#RRGGBB`（大小写不敏感）。
+fn is_hex_color(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 7 && bytes[0] == b'#' && bytes[1..].iter().all(u8::is_ascii_hexdigit)
 }
 
 /// `F1`~`F24`（大小写不敏感）。
@@ -1069,6 +1114,34 @@ mod tests {
         let mut settings = Settings::default();
         settings.hotkeys.capture_fullscreen = "  ".into();
         assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn validate_checks_text_pin_style() {
+        // 颜色必须是 #RRGGBB
+        let mut settings = Settings::default();
+        settings.pin_text_bg = "red".into();
+        assert!(settings.validate().is_err(), "非 #RRGGBB 背景色应被拒");
+
+        let mut settings = Settings::default();
+        settings.pin_text_color = "#12345".into();
+        assert!(settings.validate().is_err(), "位数不足的文字色应被拒");
+
+        // 数值范围
+        let mut settings = Settings::default();
+        settings.pin_text_font_size = 200;
+        assert!(settings.validate().is_err(), "字号越界应被拒");
+
+        let mut settings = Settings::default();
+        settings.pin_text_max_width = 50;
+        assert!(settings.validate().is_err(), "最大宽度越界应被拒");
+
+        let mut settings = Settings::default();
+        settings.pin_text_bg_opacity = 101;
+        assert!(settings.validate().is_err(), "背景不透明度越界应被拒");
+
+        // 默认值必须合法(否则老配置一律保存失败)
+        assert!(Settings::default().validate().is_ok());
     }
 
     #[test]

@@ -94,6 +94,11 @@ AppDrawer {
         return resp && resp.error ? resp.error.message : ""
     }
 
+    /// 仅用于色块预览:非法值不喂给 color 属性(否则每敲一个字符就刷一条绑定警告)。
+    function isHexColor(value) {
+        return /^#[0-9a-fA-F]{6}$/.test(value)
+    }
+
     function openAndLoad() {
         open()
         const resp = Core.call("get_settings")
@@ -110,6 +115,14 @@ AppDrawer {
         skipEditorCheck.checked = s.regionSkipEditor === true
         autoConfirmCheck.checked = s.regionAutoConfirm === true
         themeCombo.currentIndex = s.theme === "light" ? 1 : s.theme === "dark" ? 2 : 0
+
+        pinOpacity.value = s.pinDefaultOpacity > 0 ? s.pinDefaultOpacity : 100
+        pinDoubleClick.checked = s.pinDoubleclickClose === true
+        pinTextBg.text = s.pinTextBg || ""
+        pinTextColor.text = s.pinTextColor || ""
+        pinTextBgOpacity.value = s.pinTextBgOpacity >= 0 ? s.pinTextBgOpacity : 92
+        pinTextFontSize.value = s.pinTextFontSize > 0 ? s.pinTextFontSize : 15
+        pinTextMaxWidth.value = s.pinTextMaxWidth > 0 ? s.pinTextMaxWidth : 520
 
         const hk = s.hotkeys || {}
         hkToggleMain.value = hk.toggleMain || ""
@@ -161,6 +174,14 @@ AppDrawer {
         s.regionSkipEditor = skipEditorCheck.checked
         s.regionAutoConfirm = autoConfirmCheck.checked
         s.theme = ["system", "light", "dark"][themeCombo.currentIndex]
+
+        s.pinDefaultOpacity = pinOpacity.value
+        s.pinDoubleclickClose = pinDoubleClick.checked
+        s.pinTextBg = pinTextBg.text
+        s.pinTextColor = pinTextColor.text
+        s.pinTextBgOpacity = pinTextBgOpacity.value
+        s.pinTextFontSize = pinTextFontSize.value
+        s.pinTextMaxWidth = pinTextMaxWidth.value
 
         const hk = s.hotkeys || {}
         hk.toggleMain = hkToggleMain.value
@@ -272,6 +293,77 @@ AppDrawer {
                 model: ["跟随系统", "浅色", "深色"]
                 // 切换即生效(不必等"保存"),给用户即时反馈
                 onActivated: Core.applyTheme(["system", "light", "dark"][currentIndex])
+            }
+
+            // ---- 贴图 ----
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.topMargin: 10
+                implicitHeight: 1
+                color: Theme.border
+            }
+            Label { text: "贴图"; font.pixelSize: 14; font.bold: true; color: Theme.text }
+
+            Label { text: "默认不透明度(%)"; color: Theme.muted; font.pixelSize: 12 }
+            SpinBox {
+                id: pinOpacity
+                Layout.fillWidth: true
+                from: 30; to: 100; stepSize: 5
+            }
+            CheckBox {
+                id: pinDoubleClick
+                text: "双击关闭贴图窗口"
+            }
+
+            Label { text: "文本贴图 · 背景色(#RRGGBB)"; color: Theme.muted; font.pixelSize: 12 }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 6
+                Rectangle {
+                    implicitWidth: 22; implicitHeight: 22; radius: 4
+                    color: root.isHexColor(pinTextBg.text) ? pinTextBg.text : Theme.surface2
+                    border.color: Theme.border
+                    border.width: 1
+                }
+                TextField {
+                    id: pinTextBg
+                    Layout.fillWidth: true
+                    placeholderText: "#26272e"
+                }
+            }
+            Label { text: "文本贴图 · 文字色(#RRGGBB)"; color: Theme.muted; font.pixelSize: 12 }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 6
+                Rectangle {
+                    implicitWidth: 22; implicitHeight: 22; radius: 4
+                    color: root.isHexColor(pinTextColor.text) ? pinTextColor.text : Theme.surface2
+                    border.color: Theme.border
+                    border.width: 1
+                }
+                TextField {
+                    id: pinTextColor
+                    Layout.fillWidth: true
+                    placeholderText: "#dfe1e8"
+                }
+            }
+            Label { text: "文本贴图 · 背景不透明度(%)"; color: Theme.muted; font.pixelSize: 12 }
+            SpinBox {
+                id: pinTextBgOpacity
+                Layout.fillWidth: true
+                from: 0; to: 100; stepSize: 5
+            }
+            Label { text: "文本贴图 · 字号(像素)"; color: Theme.muted; font.pixelSize: 12 }
+            SpinBox {
+                id: pinTextFontSize
+                Layout.fillWidth: true
+                from: 8; to: 96
+            }
+            Label { text: "文本贴图 · 最大宽度(像素)"; color: Theme.muted; font.pixelSize: 12 }
+            SpinBox {
+                id: pinTextMaxWidth
+                Layout.fillWidth: true
+                from: 120; to: 2000; stepSize: 40
             }
 
             // ---- 快捷键 ----
