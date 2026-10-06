@@ -484,3 +484,39 @@ Ctrl+Shift+E
 **S4.1 编辑器**是 S4 唯一剩余的大项(QGraphicsScene:画笔/箭头/矩形/马赛克/文字 +
 QUndoStack + Ctrl+S 另存),完成后才能收尾 **4.2** 的 `regionAutoConfirm` /
 `regionSkipEditor` 两模式确认。
+
+---
+
+## 2026-10-06(四)主面板图片条目溢出修复
+
+### 现象
+
+列表里的截图条目会盖住下方条目(卡片高度与图片实际绘制高度不一致)。
+
+### 根因
+
+`EntryCard.qml` 的 `imageBody`:父项 `implicitHeight` 固定为
+`Math.min(image.sourceSize.height, 110)` = **110**,而内层 `Image` **没有设置宽高**,
+只给了 `sourceSize.height: 220` —— Image 按自身隐式尺寸画成 **220** 高,于是
+**溢出父项 110px** 盖住下方卡片。
+
+附带说明:`sourceSize` 是"请求加载的尺寸"而非加载后的实际尺寸,拿它推算显示高度本身
+就是错的(应为 `implicitWidth/implicitHeight`)。
+
+### 修复
+
+1. **卡片高度与图片显示高度同源**:按图片真实宽高比 × 可用宽度算出应占高度
+   (`image.implicitHeight / image.implicitWidth`,未就绪时占位 60),并以
+   `maxImageCardHeight`(300)封顶 —— 截图多为 16:9,不封顶会把列表撑成"一屏一条"。
+2. **`Image` 显式设 `width/height` 到父项尺寸**,配合 `PreserveAspectFit` 居中留白:
+   图片在结构上**不可能再超出卡片**。
+3. 顺带修同一渲染路径上的性能陷阱:`ClipEntryModel::imageUrlFor(id, thumb)` 原先
+   **为每一行发一次同步 `get_entry` FFI 查询**去取 blobPath(列表重绘时放大成 N 次
+   DB 查询)。改为静态 `imageUrlForBlob(blobPath, thumb)`,直接使用 `list_entries`
+   响应里已有的 blobPath,并兼容历史绝对路径。
+
+### 验证
+
+- `qmllint` 0 error;app 编译链接通过、无编译警告。
+- ⚠️ 需真实桌面确认:图片卡片高度随图片自适应、不再遮挡下方条目;不同宽高比的
+  截图(竖图/超宽图)高度表现是否合理。

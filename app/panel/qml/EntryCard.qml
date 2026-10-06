@@ -33,6 +33,9 @@ Rectangle {
         else Core.showToast("读取条目内容失败")
     }
 
+    /// 图片卡片高度上限:截图多为 16:9,不封顶会把列表撑成"一屏一条"。
+    readonly property int maxImageCardHeight: 300
+
     radius: 8
     color: ma.containsMouse || menu.opened ? Theme.surface2 : Theme.surface
     border.color: ma.containsMouse || menu.opened ? Theme.accent : Theme.border
@@ -153,17 +156,34 @@ Rectangle {
     Component {
         id: imageBody
         Item {
+            id: imageWrap
             width: parent ? parent.width : 0
+
+            // 按图片真实宽高比铺满卡片宽度得到应占高度。
+            // 注意用 implicitWidth/implicitHeight(加载后的实际尺寸),而不是
+            // sourceSize——后者是"请求加载的尺寸",拿它算高度会得到错误结果。
+            readonly property real fittedHeight:
+                (image.implicitWidth > 0 && image.implicitHeight > 0)
+                ? width * (image.implicitHeight / image.implicitWidth)
+                : 0
+
+            // 卡片高度 = 图片显示高度(未就绪时占位 60,加载完自动撑开)。
+            // 原先固定 110 而 Image 自身按隐式尺寸画到 220,图片会**溢出卡片**
+            // 盖住下方条目;这里让两者同源,并把 Image 显式约束到本项尺寸。
             implicitHeight: image.status === Image.Ready
-                            ? Math.min(image.sourceSize.height, 110) : 60
+                            ? Math.min(Math.max(fittedHeight, 40), root.maxImageCardHeight)
+                            : 60
+
             Image {
                 id: image
-                anchors.verticalCenter: parent.verticalCenter
+                // 显式宽高:确保图片永远不超出卡片(PreserveAspectFit 负责留白居中)
+                width: imageWrap.width
+                height: imageWrap.implicitHeight
                 source: root.imageUrl
                 fillMode: Image.PreserveAspectFit
                 cache: false
                 asynchronous: true
-                sourceSize.height: 220
+                // 缩略图最长边 320(入库时预生成),解码成本已受控,无需再设 sourceSize
             }
         }
     }

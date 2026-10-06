@@ -78,7 +78,9 @@ signals:
 private:
     void reload(int limit);            // 全量重拉(视图/搜索/刷新)
     void applyPage(const QVariantMap& resp, bool append);
-    QString imageUrlFor(const QString& id, bool thumb) const;
+    /// 由 blob 路径拼出 file:// URL(thumb=true 时取同名 .thumb.png 缩略图)。
+    /// 静态且只依赖入参:列表重绘时**不得**再走同步 FFI 查询。
+    static QString imageUrlForBlob(const QString& blobPath, bool thumb);
     static QString formatTime(qint64 ms);
     static QString formatSize(qint64 bytes);
 

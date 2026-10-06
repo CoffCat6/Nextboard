@@ -4,6 +4,7 @@
 #include "host/core_bridge.hpp"
 
 #include <QDateTime>
+#include <QFileInfo>
 #include <QUrl>
 #include <QDebug>
 
@@ -29,8 +30,8 @@ QVariant ClipEntryModel::data(const QModelIndex& index, int role) const {
         case IdRole: return r.id;
         case KindRole: return r.kind;
         case TextRole: return r.text;
-        case ImageUrlRole: return r.kind == QLatin1String("image") && !r.blobPath.isEmpty()
-                                 ? imageUrlFor(r.id, true) : QString();
+        case ImageUrlRole: return r.kind == QLatin1String("image")
+                                 ? imageUrlForBlob(r.blobPath, true) : QString();
         case PreviewRole: return r.preview;
         case TimeRole: return formatTime(r.lastUsedAt);
         case SizeRole: return formatSize(r.byteSize);
@@ -131,17 +132,22 @@ void ClipEntryModel::togglePin(const QString& id, bool pinned) {
     reload(m_limit);
 }
 
-QString ClipEntryModel::imageUrlFor(const QString& id, bool thumb) const {
-    const QVariantMap resp = CoreFacade::instance().call("get_entry", {{"id", id}});
-    const QString blob = resp.value("data").toMap().value("blobPath").toString();
-    if (blob.isEmpty()) return {};
-    QString abs = CoreBridge::blobsDirAbs() + '/' + blob;
+QString ClipEntryModel::imageUrlForBlob(const QString& blobPath, bool thumb) {
+    if (blobPath.isEmpty()) return {};
+    // blob 存的是相对 blobs 目录的路径;历史数据可能是绝对路径,两种都兼容。
+    // 早期实现为每行发一次同步 get_entry 去取 blobPath —— 列表重绘时会放大成
+    // N 次 DB 查询,是明显的性能陷阱;blobPath 已在 list_entries 响应里,直接用。
+    const QString abs = QFileInfo(blobPath).isAbsolute()
+                            ? blobPath
+                            : CoreBridge::blobsDirAbs() + '/' + blobPath;
+    QString url = abs;
     if (thumb) {
-        const int slash = abs.lastIndexOf('/');
-        const int dot = abs.lastIndexOf('.');
-        if (dot > slash) abs.insert(dot, ".thumb");
+        // xxx.png → xxx.thumb.png(与 core 的 thumbnail_path 同一规则)
+        const int slash = url.lastIndexOf('/');
+        const int dot = url.lastIndexOf('.');
+        if (dot > slash) url.insert(dot, ".thumb");
     }
-    return QUrl::fromLocalFile(abs).toString();
+    return QUrl::fromLocalFile(url).toString();
 }
 
 QString ClipEntryModel::formatTime(qint64 ms) {
