@@ -31,6 +31,7 @@
 #include <QUndoCommand>
 #include <QUndoStack>
 #include <QVBoxLayout>
+#include <QWheelEvent>
 
 #include <cmath>
 #include <functional>
@@ -103,12 +104,43 @@ public:
 
     void setPassthrough(bool on) { m_passthrough = on; }
 
+    /// 适配显示:重置为指定缩放,并清除"用户已手动缩放"标记。
+    void resetZoom(qreal zoom) {
+        m_userZoomed = false;
+        m_zoom = qBound(kMinZoom, zoom, kMaxZoom);
+        resetTransform();
+        scale(m_zoom, m_zoom);
+    }
+
+    bool userZoomed() const { return m_userZoomed; }
+
 signals:
     void canvasPressed(const QPointF& scenePos);
     void canvasMoved(const QPointF& scenePos);
     void canvasReleased(const QPointF& scenePos);
+    /// 视图尺寸变化(布局定型 / 窗口缩放)→ 窗口据此重新适配底图。
+    void canvasResized();
 
 protected:
+    void resizeEvent(QResizeEvent* e) override {
+        QGraphicsView::resizeEvent(e);
+        emit canvasResized();
+    }
+
+    void wheelEvent(QWheelEvent* e) override {
+        // 滚轮缩放(以光标为锚点):编辑小字/细节必需。
+        // 一旦手动缩放,就不再随窗口尺寸自动适配,免得把用户选好的比例重置掉。
+        const qreal factor = e->angleDelta().y() > 0 ? 1.15 : 1.0 / 1.15;
+        const qreal next = qBound(kMinZoom, m_zoom * factor, kMaxZoom);
+        if (!qFuzzyCompare(next, m_zoom)) {
+            m_userZoomed = true;
+            setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
+            scale(next / m_zoom, next / m_zoom);
+            m_zoom = next;
+        }
+        e->accept();
+    }
+
     void mousePressEvent(QMouseEvent* e) override {
         if (m_passthrough || e->button() != Qt::LeftButton) {
             QGraphicsView::mousePressEvent(e);
@@ -131,6 +163,11 @@ protected:
     }
 
 private:
+    static constexpr qreal kMinZoom = 0.05;
+    static constexpr qreal kMaxZoom = 8.0;
+
+    qreal m_zoom = 1.0;
+    bool m_userZoomed = false;
     bool m_passthrough = false;
 };
 
@@ -175,6 +212,9 @@ EditorWindow::EditorWindow(QImage base, QWidget* parent) : QWidget(parent), m_ba
     connect(canvas, &EditorCanvas::canvasPressed, this, &EditorWindow::onCanvasPressed);
     connect(canvas, &EditorCanvas::canvasMoved, this, &EditorWindow::onCanvasMoved);
     connect(canvas, &EditorCanvas::canvasReleased, this, &EditorWindow::onCanvasReleased);
+    // 关键:按**视图**尺寸变化来适配,而不是按窗口 resizeEvent —— 后者可能在布局
+    // 把视图撑开之前就触发,那时视口只有几十像素,算出来的缩放会让底图缩成一小点。
+    connect(canvas, &EditorCanvas::canvasResized, this, &EditorWindow::fitCanvas);
 
     buildToolBar();
 
@@ -194,7 +234,17 @@ EditorWindow::EditorWindow(QImage base, QWidget* parent) : QWidget(parent), m_ba
     }
 }
 
-EditorWindow::~EditorWindow() = default;
+EditorWindow::~EditorWindow() {
+    // ⚠️ 析构顺序是这里的关键:QObject 子对象按**创建顺序**析构,而 m_scene 创建早于
+    // m_undo —— 若放任不管,场景会先析构并删掉场景内的图元,随后 AddItemCommand
+    // 析构再 delete 一次 → **双重释放,进程崩溃**(只要画过标注,点「完成」或「取消」
+    // 都必崩)。这里显式按正确顺序拆:
+    //   ① 先断开视图与场景(视图析构晚于场景,否则会解引用已释放的场景);
+    //   ② 再销毁撤销栈(图元所有权在命令手里,此时场景仍在,removeItem 是安全的)。
+    if (m_view) m_view->setScene(nullptr);
+    delete m_undo;
+    m_undo = nullptr;
+}
 
 void EditorWindow::buildToolBar() {
     const auto addTool = [this](QToolBar* bar, const QString& text, bool checked,
@@ -284,15 +334,23 @@ void EditorWindow::setTool(EditorTool tool) {
 }
 
 void EditorWindow::fitCanvas() {
-    // resizeEvent 可能在构造早期(视图/场景尚未建好)就被触发,必须判空
     if (!m_scene || !m_view || !m_view->viewport()) return;
+    auto* canvas = qobject_cast<EditorCanvas*>(m_view);
+    // 用户手动滚轮缩放过就不再自动适配,免得把选好的比例重置掉
+    if (canvas && canvas->userZoomed()) return;
     const QRectF rect = m_scene->sceneRect();
     if (rect.isEmpty()) return;
-    m_view->resetTransform();
     const QSizeF viewport = m_view->viewport()->size();
-    const qreal scale = qMin(viewport.width() / rect.width(), viewport.height() / rect.height());
-    // 只在图比窗口大时缩小;小图保持 1:1,不放大以免虚化
-    if (scale < 1.0) m_view->scale(scale, scale);
+    // 视口尚未定型(布局没跑完)时**不要**计算:否则会按一个极小的视口把图缩到看不清
+    if (viewport.width() < 2 || viewport.height() < 2) return;
+    const qreal fit = qMin(viewport.width() / rect.width(), viewport.height() / rect.height());
+    const qreal zoom = qMin(fit, 1.0);   // 只在图比窗口大时缩小;小图保持 1:1 不放大
+    if (canvas) {
+        canvas->resetZoom(zoom);
+    } else {
+        m_view->resetTransform();
+        m_view->scale(zoom, zoom);
+    }
 }
 
 void EditorWindow::resizeEvent(QResizeEvent* e) {
