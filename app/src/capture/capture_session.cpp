@@ -99,6 +99,14 @@ bool skipEditor() {
     if (!resp.value("ok").toBool()) return true;   // 读不到设置时按默认(直通)
     return resp.value("data").toObject().value("regionSkipEditor").toBool(true);
 }
+
+/// regionAutoConfirm(默认 true):框选松开鼠标即确认;false 则选区保留、可用 8 向
+/// 手柄微调,需 Enter 或双击确认(第一代 F10 的两种确认方式)。
+bool autoConfirmRegion() {
+    const QJsonObject resp = CoreBridge::instance().call("get_settings");
+    if (!resp.value("ok").toBool()) return true;
+    return resp.value("data").toObject().value("regionAutoConfirm").toBool(true);
+}
 } // namespace
 
 void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured) {
@@ -136,7 +144,9 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured) {
         return;
     }
 
-    // 框选:每屏一块遮罩,各自拿本屏冻结底图
+    // 框选:每屏一块遮罩,各自拿本屏冻结底图。
+    // 确认方式由设置 regionAutoConfirm 决定,会话内只读一次。
+    const bool autoConfirm = autoConfirmRegion();
     for (int i = 0; i < screens.size(); ++i) {
         QScreen* screen = screens[i];
         const QImage frozen = core.captureMonitor(static_cast<unsigned>(i));
@@ -144,7 +154,7 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured) {
             qWarning() << "屏" << i << "捕获失败,跳过该屏遮罩";
             continue;
         }
-        auto* overlay = new OverlayWidget(frozen, i, screen);
+        auto* overlay = new OverlayWidget(frozen, i, screen, autoConfirm);
         overlay->setAttribute(Qt::WA_DeleteOnClose);
         g_overlays.append(overlay);
 
@@ -199,11 +209,21 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured) {
 
 // ---- OverlayWidget ----
 
-OverlayWidget::OverlayWidget(QImage frozen, int screenIndex, QScreen* screen, QWidget* parent)
+namespace {
+/// 手柄命中半径与绘制边长(逻辑像素)
+constexpr int kHandleGrab = 6;
+constexpr int kHandleSize = 6;
+/// 判定"选区可用"的最小边长(逻辑像素):太小多半是误点
+constexpr int kMinSelection = 4;
+} // namespace
+
+OverlayWidget::OverlayWidget(QImage frozen, int screenIndex, QScreen* screen, bool autoConfirm,
+                             QWidget* parent)
     : QWidget(parent, Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool),
       m_frozen(std::move(frozen)),
       m_screenIndex(screenIndex),
-      m_screen(screen) {
+      m_screen(screen),
+      m_autoConfirm(autoConfirm) {
     setCursor(Qt::CrossCursor);
     setMouseTracking(true);
 }
@@ -218,6 +238,86 @@ QRect OverlayWidget::selectionPhysical() const {
     const qreal scale = dpr();
     const QRect sel = m_selection.normalized();
     return QRectF(QPointF(sel.topLeft()) * scale, QSizeF(sel.size()) * scale).toAlignedRect();
+}
+
+bool OverlayWidget::selectionUsable() const {
+    const QRect sel = m_selection.normalized();
+    return !sel.isNull() && sel.width() >= kMinSelection && sel.height() >= kMinSelection;
+}
+
+QList<QPoint> OverlayWidget::handlePoints(const QRect& rect) const {
+    const int cx = rect.center().x();
+    const int cy = rect.center().y();
+    return {
+        rect.topLeft(),     QPoint(cx, rect.top()),    rect.topRight(),
+        QPoint(rect.right(), cy),                      rect.bottomRight(),
+        QPoint(cx, rect.bottom()),                     rect.bottomLeft(),
+        QPoint(rect.left(), cy),
+    };
+}
+
+OverlayWidget::Handle OverlayWidget::handleAt(const QPoint& pos) const {
+    if (m_selection.isNull()) return Handle::None;
+    const QRect r = m_selection.normalized();
+    // 先看是否贴近某条边/某个角(留 kHandleGrab 的容差)
+    const bool nearLeft = qAbs(pos.x() - r.left()) <= kHandleGrab;
+    const bool nearRight = qAbs(pos.x() - r.right()) <= kHandleGrab;
+    const bool nearTop = qAbs(pos.y() - r.top()) <= kHandleGrab;
+    const bool nearBottom = qAbs(pos.y() - r.bottom()) <= kHandleGrab;
+    const bool withinX = pos.x() >= r.left() - kHandleGrab && pos.x() <= r.right() + kHandleGrab;
+    const bool withinY = pos.y() >= r.top() - kHandleGrab && pos.y() <= r.bottom() + kHandleGrab;
+    if (!withinX || !withinY) return Handle::None;
+
+    if (nearLeft && nearTop) return Handle::TopLeft;
+    if (nearRight && nearTop) return Handle::TopRight;
+    if (nearLeft && nearBottom) return Handle::BottomLeft;
+    if (nearRight && nearBottom) return Handle::BottomRight;
+    if (nearTop) return Handle::Top;
+    if (nearBottom) return Handle::Bottom;
+    if (nearLeft) return Handle::Left;
+    if (nearRight) return Handle::Right;
+    if (r.contains(pos)) return Handle::Inside;   // 内部 = 整体拖动
+    return Handle::None;
+}
+
+Qt::CursorShape OverlayWidget::cursorForHandle(Handle handle) {
+    switch (handle) {
+        case Handle::TopLeft:
+        case Handle::BottomRight: return Qt::SizeFDiagCursor;
+        case Handle::TopRight:
+        case Handle::BottomLeft: return Qt::SizeBDiagCursor;
+        case Handle::Top:
+        case Handle::Bottom: return Qt::SizeVerCursor;
+        case Handle::Left:
+        case Handle::Right: return Qt::SizeHorCursor;
+        case Handle::Inside: return Qt::SizeAllCursor;
+        case Handle::None: break;
+    }
+    return Qt::CrossCursor;
+}
+
+void OverlayWidget::applyAdjustment(const QPoint& pos) {
+    const QPoint delta = pos - m_adjustStartPos;
+    QRect r = m_adjustStartRect;
+    if (m_activeHandle == Handle::Inside) {
+        r.translate(delta);
+    } else {
+        if (m_activeHandle == Handle::TopLeft || m_activeHandle == Handle::Left ||
+            m_activeHandle == Handle::BottomLeft)
+            r.setLeft(r.left() + delta.x());
+        if (m_activeHandle == Handle::TopRight || m_activeHandle == Handle::Right ||
+            m_activeHandle == Handle::BottomRight)
+            r.setRight(r.right() + delta.x());
+        if (m_activeHandle == Handle::TopLeft || m_activeHandle == Handle::Top ||
+            m_activeHandle == Handle::TopRight)
+            r.setTop(r.top() + delta.y());
+        if (m_activeHandle == Handle::BottomLeft || m_activeHandle == Handle::Bottom ||
+            m_activeHandle == Handle::BottomRight)
+            r.setBottom(r.bottom() + delta.y());
+        r = r.normalized();
+    }
+    // 夹在窗口内:遮罩就是整屏,拖到屏外没有意义
+    m_selection = r.intersected(rect());
 }
 
 void OverlayWidget::paintEvent(QPaintEvent*) {
@@ -251,6 +351,16 @@ void OverlayWidget::paintEvent(QPaintEvent*) {
         painter.setBrush(Qt::NoBrush);
         painter.drawRect(sel);
 
+        // 微调模式:画 8 个手柄(提示可拖动调整)
+        if (!m_autoConfirm && selectionUsable()) {
+            painter.setPen(QPen(QColor(80, 160, 255), 1));
+            painter.setBrush(QColor(255, 255, 255));
+            for (const QPoint& point : handlePoints(sel)) {
+                painter.drawRect(QRect(point.x() - kHandleSize / 2,
+                                       point.y() - kHandleSize / 2, kHandleSize, kHandleSize));
+            }
+        }
+
         // 尺寸提示按**物理像素**显示,即最终截出来的分辨率
         painter.setPen(QColor(255, 255, 255));
         painter.drawText(QPoint(sel.x(), sel.y() - 6),
@@ -258,41 +368,89 @@ void OverlayWidget::paintEvent(QPaintEvent*) {
     } else if (!m_selecting) {
         painter.setPen(QColor(255, 255, 255, 200));
         painter.drawText(rect(), Qt::AlignHCenter | Qt::AlignTop,
-                         QStringLiteral("拖拽框选,Esc 取消(屏 %1)").arg(m_screenIndex));
+                         m_autoConfirm
+                             ? QStringLiteral("拖拽框选,Esc 取消(屏 %1)").arg(m_screenIndex)
+                             : QStringLiteral("拖拽框选;可拖手柄微调,Enter 或双击确认,Esc 取消(屏 %1)")
+                                   .arg(m_screenIndex));
     }
 }
 
 void OverlayWidget::mousePressEvent(QMouseEvent* e) {
-    if (e->button() == Qt::LeftButton) {
-        m_origin = e->pos();
-        m_selection = QRect(m_origin, QSize(0, 0));
-        m_selecting = true;
-        update();
+    if (e->button() != Qt::LeftButton) return;
+
+    // 微调模式:已有选区时,按在手柄/内部上就进入调整,而不是重新框选
+    if (!m_autoConfirm && !m_selection.isNull()) {
+        const Handle handle = handleAt(e->pos());
+        if (handle != Handle::None) {
+            m_adjusting = true;
+            m_activeHandle = handle;
+            m_adjustStartRect = m_selection.normalized();
+            m_adjustStartPos = e->pos();
+            return;
+        }
     }
+
+    // 起新选区
+    m_origin = e->pos();
+    m_selection = QRect(m_origin, QSize(0, 0));
+    m_selecting = true;
+    update();
 }
 
 void OverlayWidget::mouseMoveEvent(QMouseEvent* e) {
     if (m_selecting) {
         m_selection = QRect(m_origin, e->pos()).normalized();
         update();
+        return;
+    }
+    if (m_adjusting) {
+        applyAdjustment(e->pos());
+        update();
+        return;
+    }
+    // 悬停时给出光标反馈(仅微调模式有意义)
+    if (!m_autoConfirm && !m_selection.isNull()) {
+        setCursor(cursorForHandle(handleAt(e->pos())));
     }
 }
 
 void OverlayWidget::mouseReleaseEvent(QMouseEvent* e) {
-    if (e->button() == Qt::LeftButton && m_selecting) {
-        m_selecting = false;
-        m_selection = QRect(m_origin, e->pos()).normalized();
-        if (m_selection.width() < 4 || m_selection.height() < 4) {
-            emit cancelled();
-            return;
-        }
-        emit regionConfirmed(selectionPhysical());
+    if (e->button() != Qt::LeftButton) return;
+
+    if (m_adjusting) {
+        m_adjusting = false;
+        m_activeHandle = Handle::None;
+        return;   // 微调结束不触发确认
     }
+    if (!m_selecting) return;
+
+    m_selecting = false;
+    m_selection = QRect(m_origin, e->pos()).normalized();
+    if (!selectionUsable()) {
+        // 误点(没拖出有效范围):清掉选区,等用户重新框
+        m_selection = QRect();
+        update();
+        if (m_autoConfirm) emit cancelled();   // 直通模式保持"点空即取消"的原有手感
+        return;
+    }
+    // 直通模式:松开即确认;微调模式:保留选区,等 Enter/双击
+    if (m_autoConfirm) emit regionConfirmed(selectionPhysical());
+    update();
+}
+
+void OverlayWidget::mouseDoubleClickEvent(QMouseEvent* e) {
+    if (m_autoConfirm || e->button() != Qt::LeftButton) return;
+    if (!selectionUsable()) return;
+    emit regionConfirmed(selectionPhysical());
 }
 
 void OverlayWidget::keyPressEvent(QKeyEvent* e) {
     if (e->key() == Qt::Key_Escape) {
         emit cancelled();
+        return;
+    }
+    if (e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter) {
+        if (!m_autoConfirm && selectionUsable()) emit regionConfirmed(selectionPhysical());
     }
 }
 

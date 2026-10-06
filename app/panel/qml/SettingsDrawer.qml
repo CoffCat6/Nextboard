@@ -34,6 +34,7 @@ AppDrawer {
         monitorCheck.checked = s.monitorEnabled === true
         ocrCheck.checked = s.ocrEnabled === true
         skipEditorCheck.checked = s.regionSkipEditor === true
+        autoConfirmCheck.checked = s.regionAutoConfirm === true
         themeCombo.currentIndex = s.theme === "light" ? 1 : s.theme === "dark" ? 2 : 0
 
         const index = providers.indexOf(s.translateProvider)
@@ -76,6 +77,7 @@ AppDrawer {
         s.monitorEnabled = monitorCheck.checked
         s.ocrEnabled = ocrCheck.checked
         s.regionSkipEditor = skipEditorCheck.checked
+        s.regionAutoConfirm = autoConfirmCheck.checked
         s.theme = ["system", "light", "dark"][themeCombo.currentIndex]
 
         s.translateProvider = provider
@@ -164,6 +166,11 @@ AppDrawer {
             CheckBox {
                 id: skipEditorCheck
                 text: "截图后直接入库(跳过编辑器)"
+            }
+            // 取消勾选后,选区保留并可拖 8 向手柄微调,Enter 或双击才确认
+            CheckBox {
+                id: autoConfirmCheck
+                text: "框选后松开鼠标即确认"
             }
 
             Label { text: "主题"; color: Theme.muted; font.pixelSize: 12 }
