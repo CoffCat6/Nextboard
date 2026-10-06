@@ -1,6 +1,8 @@
 #include "pin_window.hpp"
 
 #include <QCursor>
+#include <QFont>
+#include <QFontMetrics>
 #include <QGuiApplication>
 #include <QMouseEvent>
 #include <QPainter>
@@ -8,6 +10,42 @@
 #include <QWheelEvent>
 
 namespace nb {
+
+namespace {
+// 文本贴图的最大宽度与内边距(逻辑像素)
+constexpr int kTextMaxWidth = 520;
+constexpr int kTextPadding = 14;
+constexpr int kTextMinWidth = 160;
+} // namespace
+
+QImage PinWindow::renderText(const QString& text) {
+    QFont font(QStringLiteral("Microsoft YaHei"));
+    font.setPixelSize(15);
+    const QFontMetrics metrics(font);
+    // 先按最大宽度做换行排版测量,再定画布尺寸
+    const QRect bounds = metrics.boundingRect(
+        QRect(0, 0, kTextMaxWidth - 2 * kTextPadding, 10000),
+        Qt::TextWordWrap | Qt::AlignLeft, text);
+    const int width = qBound(kTextMinWidth, bounds.width() + 2 * kTextPadding, kTextMaxWidth);
+    const int height = bounds.height() + 2 * kTextPadding;
+
+    QImage image(width, height, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::transparent);
+    QPainter painter(&image);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setRenderHint(QPainter::TextAntialiasing);
+    // 与主面板 Theme 同色的圆角底板,便于在任意背景上阅读
+    painter.setBrush(QColor(38, 39, 46, 235));
+    painter.setPen(QPen(QColor(79, 140, 255), 1));
+    painter.drawRoundedRect(QRectF(0.5, 0.5, width - 1.0, height - 1.0), 8, 8);
+    painter.setPen(QColor(223, 225, 232));
+    painter.setFont(font);
+    painter.drawText(QRect(kTextPadding, kTextPadding,
+                           width - 2 * kTextPadding, height - 2 * kTextPadding),
+                     Qt::TextWordWrap | Qt::AlignLeft, text);
+    painter.end();
+    return image;
+}
 
 PinWindow::PinWindow(QImage image, QWidget* parent)
     : QWidget(parent,

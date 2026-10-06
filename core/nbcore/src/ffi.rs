@@ -338,6 +338,15 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
                 entry::get(&db, &id)?.ok_or_else(|| AppError::InvalidInput("条目不存在".into()))?,
             )?)
         }
+        // 一键贴图(pinLatest)取数:图片优先、无图回退最近文本;空库返回 null。
+        "latest_pinnable" => {
+            let core = crate::core::Core::get()?;
+            let db = core.db.lock()?;
+            Ok(match entry::latest_pinnable(&db)? {
+                Some(found) => serde_json::to_value(found)?,
+                None => serde_json::Value::Null,
+            })
+        }
         "delete_entry" => {
             let core = crate::core::Core::get()?;
             let id = str_req(req, "id")?;

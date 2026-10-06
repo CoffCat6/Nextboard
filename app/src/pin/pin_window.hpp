@@ -11,6 +11,10 @@ public:
     /// image:要贴出的图;logicalSize:逻辑尺寸(物理像素图在 2x 屏自动减半)。
     PinWindow(QImage image, QWidget* parent = nullptr);
 
+    /// 文本条目贴图:把文本渲染成位图,复用同一套窗口与交互。
+    /// 第一代允许"无图时贴最近文本内容",这里是它的渲染实现。
+    static QImage renderText(const QString& text);
+
 protected:
     void paintEvent(QPaintEvent* e) override;
     void mousePressEvent(QMouseEvent* e) override;

@@ -2,6 +2,7 @@
 
 #include <QDateTime>
 #include <QDir>
+#include <QFileInfo>
 #include <QImage>
 #include <QStandardPaths>
 
@@ -128,6 +129,43 @@ QImage CoreBridge::captureMonitor(unsigned index) {
     QImage copy = image.copy();
     m_freeBuffer(rgba, static_cast<unsigned long long>(w) * h * 4);
     return copy;
+}
+
+QImage CoreBridge::captureCrop(const QImage& screen, const QRect& rect) {
+    if (!m_captureCrop || !m_freeBuffer || screen.isNull()) return {};
+    if (rect.width() <= 0 || rect.height() <= 0) return {};
+    // 核心按 RGBA8888 紧凑排布读取:先统一格式再取裸指针
+    const QImage src = screen.convertToFormat(QImage::Format_RGBA8888);
+    unsigned char* rgba = nullptr;
+    unsigned w = 0, h = 0;
+    const int rc = m_captureCrop(
+        src.constBits(),
+        static_cast<unsigned long long>(src.sizeInBytes()),
+        static_cast<unsigned>(src.width()), static_cast<unsigned>(src.height()),
+        rect.x(), rect.y(),
+        static_cast<unsigned>(rect.width()), static_cast<unsigned>(rect.height()),
+        &rgba, &w, &h);
+    if (rc != 0 || !rgba || w == 0 || h == 0) {
+        if (rgba) m_freeBuffer(rgba, 0);
+        return {};
+    }
+    QImage out(rgba, static_cast<int>(w), static_cast<int>(h), QImage::Format_RGBA8888);
+    QImage copy = out.copy();
+    m_freeBuffer(rgba, static_cast<unsigned long long>(w) * h * 4);
+    return copy;
+}
+
+QImage CoreBridge::loadEntryImage(const QString& blobPath) {
+    if (blobPath.isEmpty()) return {};
+    // blob 存的是相对 blobs 目录的路径;历史数据可能是绝对路径,两种都兼容
+    const QString abs = QFileInfo(blobPath).isRelative() ? blobsDirAbs() + '/' + blobPath
+                                                         : blobPath;
+    QImage image;
+    if (!image.load(abs)) {
+        qWarning() << "加载条目图片失败:" << abs;
+        return {};
+    }
+    return image;
 }
 
 } // namespace nb

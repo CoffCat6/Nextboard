@@ -18,15 +18,42 @@ namespace {
 // 忙碌标记:防热键重入(第一代 capture/mod.rs CAPTURE_BUSY 语义)
 bool g_busy = false;
 
-QRect toGlobal(const QScreen* screen, const QRect& local) {
-    return local.translated(screen->geometry().topLeft());
-}
-
 QString quickPngBase64(const QImage& image) {
     QBuffer buffer;
     buffer.open(QIODevice::WriteOnly);
     image.save(&buffer, "PNG");
     return QString::fromLatin1(buffer.data().toBase64());
+}
+
+/// 入库 + 写回系统剪贴板。
+///
+/// 顺序遵循第一代 docs/phase5.md §3.6:**先入库、后写剪贴板**——剪贴板监听线程
+/// 读到同一张图时按 hash 命中去重,只 touch 不新建,不会产生重复条目。
+void ingestAndCopyToClipboard(const QImage& image) {
+    CoreBridge& core = CoreBridge::instance();
+    const QJsonObject resp = core.call("ingest_capture_png", {
+        {"png_base64", quickPngBase64(image)},
+        {"source", "capture"},
+    });
+    if (!resp.value("ok").toBool()) {
+        qWarning() << "截图入库失败:"
+                   << resp.value("error").toObject().value("message").toString();
+        return;
+    }
+    // entry 为 null = 超过图片大小上限被忽略(不落盘,自然也不写剪贴板)
+    const QString id =
+        resp.value("data").toObject().value("entry").toObject().value("id").toString();
+    if (id.isEmpty()) {
+        qInfo() << "截图超过大小上限,已忽略";
+        return;
+    }
+    const QJsonObject copied = core.call("copy_entry", {{"id", id}});
+    if (!copied.value("ok").toBool()) {
+        qWarning() << "截图写剪贴板失败:"
+                   << copied.value("error").toObject().value("message").toString();
+        return;
+    }
+    qInfo() << "截图已入库并写入剪贴板:" << image.width() << "x" << image.height();
 }
 } // namespace
 
@@ -52,18 +79,13 @@ void startCaptureSession(CaptureIntent intent) {
 
     CoreBridge& core = CoreBridge::instance();
     if (intent == CaptureIntent::Fullscreen) {
-        // 直通:捕获 → 入库(source=capture)→ 写剪贴板 → 完成
+        // 直通:捕获 → 入库(source=capture)→ 写剪贴板
         const QImage shot = core.captureMonitor(static_cast<unsigned>(cursorScreen));
         if (shot.isNull()) {
             qWarning() << "全屏捕获失败";
             return;
         }
-        // v1 简化:PNG base64 走 ingest_capture_png(FFI 方法表);像素级通道 S3 优化
-        QJsonObject resp = core.call("ingest_capture_png", {
-            {"png_base64", quickPngBase64(shot)},
-            {"source", "capture"},
-        });
-        qInfo() << "全屏截图入库:" << (resp.value("ok").toBool() ? "成功" : "失败");
+        ingestAndCopyToClipboard(shot);
         return;
     }
 
@@ -72,12 +94,19 @@ void startCaptureSession(CaptureIntent intent) {
         const QImage frozen = core.captureMonitor(static_cast<unsigned>(i));
         auto* overlay = new OverlayWidget(frozen, i);
         overlay->setAttribute(Qt::WA_DeleteOnClose);
+        // 冻结底图已在宿主侧(QImage 隐式共享,捕获代价为 0):
+        // 裁剪仍走核心 RGBA 通道 nb_capture_crop,保持"有逻辑的归 Rust"
         QObject::connect(overlay, &OverlayWidget::regionConfirmed, overlay,
-                [i](const QRect& globalRect) {
-            // S3 接裁剪入库(nb_capture_crop + ingest);PoC 先确认坐标
-            qInfo() << "选区确认(屏" << i << "):" << globalRect;
+                [frozen](const QRect& physicalRect) {
+            const QImage cropped = CoreBridge::instance().captureCrop(frozen, physicalRect);
+            if (cropped.isNull()) {
+                qWarning() << "选区裁剪失败(空选区或越界)";
+                return;
+            }
+            ingestAndCopyToClipboard(cropped);
         });
-        QObject::connect(overlay, &OverlayWidget::cancelled, overlay, [] { qInfo() << "截图取消"; });
+        QObject::connect(overlay, &OverlayWidget::cancelled, overlay,
+                         [] { qInfo() << "截图取消"; });
         overlay->showFullScreen();
     }
 }
@@ -148,8 +177,13 @@ void OverlayWidget::mouseReleaseEvent(QMouseEvent* e) {
             close();
             return;
         }
-        const QScreen* screen = screenForWidget();
-        emit regionConfirmed(toGlobal(screen, m_selection));
+        // 选区是窗口局部**逻辑**坐标,而冻结底图是**物理**像素:
+        // 按本窗口 DPR 换算后再交给核心裁剪(否则 2x 屏上会裁错区域)。
+        const qreal dpr = devicePixelRatioF();
+        const QRect physical =
+            QRectF(QPointF(m_selection.topLeft()) * dpr, QSizeF(m_selection.size()) * dpr)
+                .toAlignedRect();
+        emit regionConfirmed(physical);
         close();
     }
 }
@@ -159,11 +193,6 @@ void OverlayWidget::keyPressEvent(QKeyEvent* e) {
         emit cancelled();
         close();
     }
-}
-
-const QScreen* OverlayWidget::screenForWidget() const {
-    const QScreen* screen = QGuiApplication::screenAt(geometry().center());
-    return screen ? screen : QGuiApplication::primaryScreen();
 }
 
 } // namespace nb

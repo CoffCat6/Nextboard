@@ -8,6 +8,8 @@
 #include <QString>
 #include <QJsonObject>
 #include <QJsonDocument>
+#include <QImage>
+#include <QRect>
 
 using NbInit = int(__cdecl*)(const char*);
 using NbCallFn = int(__cdecl*)(const char*, const char*, char**);
@@ -47,6 +49,13 @@ public:
 
     /// RGBA 通道:捕获显示器整屏。失败返回空图。
     QImage captureMonitor(unsigned index);
+
+    /// RGBA 通道:从整屏裁剪子区域(框选确认)。`rect` 为**物理像素**且相对该屏左上角
+    /// (越界部分由核心钳制)。失败返回空图。
+    QImage captureCrop(const QImage& screen, const QRect& rect);
+
+    /// 按条目的 blob 路径加载图片(相对 blobs 目录,兼容历史绝对路径)。失败返回空图。
+    static QImage loadEntryImage(const QString& blobPath);
 
     /// blobs 目录绝对路径(图片条目磁盘位置;主面板经 file:// 加载)。
     static QString blobsDirAbs();

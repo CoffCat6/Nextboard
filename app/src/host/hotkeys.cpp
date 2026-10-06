@@ -2,9 +2,12 @@
 #include "panel/panel_window.hpp"
 #include "host/core_bridge.hpp"
 #include "capture/capture_session.hpp"
+#include "pin/pin_window.hpp"
 
 #include <QAbstractNativeEventFilter>
 #include <QGuiApplication>
+#include <QImage>
+#include <QTimer>
 #include <QDebug>
 
 namespace nb {
@@ -31,6 +34,46 @@ bool parseComboImpl(const QString& combo, UINT* modifiers, UINT* vk) {
     *modifiers = mods;
     *vk = key;
     return true;
+}
+
+/// 截图前收起主面板并等窗口真正消失,否则面板会被拍进画面。
+void hidePanelThenCapture(PanelWindow& panel, CaptureIntent intent) {
+    panel.hide();
+    QTimer::singleShot(150, [intent] { startCaptureSession(intent); });
+}
+
+/// 一键贴图:取最近可贴条目(图片优先,无图回退最近文本)→ 建置顶贴图窗口。
+/// 对应第一代 F13;取数走 core 的 latest_pinnable(与第一代同口径)。
+void pinLatest() {
+    CoreBridge& core = CoreBridge::instance();
+    const QJsonObject resp = core.call("latest_pinnable");
+    if (!resp.value("ok").toBool()) {
+        qWarning() << "pinLatest 取条目失败:"
+                   << resp.value("error").toObject().value("message").toString();
+        return;
+    }
+    // 空库时 data 为 null → toObject() 得到空对象
+    const QJsonObject entry = resp.value("data").toObject();
+    if (entry.isEmpty()) {
+        qInfo() << "pinLatest:没有可贴的条目";
+        return;
+    }
+    const QString kind = entry.value("kind").toString();
+    QImage image;
+    if (kind == QLatin1String("image")) {
+        image = CoreBridge::loadEntryImage(entry.value("blobPath").toString());
+    } else if (kind == QLatin1String("text")) {
+        const QString text = entry.value("textContent").toString();
+        if (!text.isEmpty()) image = PinWindow::renderText(text);
+    }
+    if (image.isNull()) {
+        qWarning() << "pinLatest:条目无可贴内容, kind =" << kind;
+        return;
+    }
+    auto* pin = new PinWindow(image);
+    pin->setAttribute(Qt::WA_DeleteOnClose);
+    pin->show();
+    qInfo() << "pinLatest:已贴出" << kind << image.size();
 }
 } // namespace
 
@@ -69,14 +112,13 @@ Hotkeys::Hotkeys(PanelWindow& panel, CoreBridge& core, QObject* parent)
                 m_panel.isVisible() ? m_panel.hide() : m_panel.showAtCursor();
                 break;
             case Action::CaptureRegion:
-                nb::startCaptureSession(nb::CaptureIntent::Region);
+                hidePanelThenCapture(m_panel, nb::CaptureIntent::Region);
                 break;
             case Action::CaptureFullscreen:
-                nb::startCaptureSession(nb::CaptureIntent::Fullscreen);
+                hidePanelThenCapture(m_panel, nb::CaptureIntent::Fullscreen);
                 break;
             case Action::PinLatest:
-                // S2.5 PoC:贴最近图片条目;完整逻辑在 S3 数据联通后补
-                qInfo() << "pinLatest (PoC stub)";
+                pinLatest();
                 break;
             default:
                 qInfo() << "hotkey action" << static_cast<int>(m_registered.value(id));

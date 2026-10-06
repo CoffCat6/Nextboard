@@ -19,8 +19,8 @@ public:
     OverlayWidget(QImage frozen, int screenIndex, QWidget* parent = nullptr);
 
 signals:
-    /// 选区确认(全局物理坐标 + 尺寸)。
-    void regionConfirmed(const QRect& globalRect);
+    /// 选区确认:**本屏物理像素**坐标,相对该屏左上角(供 nb_capture_crop 使用)。
+    void regionConfirmed(const QRect& physicalRect);
     void cancelled();
 
 protected:
@@ -33,10 +33,9 @@ protected:
 private:
     QImage m_frozen;     // 该屏冻结底图(物理像素)
     int m_screenIndex;
-    QPoint m_origin;     // 选区起点(本窗口局部坐标)
-    QRect m_selection;   // 当前选区(局部坐标)
+    QPoint m_origin;     // 选区起点(本窗口局部逻辑坐标)
+    QRect m_selection;   // 当前选区(局部逻辑坐标)
     bool m_selecting = false;
-    const QScreen* screenForWidget() const;
 };
 
 } // namespace nb

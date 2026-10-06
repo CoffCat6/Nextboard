@@ -337,3 +337,52 @@ S3 收尾(滚动转发/右键菜单/loadMore)→ S4 编辑器与截图闭环。
 ### 下一步
 
 S4:编辑器(QGraphicsScene)+ 截图/贴图闭环(4.1–4.5)。
+
+---
+
+## 2026-10-06(四)S4 起步:截图与贴图闭环
+
+### 起点诊断
+
+| 环节 | 状态 |
+| --- | --- |
+| 框选确认 | ❌ **空壳**:`OverlayWidget::regionConfirmed` 只 `qInfo()` 打印选区矩形,未裁剪、未入库、未写剪贴板 |
+| 全屏截图 | ⚠️ 能入库(`ingest_capture_png`),但**不写剪贴板**——用户截完无法直接粘贴 |
+| 一键贴图 | ❌ `hotkeys.cpp` 的 `PinLatest` 是 `qInfo() << "pinLatest (PoC stub)"` |
+| `nb_capture_crop` | ⚠️ `CoreBridge` 已解析该导出却**从未调用**(成员 `m_captureCrop` 悬空) |
+| `latest_pinnable` | ⚠️ core 的 `store::entry::latest_pinnable` 有实现与单测,但 **FFI 未暴露** |
+
+### 本轮实现(4.2 直通路径 + 4.3 全屏与一键贴图)
+
+1. **core**:`ffi.rs` 增加 `latest_pinnable` 方法(无参,返回条目 JSON;空库为 `null`)。
+2. **CoreBridge**:新增 `captureCrop(screen, rect)`(接通 `nb_capture_crop`,RGBA8888 紧凑排布)
+   与 `loadEntryImage(blobPath)`(兼容相对/历史绝对路径)。
+3. **框选闭环**(`capture_session.cpp`):
+   - `regionConfirmed` 语义由"全局逻辑坐标"改为**本屏物理像素坐标**——冻结底图是物理像素,
+     而选区是窗口局部逻辑坐标,2x 屏上不换算会裁错区域;换算在遮罩侧按 `devicePixelRatioF()` 完成。
+   - 确认后:`captureCrop` 裁剪 → `ingest_capture_png(source=capture)` → `copy_entry` 写剪贴板。
+   - 顺带删除已无用的 `toGlobal` / `screenForWidget`。
+4. **全屏直通**:捕获 → 入库 → 写剪贴板(补齐原先缺失的剪贴板环节)。
+5. **一键贴图**:`hotkeys.cpp` 实现 `pinLatest()` —— `latest_pinnable` 取条目,图片读 blob、
+   文本渲染成图(`PinWindow::renderText`,圆角底板 + 自动换行),建置顶贴图窗口。
+6. **截图前收面板**:热键触发先 `panel.hide()`,延时 150ms 再截,否则面板会被拍进画面。
+
+### 关键约定
+
+- **入库先于写剪贴板**(第一代 `docs/phase5.md` §3.6):写剪贴板后监听线程会读到同一张图,
+  按 blake3 hash 命中去重只 `touch` 不新建,因此不会产生重复条目。
+- 裁剪仍走**核心 RGBA 通道**(架构 §4.1 契约),坐标换算在宿主侧——核心只认"物理像素 + 相对屏左上角"。
+- 图片超过 `maxImageMb` 时 `ingest_capture_png` 返回 `entry=null`,此时**不写剪贴板**(与入库一致)。
+
+### 验证与限制
+
+- core 单测:`capture::` 8 项、`store::` 26 项全绿;`nbcore.dll` 重建。
+- app:编译链接通过(`[1/1] Linking`),无编译警告。
+- ⚠️ **沙箱无法启动 GUI**,框选/贴图/剪贴板的运行时行为**须在真实桌面验证**。
+- ⚠️ 构建时若 `nextboard.exe` 被残留进程占用会报 `LNK1104 无法打开文件 nextboard.exe`;
+  沙箱内 `taskkill` 被拒,用 PowerShell 的 `Stop-Process -Force` 可清掉。
+
+### 下一步
+
+S4.1 编辑器(QGraphicsScene:画笔/箭头/矩形/马赛克/文字 + QUndoStack + Ctrl+S)、
+S4.4 截图翻译/取字闭环(`captureTranslate` 热键目前落到 `default` 分支,未实现)。
