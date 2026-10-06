@@ -60,6 +60,7 @@ set(__QT_DEPLOY_QT_DEBUG_POSTFIX "d")
 set(__qt_deploy_support_files
     "D:/3project/rust/Nextboard/app/build/.qt/QtDeployTargets.cmake"
     "D:/Qt/6.9.0/msvc2022_64/lib/cmake/Qt6Core/Qt6CoreDeploySupport.cmake"
+    "D:/Qt/6.9.0/msvc2022_64/lib/cmake/Qt6Qml/Qt6QmlDeploySupport.cmake"
 )
 foreach(__qt_deploy_support_file IN LISTS __qt_deploy_support_files)
     include("${__qt_deploy_support_file}")

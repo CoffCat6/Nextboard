@@ -3,6 +3,7 @@
 #include "BPK2DBWGCW/moc_hotkeys.cpp"
 #include "BPK2DBWGCW/moc_single_instance.cpp"
 #include "BPK2DBWGCW/moc_tray.cpp"
+#include "SLI74OWUZB/moc_clip_entry_model.cpp"
+#include "SLI74OWUZB/moc_core_facade.cpp"
 #include "SLI74OWUZB/moc_panel_window.cpp"
-#include "SLI74OWUZB/moc_sciter_view.cpp"
 #include "7TD7B7SMGP/moc_pin_window.cpp"

@@ -10,10 +10,10 @@ Windows 桌面一体化效率板:剪贴板历史 + 截图(框选/全屏/编辑/�
 | --- | --- |
 | 业务核心 | Rust → `nbcore.dll`(cdylib,JSON 门面 FFI,复用 clipboard-plus 业务代码与单测) |
 | 宿主/窗口 | Qt 6 Widgets(MSVC 工具链,单进程事件循环) |
-| 主面板 UI | Sciter(HTML/CSS,嵌入 Qt 窗口) |
+| 主面板 UI | **Qt Quick / QML**(QQuickWidget 嵌入无边框窗口;v0.2 起取代 Sciter) |
 | 会话窗口 | 遮罩/贴图/编辑器 = Qt 原生窗口(QPainter / QGraphicsScene) |
 
-分层一句话:**有窗口的归 C++,有逻辑的归 Rust,有界面的归 Sciter/Qt**。
+分层一句话:**有窗口的归 C++,有逻辑的归 Rust,有界面的归 QML/Qt**。
 
 ## 文档
 
@@ -53,7 +53,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1 -Run       # 构建后直接�
 powershell -ExecutionPolicy Bypass -File build.ps1 -Clean     # 清缓存重新配置
 ```
 
-产物:`app\build\nextboard.exe`(nbcore.dll / sciter.dll / panel\ 由脚本与 CMake 自动部署到同目录)。
+产物:`app\build\nextboard.exe`(nbcore.dll / Qt 运行库由脚本与 CMake 自动部署;QML 已打进 exe)。
 热键:`Ctrl+Shift+V` 面板 / `Ctrl+Shift+A` 框选 / `Ctrl+Shift+Q` 全屏 / `Ctrl+Shift+P` 贴图。
 日志:`app\build\nextboard.log`。
 

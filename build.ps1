@@ -1,4 +1,4 @@
-﻿# Nextboard 一键构建脚本
+# Nextboard 一键构建脚本
 #
 # 用法(在仓库根目录):
 #   powershell -ExecutionPolicy Bypass -File build.ps1            # 构建 core + app
@@ -88,16 +88,16 @@ $needDeploy = $Deploy -or
 if ($needDeploy) {
     Step '部署 Qt 运行库 (windeployqt)'
     & (Join-Path $QtBin 'windeployqt.exe') --no-translations --no-system-d3d-compiler `
-        --no-opengl-sw --no-quick-import (Join-Path $BuildDir 'nextboard.exe')
+        --no-opengl-sw (Join-Path $BuildDir 'nextboard.exe')
     if ($LASTEXITCODE -ne 0) { Die 'windeployqt 失败' }
     if (-not (Test-Path (Join-Path $BuildDir 'platforms\qwindows.dll'))) {
         Die 'windeployqt 后仍缺 platforms\qwindows.dll,检查 Qt 安装'
     }
-    Ok 'Qt DLL + 平台插件已部署'
+    Ok 'Qt DLL + 平台插件 + Quick/QML 运行库已部署'
 } else {
     Write-Host '  Qt 运行库已部署,跳过(强制重跑用 -Deploy)'
 }
-# nbcore.dll / sciter.dll / panel\ 由 CMake POST_BUILD 自动拷贝,无需处理
+# nbcore.dll 由 CMake POST_BUILD 自动拷贝;QML 经 qrc 打进 exe,无需部署资源目录
 
 # ---- 完成 ----
 $exe = Join-Path $BuildDir 'nextboard.exe'

@@ -1,14 +1,18 @@
 #include "panel_window.hpp"
 
 #include <QCursor>
+#include <QDebug>
 #include <QGuiApplication>
 #include <QHBoxLayout>
+#include <QMetaObject>
+#include <QQuickItem>
+#include <QQuickWidget>
 #include <QScreen>
 #include <QTimer>
+#include <QUrl>
+#include <QVariant>
 
 #include <windows.h>
-
-#include "sciter_view.hpp"
 
 namespace nb {
 namespace {
@@ -32,7 +36,6 @@ PanelWindow::PanelWindow(CoreBridge& core, QWidget* parent)
     connect(m_blurTimer, &QTimer::timeout, this, [this] {
         if (m_everFocused && !isActiveWindow()) hide();
     });
-    connect(this, &QWidget::windowIconChanged, this, [this] { m_everFocused = isActiveWindow(); });
 }
 
 PanelWindow::~PanelWindow() = default;
@@ -40,8 +43,15 @@ PanelWindow::~PanelWindow() = default;
 void PanelWindow::setupUi() {
     auto* layout = new QHBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
-    m_sciter = new SciterView(this);
-    layout->addWidget(m_sciter);
+    m_quick = new QQuickWidget(this);
+    m_quick->setResizeMode(QQuickWidget::ResizeMode::SizeRootObjectToView);
+    m_quick->setClearColor(palette().window().color());
+    // QML 源经 qt_add_qml_module 打进 qrc(QML_FILES 以 panel/qml/ 相对路径引用,
+    // 别名拼接后实际地址多一层 panel/qml,无运行期文件依赖)。
+    m_quick->setSource(QUrl("qrc:/qt/qml/Nextboard/panel/panel/qml/Main.qml"));
+    if (m_quick->status() == QQuickWidget::Error)
+        qWarning() << "QML load errors:" << m_quick->errors();
+    layout->addWidget(m_quick);
 }
 
 void PanelWindow::showAtCursor() {
@@ -62,7 +72,10 @@ HWND PanelWindow::nativeHandle() const {
 }
 
 void PanelWindow::applySearchText(const QString& text) {
-    if (m_sciter) m_sciter->setSearchText(text);
+    // 自动化验收入口:QML 侧 setSearch(text) 由 C++ 直调(Main.qml root 实现)。
+    if (m_quick && m_quick->rootObject())
+        QMetaObject::invokeMethod(qobject_cast<QObject*>(m_quick->rootObject()), "setSearch",
+                                  Q_ARG(QVariant, text));
 }
 
 void PanelWindow::showEvent(QShowEvent* e) {
@@ -74,14 +87,6 @@ void PanelWindow::showEvent(QShowEvent* e) {
     });
 }
 
-void PanelWindow::hideEvent(QHideEvent* e) {
-    QWidget::hideEvent(e);
-}
-
-void PanelWindow::resizeEvent(QResizeEvent* e) {
-    QWidget::resizeEvent(e);
-}
-
 bool PanelWindow::nativeEvent(const QByteArray& eventType, void* message, qint64* result) {
     if (eventType == "windows_generic_MSG") {
         auto* msg = static_cast<MSG*>(message);
@@ -89,7 +94,7 @@ bool PanelWindow::nativeEvent(const QByteArray& eventType, void* message, qint64
         // CreateWindowEx → 创建失败(Qt 报 "CreateWindowEx failed")。用缓存 HWND。
         if (msg->hwnd != m_cachedHwnd)
             return QWidget::nativeEvent(eventType, message, result);
-        // nbcore 通知:剪贴板变化 → 通知 JS 刷新(经 SciterView 转发到文档)
+        // nbcore 通知:剪贴板/设置变化 → 模型刷新
         if (msg->message == nb::WM_APP_CLIP_CHANGED) {
             emit clipChanged();
             if (result) *result = 0;
@@ -114,12 +119,7 @@ bool PanelWindow::nativeEvent(const QByteArray& eventType, void* message, qint64
 
 bool PanelWindow::event(QEvent* e) {
     if (e->type() == QEvent::WinIdChange) {
-        // 缓存 HWND(nativeEvent 禁用 winId() 的替代)
         m_cachedHwnd = reinterpret_cast<HWND>(winId());
-        // winId 就绪后再初始化 Sciter(需要 HWND)
-        QTimer::singleShot(0, this, [this] {
-            if (m_sciter) m_sciter->attach();
-        });
     }
     return QWidget::event(e);
 }

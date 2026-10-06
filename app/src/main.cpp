@@ -1,6 +1,6 @@
-// Nextboard 入口:Qt 拥有进程与事件循环,Sciter 嵌入主面板,业务在 nbcore.dll。
+// Nextboard 入口:Qt 拥有进程与事件循环,Qt Quick 承载主面板,业务在 nbcore.dll。
 //
-// 启动顺序:单实例检查 → nbcore init → 主面板(Sciter)→ 托盘/热键 → 消息循环。
+// 启动顺序:单实例检查 → nbcore init → QML 装配 → 主面板(Quick)→ 托盘/热键 → 消息循环。
 // 失焦隐藏等窗口行为见 panel_window.cpp。
 
 #include <QApplication>
@@ -30,7 +30,7 @@ static void fileMessageHandler(QtMsgType type, const QMessageLogContext& ctx, co
 #include "host/tray.hpp"
 #include "host/hotkeys.hpp"
 #include "panel/panel_window.hpp"
-#include "panel/bridge.hpp"
+#include "panel/qml_bootstrap.hpp"
 
 int main(int argc, char* argv[]) {
     // 隐藏自启参数(与第一代 --hidden 语义一致)
@@ -53,10 +53,8 @@ int main(int argc, char* argv[]) {
     QApplication::setQuitOnLastWindowClosed(false);
     qInstallMessageHandler(fileMessageHandler);
     qInfo() << "Nextboard starting, appDir =" << QCoreApplication::applicationDirPath();
-    // 置顶贴图/遮罩要求应用在失去焦点时窗口不闪:不用 Qt::AA_DisableWindowContextHelpButton 等
 
     // 1. nbcore 初始化(数据目录、通知窗口稍后由面板提供;先 0 = 仅全局通知)。
-    // 全进程唯一实例:桥(Nextboard.*)与窗口层共用 CoreBridge::instance()。
     nb::CoreBridge& core = nb::CoreBridge::instance();
     QString initError;
     if (!core.init(startHidden, &initError)) {
@@ -66,8 +64,10 @@ int main(int argc, char* argv[]) {
     }
     qInfo() << "nbcore ready";
 
-    // 2. 主面板
+    // 2. QML 装配(类型/单例注册)→ 主面板
+    nb::setupQmlEnvironment();
     nb::PanelWindow panel(core);
+    nb::qmlAttachPanel(&panel);
     panel.showAtCursor();
     if (startHidden) panel.hide();
 
@@ -97,11 +97,8 @@ int main(int argc, char* argv[]) {
     nb::Tray tray(panel, core);
     nb::Hotkeys hotkeys(panel, core);
 
-    // nbcore 通知 → 桥队列 → JS 轮询消费(SciterEval 不可用,采用拉模式)
-    QObject::connect(&panel, &nb::PanelWindow::clipChanged, [] {
-        nb::pushNativeNotification("clip_changed");
-    });
-    // nbcore 通知 HWND = 主面板窗口(此前为 0,通知被丢弃 —— 列表不刷新的根因)
+    // nbcore 通知 HWND = 主面板窗口;WM_APP → PanelWindow::clipChanged
+    // → ClipEntryModel::refresh(200ms 去抖)。
     core.setNotifyHwnd(panel.nativeHandle());
 
     const int rc = QApplication::exec();
