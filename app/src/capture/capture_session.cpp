@@ -1,4 +1,5 @@
 #include "capture_session.hpp"
+#include "editor/editor_window.hpp"
 #include "host/core_bridge.hpp"
 
 #include <QBuffer>
@@ -85,10 +86,18 @@ QString ingestAndCopyToClipboard(const QImage& image) {
     return id;
 }
 
-/// 提交一张截图:入库 + 写剪贴板,成功后接续本次会话的回调(截图翻译/取字)。
-void commitCapture(const QImage& image) {
+/// 入库 + 写剪贴板,成功后接续回调(截图翻译/取字)。
+/// 编辑器是异步窗口,回调必须由调用方显式带过来,不能读会话级的 g_onCaptured。
+void finishCapture(const QImage& image, const CaptureDone& done) {
     const QString id = ingestAndCopyToClipboard(image);
-    if (!id.isEmpty() && g_onCaptured) g_onCaptured(id);
+    if (!id.isEmpty() && done) done(id);
+}
+
+/// regionSkipEditor(默认 true):框选确认后跳过编辑器,直接入库 + 写剪贴板。
+bool skipEditor() {
+    const QJsonObject resp = CoreBridge::instance().call("get_settings");
+    if (!resp.value("ok").toBool()) return true;   // 读不到设置时按默认(直通)
+    return resp.value("data").toObject().value("regionSkipEditor").toBool(true);
 }
 } // namespace
 
@@ -120,7 +129,9 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured) {
         if (shot.isNull()) {
             qWarning() << "全屏捕获失败";
         } else {
-            commitCapture(shot);
+            const CaptureDone done = g_onCaptured;
+            g_onCaptured = {};
+            finishCapture(shot, done);
         }
         return;
     }
@@ -141,13 +152,26 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured) {
         // 裁剪仍走核心 RGBA 通道 nb_capture_crop,保持"有逻辑的归 Rust"。
         QObject::connect(overlay, &OverlayWidget::regionConfirmed, overlay,
                 [frozen](const QRect& physicalRect) {
-            closeAllOverlays();   // 任一屏确认即收起全部遮罩
+            const CaptureDone done = g_onCaptured;   // closeAllOverlays 会清空,先取出
+            closeAllOverlays();                      // 任一屏确认即收起全部遮罩
             const QImage cropped = CoreBridge::instance().captureCrop(frozen, physicalRect);
             if (cropped.isNull()) {
                 qWarning() << "选区裁剪失败(空选区或越界)";
                 return;
             }
-            commitCapture(cropped);
+            if (skipEditor()) {
+                finishCapture(cropped, done);
+                return;
+            }
+            // regionSkipEditor=false:先进编辑器标注,「完成」时才入库 + 写剪贴板
+            auto* editor = new EditorWindow(cropped);
+            QObject::connect(editor, &EditorWindow::committed, editor,
+                             [done](const QImage& composed) { finishCapture(composed, done); });
+            QObject::connect(editor, &EditorWindow::cancelled, editor,
+                             [] { qInfo() << "截图编辑已取消"; });
+            editor->show();
+            editor->raise();
+            editor->activateWindow();
         });
         QObject::connect(overlay, &OverlayWidget::cancelled, overlay, [] {
             closeAllOverlays();

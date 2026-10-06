@@ -35,6 +35,7 @@ add_executable(nextboard WIN32
     src/panel/core_facade.cpp
     src/panel/clip_entry_model.cpp
     src/capture/capture_session.cpp
+    src/editor/editor_window.cpp
     src/pin/pin_window.cpp
 )
 
