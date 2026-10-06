@@ -1,0 +1,38 @@
+# 行尾统一策略
+#
+# 背景：本机 core.autocrlf=true，索引存 LF，而各编辑器写入的工作区行尾不一致
+# （部分 LF、部分 CRLF），导致 git 反复提示 "LF will be replaced by CRLF"。
+# 这里在 .gitattributes 里定死：仓库与工作区统一 LF，不受各人 autocrlf 影响。
+# MSVC / Rust / Qt / VS Code 均正确处理 LF；唯一例外是 Windows 原生批处理。
+* text=auto eol=lf
+
+# cmd.exe 对 LF 行尾的 .bat/.cmd 支持不佳（尤其是 goto/label），强制 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# ---- 二进制：显式声明，避免被当作文本做行尾转换或产生无意义 diff ----
+# 图片 / 字体
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.bmp  binary
+*.ico  binary
+*.ttf  binary
+*.otf  binary
+
+# 编译产物（多数已在 .gitignore，此处防误提交时被当文本）
+*.exe   binary
+*.dll   binary
+*.lib   binary
+*.pdb   binary
+*.obj   binary
+*.o     binary
+*.a     binary
+*.rlib  binary
+*.rmeta binary
+*.bin   binary
+
+# 归档
+*.zip binary
+*.7z  binary
