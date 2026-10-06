@@ -22,6 +22,9 @@ namespace {
 // 遮罩若被外部销毁(Alt+F4 / WM 关闭),下一次触发会自动解除忙碌,不会卡死。
 QList<QPointer<OverlayWidget>> g_overlays;
 
+// 本次会话的入库后回调(截图翻译/取字接续 OCR 用);会话结束即清空。
+CaptureDone g_onCaptured;
+
 /// 剔除已销毁的遮罩;返回是否仍有活跃遮罩(即会话进行中)。
 bool pruneOverlays() {
     g_overlays.removeIf([](const QPointer<OverlayWidget>& p) { return p.isNull(); });
@@ -36,6 +39,7 @@ bool pruneOverlays() {
 void closeAllOverlays() {
     const QList<QPointer<OverlayWidget>> overlays = g_overlays;
     g_overlays.clear();
+    g_onCaptured = {};
     for (const QPointer<OverlayWidget>& overlay : overlays) {
         if (overlay) overlay->close();
     }
@@ -48,11 +52,11 @@ QString quickPngBase64(const QImage& image) {
     return QString::fromLatin1(buffer.data().toBase64());
 }
 
-/// 入库 + 写回系统剪贴板。
+/// 入库 + 写回系统剪贴板,返回条目 id(未入库或失败返回空串)。
 ///
 /// 顺序遵循第一代 docs/phase5.md §3.6:**先入库、后写剪贴板**——剪贴板监听线程
 /// 读到同一张图时按 hash 命中去重,只 touch 不新建,不会产生重复条目。
-void ingestAndCopyToClipboard(const QImage& image) {
+QString ingestAndCopyToClipboard(const QImage& image) {
     CoreBridge& core = CoreBridge::instance();
     const QJsonObject resp = core.call("ingest_capture_png", {
         {"png_base64", quickPngBase64(image)},
@@ -61,31 +65,40 @@ void ingestAndCopyToClipboard(const QImage& image) {
     if (!resp.value("ok").toBool()) {
         qWarning() << "截图入库失败:"
                    << resp.value("error").toObject().value("message").toString();
-        return;
+        return {};
     }
     // entry 为 null = 超过图片大小上限被忽略(不落盘,自然也不写剪贴板)
     const QString id =
         resp.value("data").toObject().value("entry").toObject().value("id").toString();
     if (id.isEmpty()) {
         qInfo() << "截图超过大小上限,已忽略";
-        return;
+        return {};
     }
     const QJsonObject copied = core.call("copy_entry", {{"id", id}});
     if (!copied.value("ok").toBool()) {
+        // 已入库但写剪贴板失败:仍把 id 交给后续链路(翻译/取字仍可进行)
         qWarning() << "截图写剪贴板失败:"
                    << copied.value("error").toObject().value("message").toString();
-        return;
+        return id;
     }
     qInfo() << "截图已入库并写入剪贴板:" << image.width() << "x" << image.height();
+    return id;
+}
+
+/// 提交一张截图:入库 + 写剪贴板,成功后接续本次会话的回调(截图翻译/取字)。
+void commitCapture(const QImage& image) {
+    const QString id = ingestAndCopyToClipboard(image);
+    if (!id.isEmpty() && g_onCaptured) g_onCaptured(id);
 }
 } // namespace
 
-void startCaptureSession(CaptureIntent intent) {
+void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured) {
     // 会话进行中 = 屏幕上还有遮罩(第一代 CAPTURE_BUSY 语义)
     if (pruneOverlays()) {
         qInfo() << "截图进行中,忽略本次触发";
         return;
     }
+    g_onCaptured = onCaptured;
 
     const QList<QScreen*> screens = QGuiApplication::screens();
     if (screens.isEmpty()) return;
@@ -107,7 +120,7 @@ void startCaptureSession(CaptureIntent intent) {
         if (shot.isNull()) {
             qWarning() << "全屏捕获失败";
         } else {
-            ingestAndCopyToClipboard(shot);
+            commitCapture(shot);
         }
         return;
     }
@@ -134,7 +147,7 @@ void startCaptureSession(CaptureIntent intent) {
                 qWarning() << "选区裁剪失败(空选区或越界)";
                 return;
             }
-            ingestAndCopyToClipboard(cropped);
+            commitCapture(cropped);
         });
         QObject::connect(overlay, &OverlayWidget::cancelled, overlay, [] {
             closeAllOverlays();

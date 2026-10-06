@@ -262,6 +262,12 @@ Rectangle {
     Connections {
         target: Core
         function onToastMessage(message) { toast.showMsg(message) }
+        // 翻译链路(热键 Ctrl+Shift+T 或截图翻译 Ctrl+Shift+E 完成后回填):
+        // 面板可能刚被截图流程收起,这里把它带回前台再打开抽屉。
+        function onTranslatePrefill(text) {
+            panelWindow.showPanel()
+            translateDrawer.openWith(text)
+        }
     }
 
     // ---- toast ----

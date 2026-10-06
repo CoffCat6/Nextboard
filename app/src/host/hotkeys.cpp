@@ -1,4 +1,5 @@
 #include "hotkeys.hpp"
+#include "panel/core_facade.hpp"
 #include "panel/panel_window.hpp"
 #include "host/core_bridge.hpp"
 #include "capture/capture_session.hpp"
@@ -37,9 +38,11 @@ bool parseComboImpl(const QString& combo, UINT* modifiers, UINT* vk) {
 }
 
 /// 截图前收起主面板并等窗口真正消失,否则面板会被拍进画面。
-void hidePanelThenCapture(PanelWindow& panel, CaptureIntent intent) {
+/// onCaptured:入库后接续的动作(截图翻译/取字);为空则只入库 + 写剪贴板。
+void hidePanelThenCapture(PanelWindow& panel, CaptureIntent intent,
+                          CaptureDone onCaptured = {}) {
     panel.hide();
-    QTimer::singleShot(150, [intent] { startCaptureSession(intent); });
+    QTimer::singleShot(150, [intent, onCaptured] { startCaptureSession(intent, onCaptured); });
 }
 
 /// 一键贴图:取最近可贴条目(图片优先,无图回退最近文本)→ 建置顶贴图窗口。
@@ -119,6 +122,20 @@ Hotkeys::Hotkeys(PanelWindow& panel, CoreBridge& core, QObject* parent)
                 break;
             case Action::PinLatest:
                 pinLatest();
+                break;
+            case Action::OpenTranslate:
+                // 打开面板并切到翻译抽屉(手动输入)
+                m_panel.showAtCursor();
+                CoreFacade::instance().openTranslate();
+                break;
+            case Action::CaptureTranslate:
+                // 截图翻译(F25):收起面板 → 框选 → 入库 → OCR → 抽屉预填并翻译
+                hidePanelThenCapture(m_panel, nb::CaptureIntent::Region,
+                                     [](const QString& entryId) {
+                    if (!entryId.isEmpty())
+                        CoreFacade::instance().processCapture(entryId,
+                                                              QStringLiteral("translate"));
+                });
                 break;
             default:
                 qInfo() << "hotkey action" << static_cast<int>(m_registered.value(id));

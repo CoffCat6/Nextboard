@@ -432,3 +432,55 @@ S4.4 截图翻译/取字闭环(`captureTranslate` 热键目前落到 `default` �
 - 探针确认采集为原生分辨率;app 编译链接通过、无编译警告。
 - ⚠️ GUI 仍无法在沙箱启动,**多屏与高 DPI 行为须在真实桌面验证**(重点看:
   两块遮罩是否各占一屏、预览是否清晰、尺寸提示是否等于实际截出分辨率)。
+
+---
+
+## 2026-10-06(四)S4.4 截图翻译 / 截图取字闭环
+
+### 起点
+
+`captureTranslate`(Ctrl+Shift+E)与 `openTranslate`(Ctrl+Shift+T)虽已在设置里注册热键,
+但 `hotkeys.cpp` 的 switch 没有对应分支,落到 `default` 只打一行日志;截图会话也只有
+「入库 + 写剪贴板」一条出口,无法接续 OCR / 翻译。
+
+### 实现
+
+1. **截图会话外置后处理**:`startCaptureSession(intent, onCaptured)` 增加**入库后回调**
+   (参数为条目 id);不传则维持原行为。裁剪/全屏两条路径统一走 `commitCapture()`。
+2. **`CoreFacade::processCapture(id, mode)`**:
+   - `mode="ocr"` → 识别文本写入剪贴板(截图取字);
+   - `mode="translate"` → 发 `translatePrefill(text)`。
+   原 `ocrEntry` 改为 `processCapture(id,"ocr")`,消除重复实现。
+3. **`CoreFacade::captureOcr()`** —— 翻译抽屉「截图取字」入口(延时 150ms 等面板从屏幕上
+   消失后再框选,避免面板入镜)。
+4. **`CoreFacade::openTranslate()` + `translatePrefill` 信号**统一"打开翻译抽屉"的两条链路:
+   热键打开(空文本=手动输入)、截图翻译完成后回填。
+5. **热键补分支**:`OpenTranslate` → 显示面板 + 打开翻译抽屉;`CaptureTranslate` →
+   收面板 → 框选 → 入库 → OCR → 抽屉预填并自动翻译。
+6. **`PanelWindow::showPanel()`**(Q_INVOKABLE)—— 截图翻译完成后把面板带回前台。
+7. **QML**:Main.qml 订阅 `translatePrefill`(showPanel + `translateDrawer.openWith`);
+   TranslateDrawer 增「截图取字」按钮。
+
+### 完整链路
+
+```
+Ctrl+Shift+E
+  → 收起面板(150ms 等窗口消失)
+  → 各屏遮罩框选 → nb_capture_crop 裁剪
+  → ingest_capture_png(source=capture) → copy_entry 写剪贴板
+  → OCR(nbcore ocr_entry)
+  → translatePrefill → 面板回前台 + 翻译抽屉预填原文并自动翻译
+```
+
+取字分支(抽屉「截图取字」按钮)走同一路径,OCR 结果写入剪贴板并提示字符数。
+
+### 验证与限制
+
+- `qmllint` 0 error;app 编译链接通过(`[25/25] Linking`)、无编译警告。
+- ⚠️ GUI 无法在沙箱启动,OCR 与翻译链路须在真实桌面验证(翻译需已配置 provider)。
+
+### 下一步
+
+**S4.1 编辑器**是 S4 唯一剩余的大项(QGraphicsScene:画笔/箭头/矩形/马赛克/文字 +
+QUndoStack + Ctrl+S 另存),完成后才能收尾 **4.2** 的 `regionAutoConfirm` /
+`regionSkipEditor` 两模式确认。

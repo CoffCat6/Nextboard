@@ -8,7 +8,10 @@
 #pragma once
 
 #include <QObject>
+#include <QString>
 #include <QWidget>
+
+#include <functional>
 
 class QScreen;
 
@@ -16,9 +19,13 @@ namespace nb {
 
 enum class CaptureIntent { Region, Fullscreen };
 
+/// 裁剪入库完成后的回调,参数是刚入库条目的 id(未入库/失败时为空串)。
+/// 截图翻译/取字用它接续 OCR → 翻译链路;不传则只做"入库 + 写剪贴板"。
+using CaptureDone = std::function<void(const QString& entryId)>;
+
 /// 启动会话(Fullscreen = 光标屏整屏直通;Region = 各屏遮罩框选)。
 /// 忙碌重入检查沿用第一代 CAPTURE_BUSY 语义。
-void startCaptureSession(CaptureIntent intent);
+void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured = {});
 
 /// 遮罩窗口:铺满**指定**屏幕,绘制冻结底图 + 半透明遮罩 + 选区。
 class OverlayWidget : public QWidget {

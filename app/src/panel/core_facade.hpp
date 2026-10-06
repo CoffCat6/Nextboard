@@ -45,8 +45,20 @@ public:
     /// 翻译(网络,慢):线程池执行,完成发 translateFinished。
     Q_INVOKABLE void translateText(const QString& text, const QString& from, const QString& to);
 
-    /// OCR(慢):线程池执行,完成发 ocrFinished。
+    /// OCR(慢):线程池执行,完成发 ocrFinished。等价于 processCapture(id, "ocr")。
     Q_INVOKABLE void ocrEntry(const QString& id);
+
+    /// 截图后处理:对刚入库的截图条目做 OCR(慢,线程池)。
+    ///  - mode = "ocr"       → 识别文本写入剪贴板(截图取字)
+    ///  - mode = "translate" → 发 translatePrefill,QML 打开翻译抽屉预填并自动翻译
+    Q_INVOKABLE void processCapture(const QString& id, const QString& mode);
+
+    /// 截图取字入口(翻译抽屉按钮):调用方先收起面板 → 框选 → OCR → 文本进剪贴板。
+    Q_INVOKABLE void captureOcr();
+
+    /// 请求打开翻译抽屉(空文本 = 手动输入)。QML 订阅 translatePrefill 打开抽屉,
+    /// 因此它同时服务「热键打开翻译」与「截图翻译完成后回填」两条链路。
+    Q_INVOKABLE void openTranslate() { emit translatePrefill(QString()); }
 
 signals:
     /// nbcore 通知(剪贴板/设置变化)→ QML Connections 订阅。
@@ -56,6 +68,8 @@ signals:
     void ocrFinished(QVariantMap resp);
     void toastMessage(const QString& message);
     void countsChanged();
+    /// 请求打开翻译抽屉并预填原文(截图翻译链路 F25)。
+    void translatePrefill(const QString& text);
 
 public:
     /// PanelWindow::nativeEvent 转发 nbcore WM_APP 通知(刷新去抖由模型侧负责)。

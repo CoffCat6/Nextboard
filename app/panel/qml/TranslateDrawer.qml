@@ -127,6 +127,15 @@ AppDrawer {
 
         RowLayout {
             spacing: 8
+            // 截图取字(F25 的取字分支):收起面板 → 框选 → OCR → 文本进剪贴板
+            Button {
+                text: "截图取字"
+                onClicked: {
+                    root.close()
+                    panelWindow.hidePanel()
+                    Core.captureOcr()
+                }
+            }
             Button {
                 text: "复制译文"
                 enabled: output.text.length > 0

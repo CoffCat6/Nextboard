@@ -1,5 +1,6 @@
 #include "core_facade.hpp"
 
+#include "capture/capture_session.hpp"
 #include "host/core_bridge.hpp"
 
 #include <QJsonDocument>
@@ -10,6 +11,7 @@
 #include <QRunnable>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QTimer>
 #include <functional>
 #include <QDebug>
 
@@ -112,14 +114,18 @@ void CoreFacade::translateText(const QString& text, const QString& from, const Q
 }
 
 void CoreFacade::ocrEntry(const QString& id) {
+    processCapture(id, QStringLiteral("ocr"));
+}
+
+void CoreFacade::processCapture(const QString& id, const QString& mode) {
     auto* job = new AsyncCall;
     job->method = "ocr_entry";
     job->req = QJsonObject{{"id", id}};
     job->setAutoDelete(true);
-    job->onDone = [this](const QJsonObject& resp) {
+    job->onDone = [this, mode](const QJsonObject& resp) {
         emit ocrFinished(jsonToVariant(resp).toMap());
         if (!resp.value("ok").toBool()) {
-            emit toastMessage(QStringLiteral("OCR 失败:%1").arg(
+            emit toastMessage(QStringLiteral("识别失败:%1").arg(
                 resp.value("error").toObject().value("message").toString()));
             return;
         }
@@ -128,7 +134,12 @@ void CoreFacade::ocrEntry(const QString& id) {
             emit toastMessage(QStringLiteral("未识别到文字(图片可能不含可识别文本)"));
             return;
         }
-        // 对齐第一代 actions.ocr:识别成功后把文本写入剪贴板,用户可直接粘贴。
+        if (mode == QLatin1String("translate")) {
+            // 交回 QML:打开翻译抽屉、预填原文并自动翻译(截图翻译 F25)
+            emit translatePrefill(text);
+            return;
+        }
+        // 取字:写入剪贴板供直接粘贴(对齐第一代 OCR 语义)。
         // 仍走线程池,与 nb_call 的串行化互斥保持一致。
         auto* copyJob = new AsyncCall;
         copyJob->method = "copy_text_to_clipboard";
@@ -136,12 +147,22 @@ void CoreFacade::ocrEntry(const QString& id) {
         copyJob->setAutoDelete(true);
         copyJob->onDone = [this, text](const QJsonObject& r) {
             emit toastMessage(r.value("ok").toBool()
-                ? QStringLiteral("已识别 %1 个字符并复制到剪贴板").arg(text.size())
+                ? QStringLiteral("已取字 %1 个字符并复制到剪贴板").arg(text.size())
                 : QStringLiteral("识别成功,但写入剪贴板失败"));
         };
         QThreadPool::globalInstance()->start(copyJob);
     };
     QThreadPool::globalInstance()->start(job);
+}
+
+void CoreFacade::captureOcr() {
+    // 调用方(翻译抽屉)已先收起面板;这里再等窗口真正消失,避免面板被拍进画面。
+    QTimer::singleShot(150, [] {
+        startCaptureSession(CaptureIntent::Region, [](const QString& entryId) {
+            if (!entryId.isEmpty())
+                CoreFacade::instance().processCapture(entryId, QStringLiteral("ocr"));
+        });
+    });
 }
 
 } // namespace nb

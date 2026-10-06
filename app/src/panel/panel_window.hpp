@@ -26,6 +26,9 @@ public:
     /// QML 侧 ESC 调用(关闭抽屉后的兜底隐藏)。
     Q_INVOKABLE void hidePanel() { hide(); }
 
+    /// QML 侧请求显示(截图翻译完成后把面板带回前台并打开翻译抽屉)。
+    Q_INVOKABLE void showPanel() { showAtCursor(); }
+
     /// 给单实例过滤器用的 HWND 唤起对接(内部实现细节)。
     HWND nativeHandle() const;
 
