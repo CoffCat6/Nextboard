@@ -614,3 +614,48 @@ QUndoStack + Ctrl+S 另存),完成后才能收尾 **4.2** 的 `regionAutoConfirm
 **两次截图之间**(遮罩显示期间),且含 `setCompositionMode` / `drawPath` —— 而
 `OverlayWidget::paintEvent` 并不调用这些,故不是遮罩自身绘制,疑为 Qt 离屏合成路径的噪声。
 截图结果正常(298×953 / 2430×1632 均正确入库),暂按观感问题记录,待后续排查。
+
+---
+
+## 2026-10-06(四)面板全白回归修复(QML `on*` 命名禁区)
+
+### 现象
+
+上一轮主题修复后,主面板打开是**整片空白**。
+
+### 根因(上一轮引入的回归)
+
+运行日志直接给出答案:
+
+```
+Theme.qml:28:29: Cannot assign a value to a signal (expecting a script to be run)
+    readonly property color onPin: "#222222"
+```
+
+QML 把 **`on` + 大写字母开头的标识符当作信号处理器语法**,因此 `onAccent` / `onPin`
+**不是合法属性名** → Theme 单例加载失败 → `EntryCard` 不可用 → `Main.qml` 整体加载失败
+→ 面板空白。
+
+### 修复
+
+`onAccent` → `accentText`、`onPin` → `pinText`,同步 3 处引用;并在 Theme.qml 内写明
+命名禁区。全量 grep 确认无其他 `on*` 属性名。
+
+### 重要教训(已实测)
+
+1. **`on*` 属性名是运行时错误,静态工具抓不到**:用最小复现文件
+   (`readonly property color onPin: "#222222"`)单独跑 `qmllint` 也**报不出来**。
+   只能靠命名纪律 + 运行时日志发现 —— 好消息是 `QML load errors:` 已会落盘
+   (见 `PanelWindow::setupUi`),排查时**先看 `app/build/nextboard.log`**。
+2. **`qmllint` 对本项目默认几乎无校验力**:`Nextboard.Core` 由 C++ 侧
+   `qmlRegisterSingletonInstance` 注册、**没有生成 `.qmltypes`**,qmllint 解析不了该模块
+   就**跳过语义检查**并报 0 error —— 上一轮正是因此漏掉。补一个桩模块后可正常解析,
+   从而能校验 `Core.*` 成员用法:
+
+   ```
+   # 桩:tools/qmlstub 风格,提供 Nextboard/Core/{qmldir,Core.qml}
+   #   qmldir:  module Nextboard.Core
+   #            singleton Core 1.0 Core.qml
+   #   Core.qml: pragma Singleton + QtObject,声明 darkTheme/counts/各方法与信号
+   qmllint -I <stub目录> -I app/build -I D:/Qt/6.9.0/msvc2022_64/qml app/panel/qml/*.qml
+   ```

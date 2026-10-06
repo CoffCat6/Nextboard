@@ -121,7 +121,7 @@ Rectangle {
                 visible: root.pinned
                 text: "固定"; font.pixelSize: 10
                 padding: 3; leftPadding: 6; rightPadding: 6
-                color: Theme.onPin; background: Rectangle { color: Theme.pin; radius: 4 }
+                color: Theme.pinText; background: Rectangle { color: Theme.pin; radius: 4 }
             }
             Label {
                 visible: root.source !== "" && root.source !== "clipboard"

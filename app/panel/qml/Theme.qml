@@ -23,9 +23,13 @@ QtObject {
     readonly property color pin:       dark ? "#e8b339" : "#e0a800"
 
     /// 强调色/固定色**之上**的文字色(标签选中态、toast、徽标)。
-    /// 亮暗两套下强调色都是深蓝/深黄,白字或近黑字均可读,分开定义便于日后微调。
-    readonly property color onAccent:  "#ffffff"
-    readonly property color onPin:     "#222222"
+    ///
+    /// ⚠️ 命名禁区:QML 把 `on` + 大写字母开头的标识符当作**信号处理器**语法,
+    /// 因此这里**不能**叫 `onAccent` / `onPin` —— 会报
+    /// "Cannot assign a value to a signal" 并让整个 Theme 单例加载失败,
+    /// 连带 EntryCard/Main 全部不可用(面板一片空白)。同理禁止 `on*` 命名。
+    readonly property color accentText: "#ffffff"
+    readonly property color pinText:    "#222222"
 
     /// 来源徽标配色(capture / translate);亮色下需加深,否则浅底上看不清。
     readonly property color sourceCapture:   dark ? "#7ec2ff" : "#1a6fc4"
