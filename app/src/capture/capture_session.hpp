@@ -27,6 +27,13 @@ using CaptureDone = std::function<void(const QString& entryId)>;
 /// 忙碌重入检查沿用第一代 CAPTURE_BUSY 语义。
 void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured = {});
 
+/// 入库一张图片并写入系统剪贴板(截图与编辑器「完成」共用同一通道)。
+/// 返回条目 id;未入库(超大小上限)或失败时返回空串。
+///
+/// 顺序遵循第一代 docs/phase5.md §3.6:**先入库、后写剪贴板** —— 剪贴板监听线程
+/// 读到同一张图时按 hash 命中去重,只 touch 不新建,不会产生重复条目。
+QString ingestImageAndCopy(const QImage& image);
+
 /// 遮罩窗口:铺满**指定**屏幕,绘制冻结底图 + 半透明遮罩 + 选区。
 class OverlayWidget : public QWidget {
     Q_OBJECT

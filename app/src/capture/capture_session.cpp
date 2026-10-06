@@ -53,11 +53,13 @@ QString quickPngBase64(const QImage& image) {
     return QString::fromLatin1(buffer.data().toBase64());
 }
 
+} // namespace
+
 /// 入库 + 写回系统剪贴板,返回条目 id(未入库或失败返回空串)。
 ///
 /// 顺序遵循第一代 docs/phase5.md §3.6:**先入库、后写剪贴板**——剪贴板监听线程
 /// 读到同一张图时按 hash 命中去重,只 touch 不新建,不会产生重复条目。
-QString ingestAndCopyToClipboard(const QImage& image) {
+QString ingestImageAndCopy(const QImage& image) {
     CoreBridge& core = CoreBridge::instance();
     const QJsonObject resp = core.call("ingest_capture_png", {
         {"png_base64", quickPngBase64(image)},
@@ -86,10 +88,12 @@ QString ingestAndCopyToClipboard(const QImage& image) {
     return id;
 }
 
+namespace {
+
 /// 入库 + 写剪贴板,成功后接续回调(截图翻译/取字)。
 /// 编辑器是异步窗口,回调必须由调用方显式带过来,不能读会话级的 g_onCaptured。
 void finishCapture(const QImage& image, const CaptureDone& done) {
-    const QString id = ingestAndCopyToClipboard(image);
+    const QString id = ingestImageAndCopy(image);
     if (!id.isEmpty() && done) done(id);
 }
 

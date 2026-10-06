@@ -3,7 +3,6 @@
 #include "panel/panel_window.hpp"
 #include "host/core_bridge.hpp"
 #include "capture/capture_session.hpp"
-#include "pin/pin_window.hpp"
 
 #include <QAbstractNativeEventFilter>
 #include <QGuiApplication>
@@ -45,48 +44,6 @@ void hidePanelThenCapture(PanelWindow& panel, CaptureIntent intent,
     QTimer::singleShot(150, [intent, onCaptured] { startCaptureSession(intent, onCaptured); });
 }
 
-/// 一键贴图:取最近可贴条目(图片优先,无图回退最近文本)→ 建置顶贴图窗口。
-/// 对应第一代 F13;取数走 core 的 latest_pinnable(与第一代同口径)。
-void pinLatest() {
-    CoreBridge& core = CoreBridge::instance();
-    const QJsonObject resp = core.call("latest_pinnable");
-    if (!resp.value("ok").toBool()) {
-        qWarning() << "pinLatest 取条目失败:"
-                   << resp.value("error").toObject().value("message").toString();
-        return;
-    }
-    // 空库时 data 为 null → toObject() 得到空对象
-    const QJsonObject entry = resp.value("data").toObject();
-    if (entry.isEmpty()) {
-        qInfo() << "pinLatest:没有可贴的条目";
-        return;
-    }
-    const QString kind = entry.value("kind").toString();
-    QImage image;
-    if (kind == QLatin1String("image")) {
-        image = CoreBridge::loadEntryImage(entry.value("blobPath").toString());
-    } else if (kind == QLatin1String("text")) {
-        const QString text = entry.value("textContent").toString();
-        if (!text.isEmpty()) image = PinWindow::renderText(text);
-    }
-    if (image.isNull()) {
-        qWarning() << "pinLatest:条目无可贴内容, kind =" << kind;
-        return;
-    }
-    // 贴图窗口的初始行为取自设置(pinDefaultOpacity / pinDoubleclickClose)
-    PinOptions options;
-    const QJsonObject settings = core.call("get_settings");
-    if (settings.value("ok").toBool()) {
-        const QJsonObject data = settings.value("data").toObject();
-        options.opacityPercent = data.value("pinDefaultOpacity").toInt(100);
-        options.doubleClickClose = data.value("pinDoubleclickClose").toBool(true);
-    }
-    auto* pin = new PinWindow(image, options);
-    pin->setAttribute(Qt::WA_DeleteOnClose);
-    pin->show();
-    qInfo() << "pinLatest:已贴出" << kind << image.size()
-            << "不透明度" << options.opacityPercent << "%";
-}
 } // namespace
 
 // 静态成员实现(头文件里声明为 static;自由函数接到成员签名)
@@ -130,7 +87,8 @@ Hotkeys::Hotkeys(PanelWindow& panel, CoreBridge& core, QObject* parent)
                 hidePanelThenCapture(m_panel, nb::CaptureIntent::Fullscreen);
                 break;
             case Action::PinLatest:
-                pinLatest();
+                // 贴图逻辑统一收在 CoreFacade(面板右键「贴到屏幕」复用同一条路径)
+                CoreFacade::instance().pinLatest();
                 break;
             case Action::OpenTranslate:
                 // 打开面板并切到翻译抽屉(手动输入)

@@ -42,10 +42,21 @@ Rectangle {
     border.width: 1
     implicitHeight: cardLayout.implicitHeight + 20
 
-    // 条目操作菜单(顺序与第一代 App.tsx ctx-menu 对齐)。
-    // 「贴到屏幕」「编辑」待 S4(需按条目贴图 FFI 与 QGraphicsScene 编辑器)。
+    // 条目操作菜单(顺序与第一代 App.tsx ctx-menu 对齐)
     Menu {
         id: menu
+        MenuItem {
+            text: "贴到屏幕"
+            onTriggered: Core.pinEntry(root.entryId)
+        }
+        MenuItem {
+            text: "编辑"
+            visible: root.kind === "image"
+            onTriggered: {
+                panelWindow.hidePanel()   // 编辑器会遮住面板,先收起(第一代同语义)
+                Core.editEntry(root.entryId)
+            }
+        }
         MenuItem {
             text: "复制"
             onTriggered: {

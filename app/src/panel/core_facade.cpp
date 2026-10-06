@@ -1,7 +1,9 @@
 #include "core_facade.hpp"
 
 #include "capture/capture_session.hpp"
+#include "editor/editor_window.hpp"
 #include "host/core_bridge.hpp"
+#include "pin/pin_window.hpp"
 
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -246,6 +248,103 @@ void CoreFacade::captureOcr() {
                 CoreFacade::instance().processCapture(entryId, QStringLiteral("ocr"));
         });
     });
+}
+
+namespace {
+
+/// 由条目内容得到"可贴的图":图片读 blob;文本渲染成位图(第一代允许贴文本)。
+QImage imageForEntry(const QVariantMap& entry) {
+    const QString kind = entry.value("kind").toString();
+    if (kind == QLatin1String("image"))
+        return CoreBridge::loadEntryImage(entry.value("blobPath").toString());
+    if (kind == QLatin1String("text")) {
+        const QString text = entry.value("textContent").toString();
+        if (!text.isEmpty()) return PinWindow::renderText(text);
+    }
+    return {};
+}
+
+/// 把一张图贴成置顶窗口;初始透明度/双击关闭取自设置。
+void showPinWindow(const QImage& image) {
+    if (image.isNull()) return;
+    PinOptions options;
+    const QVariantMap resp = CoreFacade::instance().call("get_settings");
+    if (resp.value("ok").toBool()) {
+        const QVariantMap data = resp.value("data").toMap();
+        const int opacity = data.value("pinDefaultOpacity").toInt();
+        if (opacity > 0) options.opacityPercent = opacity;
+        options.doubleClickClose = data.value("pinDoubleclickClose").toBool();
+    }
+    auto* pin = new PinWindow(image, options);
+    pin->setAttribute(Qt::WA_DeleteOnClose);
+    pin->show();
+}
+
+} // namespace
+
+void CoreFacade::pinLatest() {
+    const QVariantMap resp = call("latest_pinnable");
+    if (!resp.value("ok").toBool()) {
+        emit toastMessage(QStringLiteral("取最近条目失败:%1")
+                              .arg(resp.value("error").toMap().value("message").toString()));
+        return;
+    }
+    const QVariantMap entry = resp.value("data").toMap();
+    if (entry.isEmpty()) {
+        emit toastMessage(QStringLiteral("没有可贴的条目"));
+        return;
+    }
+    const QImage image = imageForEntry(entry);
+    if (image.isNull()) {
+        emit toastMessage(QStringLiteral("该条目无可贴内容"));
+        return;
+    }
+    showPinWindow(image);
+}
+
+void CoreFacade::pinEntry(const QString& id) {
+    const QVariantMap resp = call("get_entry", {{"id", id}});
+    if (!resp.value("ok").toBool()) {
+        emit toastMessage(QStringLiteral("读取条目失败"));
+        return;
+    }
+    const QImage image = imageForEntry(resp.value("data").toMap());
+    if (image.isNull()) {
+        emit toastMessage(QStringLiteral("该条目无可贴内容"));
+        return;
+    }
+    showPinWindow(image);
+}
+
+void CoreFacade::editEntry(const QString& id) {
+    const QVariantMap resp = call("get_entry", {{"id", id}});
+    if (!resp.value("ok").toBool()) {
+        emit toastMessage(QStringLiteral("读取条目失败"));
+        return;
+    }
+    const QVariantMap entry = resp.value("data").toMap();
+    if (entry.value("kind").toString() != QLatin1String("image")) {
+        emit toastMessage(QStringLiteral("只有图片条目可以编辑"));
+        return;
+    }
+    const QImage image = CoreBridge::loadEntryImage(entry.value("blobPath").toString());
+    if (image.isNull()) {
+        emit toastMessage(QStringLiteral("读取图片失败"));
+        return;
+    }
+    auto* editor = new EditorWindow(image);
+    // 与第一代一致:编辑产物走同一条入库通道(按 hash 去重),并写回剪贴板
+    QObject::connect(editor, &EditorWindow::committed, editor, [this](const QImage& composed) {
+        if (ingestImageAndCopy(composed).isEmpty()) {
+            emit toastMessage(QStringLiteral("编辑结果未入库(可能超过图片大小上限)"));
+            return;
+        }
+        emit toastMessage(QStringLiteral("已保存编辑结果"));
+        emit clipChanged();   // 让主面板列表刷新出新图
+    });
+    editor->show();
+    editor->raise();
+    editor->activateWindow();
 }
 
 } // namespace nb

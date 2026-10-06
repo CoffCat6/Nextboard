@@ -76,6 +76,14 @@ public:
     /// 截图取字入口(翻译抽屉按钮):调用方先收起面板 → 框选 → OCR → 文本进剪贴板。
     Q_INVOKABLE void captureOcr();
 
+    // ---- 条目操作(主面板右键菜单) ----
+    /// 一键贴图(热键):取最近可贴条目(图片优先,无图回退最近文本)并贴出。
+    Q_INVOKABLE void pinLatest();
+    /// 把指定条目贴到屏幕(图片直贴;文本渲染成位图)。
+    Q_INVOKABLE void pinEntry(const QString& id);
+    /// 编辑图片条目:用编辑器打开,「完成」后入库 + 写剪贴板(对齐第一代 edit_entry)。
+    Q_INVOKABLE void editEntry(const QString& id);
+
     /// 请求打开翻译抽屉(空文本 = 手动输入)。QML 订阅 translatePrefill 打开抽屉,
     /// 因此它同时服务「热键打开翻译」与「截图翻译完成后回填」两条链路。
     Q_INVOKABLE void openTranslate() { emit translatePrefill(QString()); }

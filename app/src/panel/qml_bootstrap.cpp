@@ -57,6 +57,12 @@ void qmlAttachPanel(PanelWindow* panel) {
     QObject::connect(panel, &PanelWindow::clipChanged, panel, [model] {
         model->refresh();
     });
+    // C++ 侧改动条目后(如右键「编辑」提交)也要刷新列表:
+    // 编辑产物是新条目,不刷新的话列表看不到它。
+    CoreFacade& facade = CoreFacade::instance();
+    QObject::connect(&facade, &CoreFacade::clipChanged, &facade, [model] {
+        model->refresh();
+    });
     // 面板显示后立即重拉一次(隐藏期间积累的变化一次到位)
     panel->installEventFilter(new ShowRefresher(s_entries, panel));
 }
