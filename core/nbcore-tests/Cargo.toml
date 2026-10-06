@@ -1,0 +1,9 @@
+[package]
+name = "nbcore-tests"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+nbcore = { path = "../nbcore" }
+serde_json.workspace = true

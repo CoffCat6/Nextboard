@@ -1,0 +1,360 @@
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Nextboard</title>
+  <style>
+    :root {
+      --bg: #1e1f24; --surface: #26272e; --surface2: #2d2e37; --border: #33353d;
+      --text: #dfe1e8; --muted: #9aa0ab; --accent: #4f8cff; --danger: #e5534b;
+      --pin: #e8b339;
+    }
+    html, body { margin: 0; height: 100%%; background: var(--bg); color: var(--text);
+                 font-family: "Segoe UI", "Microsoft YaHei"; font-size: 13px;
+                 overflow: hidden; user-select: none; }
+    body { flow: vertical; }
+    header { display: flex; padding: 10px 14px; gap: 10px; align-items: center;
+             border-bottom: 1px solid var(--border); }
+    header h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 600; }
+    input#search { width: 1*; height: 28px; padding: 0 10px; border-radius: 6px;
+                   border: 1px solid var(--border); background: var(--surface);
+                   color: var(--text); }
+    nav.tabs { display: flex; padding: 6px 14px; gap: 4px; border-bottom: 1px solid var(--border); }
+    nav.tabs span { padding: 4px 12px; border-radius: 6px; color: var(--muted);
+                    cursor: pointer; }
+    nav.tabs span:hover { background: var(--surface); }
+    nav.tabs span.active { background: var(--accent); color: #fff; }
+    main { height: 1*; overflow-y: scroll; padding: 8px 12px; }
+    /* 注:Sciter 的弹性单位是 * (如 width:1*),不是 CSS3 的 flex:1 */
+    .card { margin: 6px 0; padding: 10px 12px; background: var(--surface);
+            border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
+    .card:hover { background: var(--surface2); border-color: var(--accent); }
+    .card .meta { color: var(--muted); font-size: 11px; margin-top: 6px;
+                  display: flex; gap: 10px; }
+    .card .text { white-space: pre-wrap; word-break: break-all; max-height: 88px;
+                  overflow: hidden; }
+    .card img.thumb { max-height: 110px; max-width: 90%%; border-radius: 4px; }
+    .card .badge { font-size: 10px; padding: 1px 6px; border-radius: 4px;
+                   background: var(--surface2); color: var(--muted); }
+    .card .badge.pinned { background: var(--pin); color: #222; }
+    .card .badge.source-capture { color: #7ec2ff; }
+    .card .badge.source-translate { color: #c9a7ff; }
+    .empty { color: var(--muted); text-align: center; margin-top: 96px; }
+    .empty code { color: var(--accent); }
+    /* 抽屉(设置/翻译) */
+    .drawer { position: absolute; top: 0; right: 0; bottom: 0; width: 46%%;
+              background: var(--surface); border-left: 1px solid var(--border);
+              padding: 16px; overflow-y: scroll; display: none; }
+    .drawer.open { display: block; }
+    .drawer h2 { font-size: 14px; margin: 0 0 12px; }
+    .drawer label { display: block; color: var(--muted); margin: 10px 0 4px; font-size: 12px; }
+    .drawer input, .drawer select { width: 100%%; box-sizing: border-box; height: 28px;
+        border-radius: 6px; border: 1px solid var(--border); background: var(--bg);
+        color: var(--text); padding: 0 8px; }
+    .drawer textarea { width: 100%%; box-sizing: border-box; height: 84px;
+        border-radius: 6px; border: 1px solid var(--border); background: var(--bg);
+        color: var(--text); padding: 8px; }
+    button { padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
+             background: var(--surface2); color: var(--text); cursor: pointer; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button:hover { filter: brightness(1.15); }
+    .row { display: flex; gap: 8px; margin-top: 12px; }
+    .status { color: var(--muted); font-size: 12px; margin-top: 8px; min-height: 16px; }
+    .status.err { color: var(--danger); }
+    .trans-out { margin-top: 12px; padding: 10px; background: var(--bg);
+                 border: 1px solid var(--border); border-radius: 6px;
+                 white-space: pre-wrap; min-height: 60px; }
+    footer { padding: 6px 14px; color: var(--muted); font-size: 10px;
+             border-top: 1px solid var(--border); }
+    footer a { color: var(--muted); }
+    #toast { position: absolute; bottom: 34px; left: 50%%; transform: translateX(-50%%);
+             background: var(--accent); color: #fff; padding: 6px 16px; border-radius: 6px;
+             display: none; }
+  </style>
+  <script>
+    // 探针:确认脚本引擎与 DOM 可用(排除 module/JSX 解析失败)
+    document.addEventListener("ready", () => {
+      const hint = document.$(".empty");
+      if (hint) hint.textContent = "script ok, calling refresh…";
+    });
+  </script>
+  <script type="module">
+    // ---- 数据层:经 Nextboard 桥调用 nbcore ----
+    const NB = (typeof Nextboard !== "undefined") ? Nextboard : null;
+
+    const state = {
+      view: 'all',          // all | text | image | file | pinned
+      query: '',
+      limit: 50,
+      entries: [],
+      total: 0,
+    };
+
+    const $ = sel => document.$(sel);
+    const $$ = sel => document.$$(sel);
+
+    function toast(text) {
+      const t = $('#toast');
+      t.textContent = text;
+      t.style.display = 'block';
+      setTimeout(() => t.style.display = 'none', 1400);
+    }
+
+    async function refresh() {
+      const list = $('#list');
+      try {
+        if (!NB) {
+          list.content("");
+          list.append(<div class="empty">桥未连接:全局对象 Nextboard 不存在</div>);
+          return;
+        }
+        const pinned = state.view === 'pinned' ? true : undefined;
+        const kind = ['text', 'image', 'file'].includes(state.view) ? state.view : undefined;
+        const resp = await NB.listEntries(state.limit, 0, state.query, kind, pinned);
+        list.content("");
+        if (!resp.ok) {
+          list.append(<div class="empty">加载失败:{JSON.stringify(resp.error ?? resp)}</div>);
+          return;
+        }
+        state.entries = resp.data.items ?? [];
+        state.total = resp.data.total ?? 0;
+        if (state.entries.length === 0) {
+          list.append(<div class="empty">
+            {state.query ? <>没有匹配的历史记录</> :
+             state.view === 'pinned' ? <>暂无固定条目</> :
+             <>暂无历史记录,复制点什么试试</>}
+          </div>);
+          return;
+        }
+        for (const e of state.entries) list.append(renderCard(e));
+        // 计数徽标
+        const cnt = await NB.entryCounts();
+        if (cnt.ok) {
+          const c = cnt.data;
+          $('#tab-all').textContent = `全部 ${c.all}`;
+          $('#tab-text').textContent = `文本 ${c.text}`;
+          $('#tab-image').textContent = `图片 ${c.image}`;
+          $('#tab-file').textContent = `文件 ${c.file}`;
+          $('#tab-pinned').textContent = `固定 ${c.pinned}`;
+        }
+      } catch (err) {
+        list.content("");
+        list.append(<div class="empty">脚本错误:{String(err)}</div>);
+      }
+    }
+
+    function fmtTime(ms) {
+      const d = new Date(ms);
+      const pad = n => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ` +
+             `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+
+    function fmtSize(n) {
+      if (n < 1024) return n + ' B';
+      if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+      return (n / 1048576).toFixed(1) + ' MB';
+    }
+
+    function renderCard(e) {
+      const badges = [];
+      if (e.pinned) badges.push(<span class="badge pinned">固定</span>);
+      if (e.source && e.source !== 'clipboard')
+        badges.push(<span class={"badge source-" + e.source}>{e.source}</span>);
+      badges.push(<span class="badge">{e.kind}</span>);
+      let body;
+      if (e.kind === 'image' && e.blobPath) {
+        const url = NB.imageUrl(e.id, true);
+        body = <img class="thumb" src={url} />;
+      } else if (e.kind === 'file' && e.filePaths) {
+        body = <div class="text">{e.filePaths.join('\n')}</div>;
+      } else {
+        body = <div class="text">{e.textContent ?? e.preview ?? ''}</div>;
+      }
+      return <div class="card" id={'e-' + e.id}>
+        {body}
+        <div class="meta">
+          <span>{fmtTime(e.lastUsedAt)}</span>
+          <span>{fmtSize(e.byteSize)}</span>
+          {badges}
+        </div>
+      </div>;
+    }
+
+    // ---- 事件绑定 ----
+    // ⚠️ Sciter 的选择器委托事件必须带 '^' 前缀(如 '^click'),否则绑定无效
+    document.on('^click', 'nav.tabs span', (evt, span) => {
+      $$('#tabs span').forEach(s => s.classList.remove('active'));
+      span.classList.add('active');
+      state.view = span.id.substring(4); // 'tab-xxx'
+      refresh();
+    });
+
+    document.on('^click', '.card', async (evt, card) => {
+      const id = card.id.substring(2);
+      const resp = await NB.copyEntry(id);
+      if (resp.ok) toast('已复制到剪贴板');
+      else toast('复制失败:' + (resp.error?.message ?? ''));
+    });
+
+    document.on('input', 'input#search', evt => {
+      state.query = evt.target.value;
+      refresh();
+    });
+
+    // 自动化验收入口:由 C++ 经 SciterEval 调用(--query 参数)
+    Window.this.xcall;
+
+    // 暴露给 native 侧(setSearchText 用);同步改输入框便于肉眼/截图确认
+    document.patchSearch = function(text) {
+      state.query = text ?? '';
+      const box = document.$('input#search');
+      if (box) box.value = state.query;
+      refresh();
+    };
+
+    // 通知轮询:nbcore 的剪贴板/设置变化经 native 队列转发(拉模式)
+    setInterval(async () => {
+      if (!NB) return;
+      try {
+        const notes = await NB.takeNotifications();
+        if (notes && notes.length) {
+          if (notes.includes("clip_changed")) refresh();
+          if (notes.includes("settings_changed")) refresh();
+        }
+      } catch (e) { /* 桥未就绪时静默 */ }
+    }, 1000);
+
+    // 设置抽屉
+    async function openSettings() {
+      const d = $('#settings-drawer');
+      d.classList.add('open');
+      const resp = await NB.getSettings();
+      if (!resp.ok) return;
+      const s = resp.data;
+      $('#set-history-limit').value = s.historyLimit;
+      $('#set-max-image').value = s.maxImageMb;
+      $('#set-monitor').value = s.monitorEnabled;
+      $('#set-ocr').value = s.ocrEnabled;
+      $('#set-theme').value = s.theme;
+    }
+    async function saveSettings() {
+      const cur = await NB.getSettings();
+      if (!cur.ok) return;
+      const s = cur.data;
+      s.historyLimit = parseInt($('#set-history-limit').value) || s.historyLimit;
+      s.maxImageMb = parseInt($('#set-max-image').value) || s.maxImageMb;
+      s.monitorEnabled = $('#set-monitor').value === 'true';
+      s.ocrEnabled = $('#set-ocr').value === 'true';
+      s.theme = $('#set-theme').value;
+      const resp = await NB.saveSettings(s);
+      $('#set-status').textContent = resp.ok ? '已保存' :
+        '保存失败:' + (resp.error?.message ?? '');
+      $('#set-status').classList.toggle('err', !resp.ok);
+      refresh();
+    }
+    function closeDrawers() {
+      $$('.drawer').forEach(d => d.classList.remove('open'));
+    }
+
+    // 翻译抽屉
+    async function doTranslate() {
+      const text = $('#trans-in').value;
+      if (!text.trim()) return;
+      const st = $('#trans-status');
+      st.textContent = '翻译中…'; st.classList.remove('err');
+      const to = $('#trans-to').value;
+      const resp = await NB.translate(text, undefined, to);
+      if (resp.ok) {
+        $('#trans-out').textContent = resp.data.text;
+        st.textContent = `${resp.data.provider} · ${resp.data.elapsedMs}ms` +
+          (resp.data.detectedSource ? ` · 检测:${resp.data.detectedSource}` : '');
+      } else {
+        st.textContent = resp.error?.message ?? '翻译失败';
+        st.classList.add('err');
+      }
+    }
+
+    document.on('^click', '#btn-settings', openSettings);
+    document.on('^click', '#btn-settings-close', closeDrawers);
+    document.on('^click', '#btn-settings-save', saveSettings);
+    document.on('^click', '#btn-translate', () => { closeDrawers(); $('#translate-drawer').classList.add('open'); });
+    document.on('^click', '#btn-translate-close', closeDrawers);
+    document.on('^click', '#btn-trans-go', doTranslate);
+    document.on('^click', '#btn-trans-copy', async () => {
+      const out = $('#trans-out').textContent;
+      if (!out) return;
+      const resp = await NB.call('copy_text_to_clipboard', { text: out });
+      if (resp.ok) toast('译文已复制');
+    });
+
+    document.on('keydown', evt => {
+      if (evt.key === 'Escape') closeDrawers();
+    });
+
+    // Sciter 的 ready 是赋值式回调(非 Promise)
+    document.ready = function() {
+      refresh();
+    };
+  </script>
+</head>
+<body>
+  <header>
+    <h1>Nextboard</h1>
+    <input|search id="search" placeholder="搜索历史(文本 / OCR / 文件名)…">
+    <button id="btn-translate">翻译</button>
+    <button id="btn-settings">设置</button>
+  </header>
+  <nav id="tabs" class="tabs">
+    <span id="tab-all" class="active">全部</span>
+    <span id="tab-text">文本</span>
+    <span id="tab-image">图片</span>
+    <span id="tab-file">文件</span>
+    <span id="tab-pinned">固定</span>
+  </nav>
+  <main id="list"><div class="empty">加载中…</div></main>
+
+  <div id="settings-drawer" class="drawer">
+    <h2>设置</h2>
+    <label>历史上限(条)</label>
+    <input|number id="set-history-limit" value="5000">
+    <label>单张图片上限(MB)</label>
+    <input|number id="set-max-image" value="20">
+    <label>剪贴板监听</label>
+    <select id="set-monitor"><option value="true">开启</option><option value="false">暂停</option></select>
+    <label>OCR 自动识别(截图文字可搜索)</label>
+    <select id="set-ocr"><option value="false">关闭</option><option value="true">开启</option></select>
+    <label>主题</label>
+    <select id="set-theme"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select>
+    <div class="row">
+      <button id="btn-settings-save" class="primary">保存</button>
+      <button id="btn-settings-close">关闭</button>
+      <span id="set-status" class="status"></span>
+    </div>
+  </div>
+
+  <div id="translate-drawer" class="drawer">
+    <h2>翻译</h2>
+    <textarea id="trans-in" placeholder="输入或粘贴要翻译的文本…"></textarea>
+    <label>目标语言</label>
+    <select id="trans-to">
+      <option value="zh-Hans">简体中文</option>
+      <option value="en">English</option>
+      <option value="ja">日本語</option>
+      <option value="ko">한국어</option>
+    </select>
+    <div class="row">
+      <button id="btn-trans-go" class="primary">翻译</button>
+      <button id="btn-trans-copy">复制译文</button>
+      <button id="btn-translate-close">关闭</button>
+    </div>
+    <div id="trans-status" class="status"></div>
+    <div id="trans-out" class="trans-out"></div>
+  </div>
+
+  <div id="toast"></div>
+
+  <footer>
+    Uses Sciter Engine (<a href="https://sciter.com/">https://sciter.com</a>), copyright Terra Informatica Software, Inc.
+  </footer>
+</body>
+</html>

@@ -1,0 +1,147 @@
+//! SOCKS5 传输（Phase 8，docs/phase8-proxy.md §3.3）。
+//!
+//! **为什么存在**：实测 WinHTTP 完全不支持 SOCKS5（`socks5://`、`socks5=`、`socks=` 三种
+//! 前缀都会被静默忽略而直连，见 phase8-proxy.md §2.1）。故 SOCKS5 由本模块经 `ureq` 承担，
+//! 这是引入该依赖的唯一原因（决策 D17）。
+//!
+//! **范围**：只处理 `ProxyConfig::Manual { kind: Socks5 }`；直连 / 系统代理 / HTTP 代理
+//! 仍走 WinHTTP 路径（`super::winhttp`），已实现且经端到端测试验证，不迁移。
+
+use std::time::Duration;
+
+use super::{HttpMethod, HttpRequest, HttpResponse, ProxyAuth, ProxyEndpoint, MAX_RESPONSE_BYTES};
+use crate::error::{AppError, AppResult};
+
+/// 经 SOCKS5 代理发送请求（ureq 3.x 的阻塞 API）。
+pub(super) fn send(req: &HttpRequest, endpoint: &ProxyEndpoint) -> AppResult<HttpResponse> {
+    let proxy_uri = build_proxy_uri(endpoint);
+    let proxy =
+        ureq::Proxy::new(&proxy_uri).map_err(|_| AppError::Translate("代理配置无效".into()))?;
+    let agent = ureq::Agent::config_builder()
+        .proxy(Some(proxy))
+        .timeout_global(Some(Duration::from_secs(
+            req.timeout_secs.clamp(5, 120) as u64
+        )))
+        .build()
+        .new_agent();
+
+    // ureq 3.x 用 typestate 区分"带体/不带体"的构建器，GET 与 POST 类型不同，
+    // 不能放进同一个 match 表达式——分支内各自完成发送。
+    let response = match req.method {
+        HttpMethod::Get => {
+            let mut request = agent.get(&req.url);
+            for (name, value) in &req.headers {
+                request = request.header(name, value);
+            }
+            request.call()
+        }
+        HttpMethod::Post => {
+            let mut request = agent.post(&req.url);
+            for (name, value) in &req.headers {
+                request = request.header(name, value);
+            }
+            if req.body.is_empty() {
+                // POST 空体：显式给空 body（post() 已进入 WithBody 状态机）
+                request.send(Vec::new())
+            } else {
+                request.send(req.body.as_bytes())
+            }
+        }
+    }
+    .map_err(map_ureq_error)?;
+
+    let status = response.status().as_u16();
+    // 响应体上限沿用 WinHTTP 路径的常量，避免两条传输行为不一致
+    let body = response
+        .into_body()
+        .read_to_string()
+        .map_err(|err| AppError::Translate(format!("读取响应内容失败：{err}")))?;
+    if body.len() > MAX_RESPONSE_BYTES {
+        return Err(AppError::Translate(
+            "响应内容过大，已中止（接口可能返回了非预期内容）".into(),
+        ));
+    }
+    Ok(HttpResponse { status, body })
+}
+
+/// 组装代理串：`socks5://[user:pass@]host:port`。
+///
+/// 主机与用户名的合法性由设置校验层保证（`validate_proxy_manual` 的字符白名单），
+/// 这里不再重复校验——但**不打印**该串（含凭据）。
+fn build_proxy_uri(endpoint: &ProxyEndpoint) -> String {
+    let host = endpoint.host.trim();
+    let credentials = endpoint
+        .auth
+        .as_ref()
+        .map(|ProxyAuth { username, password }| format!("{username}:{password}@"))
+        .unwrap_or_default();
+    format!("socks5://{credentials}{host}:{}", endpoint.port)
+}
+
+/// 把 ureq 的错误转成用户可读的文案（不回显代理串与凭据）。
+fn map_ureq_error(err: ureq::Error) -> AppError {
+    let message = match err {
+        // 4xx/5xx 被 ureq 默认转为错误；这里仍按状态码语义交给上层统一处理
+        ureq::Error::StatusCode(code) => {
+            return AppError::Translate(format!("接口返回状态码 {code}"));
+        }
+        ureq::Error::BadUri(_) => "请求地址格式无效".to_owned(),
+        ureq::Error::InvalidProxyUrl => "代理地址格式无效".to_owned(),
+        ureq::Error::HostNotFound => "代理主机名无法解析".to_owned(),
+        ureq::Error::Timeout(_) => "请求超时".to_owned(),
+        ureq::Error::Io(io) => format!("网络读写失败（{io}）"),
+        ureq::Error::Tls(reason) => format!("TLS 握手失败（{reason}）"),
+        ureq::Error::Http(e) => format!("请求构造失败（{e}）"),
+        ureq::Error::Protocol(e) => format!("HTTP 协议错误（{e}）"),
+        ureq::Error::RedirectFailed => "重定向失败".to_owned(),
+        other => format!("网络请求失败（{other}）"),
+    };
+    AppError::Translate(message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_proxy_uri, ProxyAuth, ProxyEndpoint};
+    use crate::translate::http::ProxyKind;
+
+    fn endpoint(
+        kind: ProxyKind,
+        host: &str,
+        port: u16,
+        auth: Option<(&str, &str)>,
+    ) -> ProxyEndpoint {
+        ProxyEndpoint {
+            kind,
+            host: host.into(),
+            port,
+            auth: auth.map(|(u, p)| ProxyAuth {
+                username: u.into(),
+                password: p.into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn proxy_uri_without_auth() {
+        let e = endpoint(ProxyKind::Socks5, "127.0.0.1", 1080, None);
+        assert_eq!(build_proxy_uri(&e), "socks5://127.0.0.1:1080");
+    }
+
+    #[test]
+    fn proxy_uri_with_auth() {
+        let e = endpoint(
+            ProxyKind::Socks5,
+            "proxy.local",
+            1080,
+            Some(("user", "pass")),
+        );
+        assert_eq!(build_proxy_uri(&e), "socks5://user:pass@proxy.local:1080");
+    }
+
+    #[test]
+    fn proxy_uri_never_changes_scheme() {
+        // 防御：无论 host 被污染成什么，都不得改变 scheme（依赖校验层白名单 + 此处只拼 socks5://）
+        let e = endpoint(ProxyKind::Socks5, "http://evil", 80, None);
+        assert!(build_proxy_uri(&e).starts_with("socks5://"));
+    }
+}

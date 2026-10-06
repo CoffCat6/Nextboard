@@ -1,0 +1,21 @@
+# ninja log v6
+20	167	8129698899742615	nextboard_autogen/timestamp	b4e391b81bb65f3c
+142	2558	8129625545849716	CMakeFiles/nextboard.dir/src/main.cpp.obj	3e4ef4acd9061d65
+20	167	8129698899742615	nextboard_autogen/mocs_compilation.cpp	b4e391b81bb65f3c
+392	2780	8129624826793712	CMakeFiles/nextboard.dir/src/host/core_bridge.cpp.obj	cc8686aeb16942b7
+20	167	8129698899742615	D:/3project/rust/Nextboard/app/build/nextboard_autogen/timestamp	b4e391b81bb65f3c
+20	167	8129698899742615	D:/3project/rust/Nextboard/app/build/nextboard_autogen/mocs_compilation.cpp	b4e391b81bb65f3c
+382	3100	8129693016513065	CMakeFiles/nextboard.dir/nextboard_autogen/mocs_compilation.cpp.obj	fa8454d8bf69a5cb
+467	3498	8129571965321640	CMakeFiles/nextboard.dir/src/pin/pin_window.cpp.obj	bb49b25ee695f348
+386	3106	8129693016555168	CMakeFiles/nextboard.dir/src/panel/panel_window.cpp.obj	41730af23e1fc6a3
+440	3762	8129571965050660	CMakeFiles/nextboard.dir/src/host/tray.cpp.obj	39a388589cc5a25d
+463	3825	8129571965276505	CMakeFiles/nextboard.dir/src/capture/capture_session.cpp.obj	eb822f50041bb550
+444	4191	8129571965095802	CMakeFiles/nextboard.dir/src/host/hotkeys.cpp.obj	adaae37d431dad40
+436	3860	8129571965020586	CMakeFiles/nextboard.dir/src/host/single_instance.cpp.obj	fb8f813508d10ecf
+168	3125	8129698901223207	CMakeFiles/nextboard.dir/src/panel/sciter_view.cpp.obj	ff26cc06b9c4517b
+3108	3408	8129693043769741	nextboard.exe	db0155e1da4c0733
+16	449	8129604606131273	build.ninja	471da5d5329e8c75
+149	2353	8129625186181887	CMakeFiles/nextboard.dir/src/panel/bridge.cpp.obj	ab50d96ce838defd
+8	56	8129698696911555	panel/main.htm	8e8355dea21f308a
+8	56	8129698696911555	D:/3project/rust/Nextboard/app/build/panel/main.htm	8e8355dea21f308a
+21	361	8129699041060919	nextboard.exe	db0155e1da4c0733

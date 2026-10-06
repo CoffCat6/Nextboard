@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = ["nbcore", "nbcore-tests"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+authors = ["Nextboard"]
+
+[workspace.dependencies]
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v7"] }
+blake3 = "1"
+chrono = "0.4"
+log = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time"] }
+
+[profile.release]
+# nbcore.dll 被 C++ 宿主加载:panic 不得展开穿 FFI(由 ffi 层 catch_unwind 拦截),
+# 但 abort 会直接杀死宿主进程,故核心必须 unwind —— 与 clipboard-plus 唯一 profile 差异
+panic = "unwind"
+lto = true
+codegen-units = 1
+strip = true
+opt-level = 3

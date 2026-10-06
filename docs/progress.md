@@ -1,0 +1,279 @@
+# 开发进度日志
+
+> 按里程碑记录关键决策与实测数据,保持第一代 phase 文档的习惯。
+
+## 2026-10-05 S1(nbcore.dll)完成
+
+### 环境(S0)
+
+- Rust 1.98.1(x86_64-pc-windows-msvc)/ VS2022 MSVC 14.44 / Qt 6.9.0 msvc2022_64 / CMake 4.0.1。
+- clipboard-plus 定版 tag:`nextboard-baseline-20261005`(工作区尚有 7 行未提交改动,以 tag 为准)。
+- Sciter 许可:本机网络受限无法直连 sciter.com 获取原文;检索结果显示其许可为
+  "binary 免费使用 + 特定条件商业授权"模式。**风险 R2 仍开放**,S2 嵌入 PoC 前须由
+  用户到官网确认(见 03-roadmap.md S0.1)。
+
+### 里程碑
+
+| 步骤 | 结果 |
+| --- | --- |
+| M1.1 error+store 平移 | 26 单测全绿;error.rs 去 Tauri 化(去 Store/Clipboard/Hotkey/Tauri 变体,增 Json/Panicked) |
+| M1.2 translate+ocr+settings+capture+screen | 141 单测全绿;translate/window.rs 的窗口逻辑不迁移,历史改为模块级内存队列;capture 只迁数据层(枚举/捕获/裁剪),会话归 C++ |
+| M1.3 clip 事件驱动化 + schema v5 | 160 单测全绿;监听改为 AddClipboardFormatListener 消息窗口;v5 迁移加 source/tags |
+| M2 FFI 门面 | nb_init/nb_call/nb_version/nb_abi_version/nb_free_string/nb_free_buffer/nb_shutdown/nb_capture_monitor/nb_capture_crop;panic 全部 catch_unwind |
+| M3 C++ 冒烟宿主 | 11/11 PASS(含真机剪贴板中文写读、错误隔离、shutdown 后拒调) |
+
+### 实测数据
+
+- `cargo build --release`:**50.6s**,nbcore.dll **3.65MB**(x64,strip+lto+opt3)。
+- 单测:160 passed / 5 ignored(原第一代 OCR 探测类真机用例在 CI 环境跳过)。
+- 冒烟宿主 C++ 编译即通过 MSVC 链接 nbcore.dll.lib(自动生成导入库,无需 .def)。
+
+### 踩坑记录
+
+1. **clipboard-win 的 ErrorCode 需要 `std` feature**:第一代由 tauri 传递启用,
+   剥离后必须显式声明(错误表现为 thiserror 的 `#[from]` 报 AsDynError 不满足)。
+2. **windows 0.62 API 位置与签名**:AddClipboardFormatListener/RemoveClipboardFormatListener
+   在 `Win32::System::DataExchange`(不是 WindowsAndMessaging);PostMessageW 的 hwnd
+   参数是 `Option<HWND>`;clipboard_win 的 `raw::size` 返回 `Option<NonZeroUsize>`。
+3. **release profile 的 panic 必须 unwind**:已在 core/Cargo.toml 注释固定;
+   全部导出函数 catch_unwind,冒烟验证非法入参返回 `{"ok":false,"error":{…}}` 而非崩溃。
+4. **serde_json 字段序**:to_value 的 Map 按字母序输出,宿主断言不要写死字段顺序。
+5. **MSVC 编译含中文的 C++ 源码**:加 `/utf-8`(默认代码页 936 报 C4819 且可能错编译)。
+
+### FFI 方法表现状(ABI v1)
+
+已实现:list_entries / entry_counts / get_entry / delete_entry / clear_history /
+set_pinned / copy_text_to_clipboard / read_clipboard_text / get_settings /
+save_settings / translate_text / translate_history / clear_translate_history /
+translate_probe / proxy_probe / ocr_probe / ocr_entry / ingest_capture_png;
+另加 nb_capture_monitor / nb_capture_crop(RGBA 通道)。
+
+第一代 command 未纳入 v1(按 02 §4.2 移交 C++ 或后续迭代):overlay_*/editor_*/
+commit_capture/capture_*/create_pin 系列/save_entry_*/reveal_entry/
+save_text_file/open_translate_window/translate_init/suspend_hotkeys 等。
+
+### 下一步(S2)
+
+Qt 宿主骨架:进程壳(托盘/热键/单实例)→ Sciter 嵌入 PoC → 遮罩 PoC(QImage 直绘
+nb_capture_monitor 的像素)→ 贴图 PoC。
+
+---
+
+## 2026-10-06 S2(Qt 宿主骨架 + 三窗口 PoC)完成
+
+### 里程碑
+
+| 步骤 | 结果 |
+| --- | --- |
+| S2.1a Qt 壳 | 单实例(命名互斥量)+ 托盘(菜单含暂停监听,读写 nbcore 设置)+ 文件日志 |
+| S2.1b 热键 + nbcore 集成 | RegisterHotKey 管理,6 组合键全部注册成功;CoreBridge 校验 ABI 版本 |
+| S2.3 Sciter 嵌入 | **mixin 模式**:Qt 顶层 HWND 上经 SciterProcND 驱动引擎,主面板 HTML 加载成功 |
+| S2.4 遮罩 PoC | OverlayWidget 冻结底图 + 半透明罩 + 框选亮框 + 尺寸提示 + Esc 取消 |
+| S2.5 贴图 PoC | PinWindow 置顶/拖动/滚轮缩放/Alt+滚轮透明度/双击关闭 |
+
+### 关键决策与踩坑
+
+1. **Sciter v6 嵌入采用 mixin 模式(SciterProcND)而非 SW_CHILD 子窗口**——SDK 明确
+   子窗口模式"not anymore supported"。Qt 对接:PanelWindow::nativeEvent 把顶层窗口
+   消息先转发 SciterProcND,handled 则拦截;SC_LOAD_DATA 回调兜底 this://app/ 资源。
+2. **互斥量名禁用自定义 "目录\名称" 前缀**:本环境下 `Nextboard\xxx` 形式的名字
+   CreateMutexW 返回 NULL + ERROR_PATH_NOT_FOUND(同名调用在 PowerShell 中正常,
+   怀疑与沙箱/作业对象命名空间限制相关)。改用 plain name 解决。
+3. **GetLastError 时序**:CreateMutexW 与 GetLastError 之间任何分配/释放(含临时
+   std::wstring 析构)都会覆盖 last-error——先拼好名字、立即取错误码。
+4. **windeployqt 部署 Qt 运行时**;sciter.dll(18.4MB,D2D 版)与 nbcore.dll 由
+   CMake POST_BUILD 自动拷贝;panel/ HTML 目录同样部署。
+5. **EULA 合规**:主面板 footer 已含 "Uses Sciter Engine (https://sciter.com)…" 署名。
+
+### 运行验证(真机)
+
+- 进程稳定存活(6s+ 多轮);nextboard.log 无错误;
+- nbcore 初始化 OK(数据目录 %LOCALAPPDATA%/Nextboard);
+- 6 个全局热键注册成功(未与其他程序冲突);
+- Sciter 引擎附着主面板窗口并加载 panel/main.htm。
+
+### 遗留(S3 处理)
+
+- 遮罩框选确认后的 nb_capture_crop 裁剪 + ingest 入库接线(坐标已回传);
+- Sciter ↔ C++ 桥(sciter::om::asset)打通 list_entries 数据驱动列表;
+- 贴图接 pinLatest 数据查询;编辑器窗口(QGraphicsScene,S4);
+- 无边框主面板的拖拽区域(HTML 上 data-role="window-drag" 或 native 拦截);
+- 滚轮事件未转发引擎(S3 列表滚动时补)。
+
+---
+
+## 2026-10-06(二)S2.3 界面渲染修复 + 构建脚本
+
+### "运行后没有正常界面"排障实录
+
+现象:exe 启动、进程存活、日志全绿,但屏幕上看不到界面。用 PrintWindow/
+CopyFromScreen 截图逐步定位,先后修掉四个叠加的问题:
+
+| # | 问题 | 修复 |
+| --- | --- | --- |
+| 1 | **启动即退出**(偶发):主面板从未获得焦点时失焦隐藏 200ms 触发 hide(),唯一窗口关闭 → 应用退出 | blur-hide 仅在 `m_everFocused` 后启用;`setQuitOnLastWindowClosed(false)` 常驻托盘(第一代语义) |
+| 2 | **窗口完全透明**:mixin 模式(SciterProcND)下 Qt 拥有 WM_PAINT/backing store,引擎 GDI 绘制被 Qt 合成覆盖,两套绘制管线打架 | **弃用 mixin,改 ProcX 位图模式**(官方 demos.lite/lite-bitmap 的 Qt 适配):引擎渲染进共享 DIB 表面,Qt paintEvent 里 drawImage —— 渲染路径唯一 |
+| 3 | **ProcX 表面接错时序**:resizeEvent 早于 attach 发生,`SXM_SIZE`(交像素指针)被跳过,引擎渲染进空表面 → 画面恒为初始底色 | attach() 内补发 `SXM_SIZE`;paintEvent 先发 `SXM_PAINT`(引擎按需渲染)再 drawImage |
+| 4 | **DPI 混乱**(1.75x 放大渲染/文字忽大忽小)与中文乱码:工程无 DPI 声明,坐标被虚拟化;HTML 无 charset | 嵌入 per-monitor V2 manifest(CMake `/MANIFESTINPUT`);`<meta charset="utf-8">` |
+
+最终验收截图:主面板 800×600 完整渲染(标题/搜索框/提示文案/Sciter 署名页脚,
+中文正常)。
+
+### ProcX 模式的 Qt 适配要点(工程范式)
+
+- 表面:`QImage(Format_RGB32)`,把 `bits()/bytesPerLine()` 经 `SXM_SIZE` 交给引擎;
+- 渲染:paintEvent 里 `SXM_PAINT(rc)` → `QPainter::drawImage`(同进程共享像素,零拷贝);
+- 心跳:QTimer 16ms 发 `SXM_HEARTBIT`(CSS 动画/计时器驱动);
+- 输入:Qt 事件 → `SXM_MOUSE`/`SXM_KEY`(按钮/修饰键按位掩码组装);
+- 失效:SC_INVALIDATE_RECT 回调 → QWidget::update(rect) 触发重绘;
+- 注意:`SciterProcND(WM_CREATE)` 在 Qt 宿主下**不创建引擎**(实测 version=0 空转),
+  必须走 ProcX 的 `SXM_CREATE(SL_TARGET_BITMAP, FALSE)`。
+
+### build.ps1 部署选项
+
+- 自动判定:`platforms\qwindows.dll` 缺失即自动 windeployqt(此前只查
+  Qt6Widgets.dll,平台插件缺失时 exe 弹窗报错或无窗口);`-Deploy` 强制重跑;
+- 坑 1:PowerShell 5.1 要求脚本**带 BOM UTF-8**(编辑工具会剥 BOM,中文注释崩解析);
+- 坑 2:链接期 LNK1104 = 旧 nextboard.exe 未退占文件,先杀进程再构建;
+- 坑 3:自动化/无人值守会话里 activateWindow 常失败,依赖焦点初态的逻辑必须有
+  "从未聚焦"降级路径。
+
+### 下一步(S3)
+
+主面板功能:sciter::om 桥(list_entries 驱动列表)→ 分页/分类/缩略图 → 搜索 →
+设置视图 → 翻译抽屉。
+
+---
+
+## 2026-10-06(三)S3 主面板数据驱动完成
+
+### 里程碑
+
+| 步骤 | 结果 |
+| --- | --- |
+| S3.1 Sciter 桥 | `NextboardAsset`(sciter::om::asset)+ SciterSetGlobalAsset → JS 全局 `Nextboard.*`;nbcore JSON 响应 ↔ sciter::value 经 CVT_JSON_LITERAL 整体互转 |
+| S3.2 面板五视图 | main.htm 重写:分类标签(计数徽标)/卡片列表(时间/大小/类型/固定/来源徽标)/设置抽屉/翻译抽屉/toast |
+| S3.3 图片通路 | `Nextboard.imageUrl(id, thumb)` → blobs 绝对路径 file:// URL(缩略图 .thumb.png 命名对齐 core 缓存) |
+| S3.4 设置/翻译联动 | 设置读改写 save_settings;翻译抽屉走 translate_text(三类 Provider 就绪) |
+| S3.5 验收 | 自截图确认:分类计数、3 条真实条目卡片、中文渲染、时间/大小格式化全部正常 |
+
+### nbcore 增强
+
+- 新增 `copy_entry` FFI 方法:按条目类型写剪贴板(文本 Unicode / 图片 PNG→CF_DIBV5 /
+  文件 CF_HDROP),与第一代 commands.rs 的 copy_entry 语义对齐;
+- 新增 `write_files_to_clipboard`(clipboard-win 的 `set(formats::FileList,…)` 泛型
+  推导有缺陷,改用 `raw::set_file_list` + Clipboard 重试 guard);
+- 160 单测保持全绿。
+
+### 关键踩坑(S3)
+
+1. **CoreBridge 双实例**:main.cpp 栈实例 `CoreBridge core` 与桥的
+   `CoreBridge::instance()` 是两个对象,桥侧永远"未初始化"→ 列表加载失败且无错误
+   消息。修复:main 改用 `CoreBridge::instance()`,全进程唯一。
+2. **Sciter `document.ready` 是赋值式回调**(`document.ready = function(){}),
+   不是 Promise(`.then()` 静默无效)—— 列表卡"加载中"的直接原因。
+3. **Sciter CSS 弹性单位是 `*`**(`width: 1*`),不是 CSS3 的 `flex: 1` —— header
+   搜索框塌陷的原因。
+4. **HTML 不在 CMake 依赖里**:改 main.htm 后 POST_BUILD 不重拷,build/panel 里是
+   旧 UI。已加 `panel_assets` 自定义目标把 main.htm 纳入依赖图。
+5. **PrintWindow 不可信**:DWM 缓存旧帧,RedrawWindow 强刷也无效;最终用
+   `--screenshot` 参数让应用自己 `QWidget::grab()`(触发 paintEvent → SXM_PAINT →
+   引擎重渲),成为自动化验收的可靠手段。
+6. **SciterEval 在 ProcX(SL_TARGET_BITMAP) 引擎实例上不可用**(实测 `1+1` 返回
+   FALSE、无主 VM)—— 注入式验收路线放弃,`setSearchText` 接口保留待
+   sciter::host::call_function(需主 VM)再启用;搜索链路的正确性由 nbcore 的
+   FTS/中文兜底单测保障。
+
+### 自动化验收设施
+
+`nextboard.exe --screenshot <path> [--query <text>]`:启动 → 延时 5s 自截 → 退出。
+截图经 widget grab(含 Sciter 表面),是唯一可信的画面取证方式。
+
+### 遗留(S3 收尾/S4)
+
+- 搜索框 UI 注入验收(待 sciter::host::call_function,需主 VM;逻辑已由 core 单测覆盖);
+- 滚轮事件转发引擎(列表滚动,S3 收尾);
+- 分页加载更多(loadMore)与条目右键菜单(删除/固定/OCR);
+- 翻译抽屉的语言选择持久化;设置页自定义数据目录;
+- S4:编辑器(QGraphicsScene)、commit_capture 闭环。
+
+---
+
+## 2026-10-06(四)剪贴板"不可用"排障 + 通知链路补全
+
+### 现象与定位
+
+用户报告"剪贴板无法使用"。分层排查:
+
+| 检查项 | 结果 |
+| --- | --- |
+| nbcore 监听线程注册 | ✅ `nbcore.log`:"剪贴板监听注册: true / 监听线程就绪"(新加的文件日志) |
+| 进程内剪贴板读写 | ✅ 冒烟宿主 copy_text/copy_entry 全过 |
+| 数据库内容 | ✅ 历史测试条目全部在库 |
+| **UI 实时刷新** | ❌ **`notify_hwnd=0`,核心的 WM_APP 通知被丢弃,面板只在启动时拉一次数据** |
+
+**根因**:通知链路断在最后一环。监听/入库一直正常,但用户复制的新内容永远不会
+出现在列表里 —— 表现为"剪贴板无法使用"。
+
+### 修复(通知链路全通)
+
+```
+nbcore 监听线程 → PostMessage(面板HWND, WM_APP_CLIP_CHANGED)
+  → PanelWindow::nativeEvent → emit clipChanged()
+  → pushNativeNotification("clip_changed") → 桥队列
+  → JS setInterval(1s) takeNotifications() → refresh()
+```
+
+- nbcore 新增 `nb_set_notify_hwnd` 导出 + `core::set_notify_hwnd`(运行期更新);
+- CoreBridge 新增 `setNotifyHwnd`;main.cpp 在面板创建后接线;
+- 桥新增通知队列(`takeNotifications`,互斥锁保护)+ JS 1s 轮询。
+
+### 顺带修复
+
+- **nbcore 日志缺失**:log crate 无 subscriber,监听/入库日志全丢。
+  新增 `init_logging`(极简文件日志器 → 数据目录 nbcore.log),nb_init 首行调用;
+- `--screenshot` 增加 `--query` 参数(搜索注入接口预留);
+- 清理全部排障临时脚本。
+
+### 环境限制(重要)
+
+本自动化会话(沙箱)**禁止跨进程剪贴板访问**:纯 PowerShell 连写两次都失败、
+python OpenClipboard 全败、GetOpenClipboardWindow 返回 0 —— 与 nbcore 无关。
+因此"外部复制 → 面板出现条目"的端到端验证**需要用户在真实桌面手动执行**:
+启动 nextboard.exe → 随便复制一段文字 → 1 秒内面板列表应自动出现该条目。
+(进程内读写已被冒烟宿主与单测覆盖,监听注册已被 nbcore.log 确认。)
+
+---
+
+## 2026-10-06(五)主界面按钮不可点击修复
+
+### 现象
+
+主面板上的按钮(设置/翻译/分类标签)点击无反应。
+
+### 根因(两个)
+
+1. **Sciter.JS 的选择器委托事件必须带 `^` 前缀**:`document.on('^click', selector, fn)`
+   ——我们写的 `document.on('click', selector, fn)` 静默无效(SDK gsciter/sys-info.htm
+   官方示例确认此语法)。面板里全部按钮/卡片/标签绑定因此失效。
+2. **MOUSE_UP 的按钮位错误**:release 事件里 `e->buttons()` 已不含该键,
+   UP 消息的 buttons=0,引擎判定按钮不匹配可能丢弃点击完成序列。
+   修复:UP/DCLICK 用 `e->button()`(单键),DOWN/MOVE 用 `e->buttons()`。
+
+### 修复内容
+
+- main.htm:全部委托事件加 `^` 前缀(卡片/标签/设置/翻译/保存/关闭/复制译文);
+- sciter_view.cpp:sendMouse 按 UP/DCLICK vs DOWN/MOVE 区分按钮位来源;
+- 双击序列注释明确(DOWN→UP→DCLICK 替代第二次 DOWN)。
+
+### 验收方式说明
+
+沙箱环境的截图(PrintWindow 的 DWM 缓存帧、CopyFromScreen 被前台锁遮挡)与
+UI 点击(mouse_event 受前台锁/焦点限制)都不可靠,自动化验收在该环境只能覆盖
+"进程内可达"的部分(构建/运行/日志/自截图/DB)。交互类功能请手动验证:
+点击设置按钮应打开抽屉;点分类标签应过滤;点卡片应复制并 toast;
+列表滚动;复制新内容 1s 内自动出现。
+
+### 下一步
+
+S3 收尾(滚动转发/右键菜单/loadMore)→ S4 编辑器与截图闭环。

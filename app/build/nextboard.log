@@ -1,0 +1,149 @@
+[INFO] Nextboard starting, appDir = "D:/3project/rust/Nextboard/app/build"
+[INFO] bridge: loading nbcore.dll
+[INFO] bridge: resolving exports
+[INFO] bridge: calling nb_init "{\"data_dir\":\"C:\\\\Users\\\\15601\\\\AppData\\\\Local\\\\Nextboard\\\\Nextboard\",\"notify_hwnd\":0}"
+[INFO] bridge: nb_init returned 0
+[INFO] nbcore ready
+[INFO] 热键已注册: "Ctrl+Shift+V"
+[INFO] 热键已注册: "Ctrl+Shift+A"
+[INFO] 热键已注册: "Ctrl+Shift+Q"
+[INFO] 热键已注册: "Ctrl+Shift+P"
+[INFO] 热键已注册: "Ctrl+Shift+T"
+[INFO] 热键已注册: "Ctrl+Shift+E"
+[INFO] Sciter ProcX attached, dpi = 96 , html = "D:/3project/rust/Nextboard/app/build/panel/main.htm"
+[INFO] Nextboard starting, appDir = "D:/3project/rust/Nextboard/app/build"
+[INFO] bridge: loading nbcore.dll
+[INFO] bridge: resolving exports
+[INFO] bridge: calling nb_init "{\"data_dir\":\"C:\\\\Users\\\\15601\\\\AppData\\\\Local\\\\Nextboard\\\\Nextboard\",\"notify_hwnd\":0}"
+[INFO] bridge: nb_init returned 0
+[INFO] nbcore ready
+[INFO] 热键已注册: "Ctrl+Shift+V"
+[INFO] 热键已注册: "Ctrl+Shift+A"
+[INFO] 热键已注册: "Ctrl+Shift+Q"
+[INFO] 热键已注册: "Ctrl+Shift+P"
+[INFO] 热键已注册: "Ctrl+Shift+T"
+[INFO] 热键已注册: "Ctrl+Shift+E"
+[INFO] Sciter ProcX attached, dpi = 96 , html = "D:/3project/rust/Nextboard/app/build/panel/main.htm"
+[INFO] Nextboard starting, appDir = "D:/3project/rust/Nextboard/app/build"
+[INFO] bridge: loading nbcore.dll
+[INFO] bridge: resolving exports
+[INFO] bridge: calling nb_init "{\"data_dir\":\"C:\\\\Users\\\\15601\\\\AppData\\\\Local\\\\Nextboard\\\\Nextboard\",\"notify_hwnd\":0}"
+[INFO] bridge: nb_init returned 0
+[INFO] nbcore ready
+[INFO] 热键已注册: "Ctrl+Shift+V"
+[INFO] 热键已注册: "Ctrl+Shift+A"
+[INFO] 热键已注册: "Ctrl+Shift+Q"
+[INFO] 热键已注册: "Ctrl+Shift+P"
+[INFO] 热键已注册: "Ctrl+Shift+T"
+[INFO] 热键已注册: "Ctrl+Shift+E"
+[INFO] Sciter ProcX attached, dpi = 168 , html = "D:/3project/rust/Nextboard/app/build/panel/main.htm"
+[INFO] Nextboard starting, appDir = "D:/3project/rust/Nextboard/app/build"
+[INFO] bridge: loading nbcore.dll
+[INFO] bridge: resolving exports
+[INFO] bridge: calling nb_init "{\"data_dir\":\"C:\\\\Users\\\\15601\\\\AppData\\\\Local\\\\Nextboard\\\\Nextboard\",\"notify_hwnd\":0}"
+[INFO] bridge: nb_init returned 0
+[INFO] nbcore ready
+[INFO] 热键已注册: "Ctrl+Shift+V"
+[INFO] 热键已注册: "Ctrl+Shift+A"
+[INFO] 热键已注册: "Ctrl+Shift+Q"
+[INFO] 热键已注册: "Ctrl+Shift+P"
+[INFO] 热键已注册: "Ctrl+Shift+T"
+[INFO] 热键已注册: "Ctrl+Shift+E"
+[INFO] Sciter ProcX attached, dpi = 168 , html = "D:/3project/rust/Nextboard/app/build/panel/main.htm"
+[INFO] Nextboard starting, appDir = "D:/3project/rust/Nextboard/app/build"
+[INFO] bridge: loading nbcore.dll
+[INFO] bridge: resolving exports
+[INFO] bridge: calling nb_init "{\"data_dir\":\"C:\\\\Users\\\\15601\\\\AppData\\\\Local\\\\Nextboard\\\\Nextboard\",\"notify_hwnd\":0}"
+[INFO] bridge: nb_init returned 0
+[INFO] nbcore ready
+[INFO] 热键已注册: "Ctrl+Shift+V"
+[INFO] 热键已注册: "Ctrl+Shift+A"
+[INFO] 热键已注册: "Ctrl+Shift+Q"
+[INFO] 热键已注册: "Ctrl+Shift+P"
+[INFO] 热键已注册: "Ctrl+Shift+T"
+[INFO] 热键已注册: "Ctrl+Shift+E"
+[INFO] Sciter ProcX attached, dpi = 168 , html = "D:/3project/rust/Nextboard/app/build/panel/main.htm"
+[WARN] QPainter::begin: Paint device returned engine == 0, type: 3
+[WARN] QPainter::setCompositionMode: Painter not active
+[WARN] QPainter::fillRect: Painter not active
+[WARN] QPainter::setCompositionMode: Painter not active
+[WARN] QPainter::setBrush: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::drawPath: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::setFont: Painter not active
+[WARN] QPainter::setFont: Painter not active
+[WARN] QPainter::setBrush: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::setBrush: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::setBrush: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::end: Painter not active, aborted
+[WARN] QPainter::begin: Paint device returned engine == 0, type: 3
+[WARN] QPainter::setCompositionMode: Painter not active
+[WARN] QPainter::fillRect: Painter not active
+[WARN] QPainter::setCompositionMode: Painter not active
+[WARN] QPainter::setBrush: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::drawPath: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::setFont: Painter not active
+[WARN] QPainter::setFont: Painter not active
+[WARN] QPainter::setBrush: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::setBrush: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::setBrush: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::end: Painter not active, aborted
+[INFO] 截图取消
+[INFO] 截图取消
+[WARN] QPainter::begin: Paint device returned engine == 0, type: 3
+[WARN] QPainter::setCompositionMode: Painter not active
+[WARN] QPainter::fillRect: Painter not active
+[WARN] QPainter::setCompositionMode: Painter not active
+[WARN] QPainter::setBrush: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::drawPath: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::setFont: Painter not active
+[WARN] QPainter::setFont: Painter not active
+[WARN] QPainter::setBrush: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::setBrush: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::setBrush: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::end: Painter not active, aborted
+[WARN] QPainter::begin: Paint device returned engine == 0, type: 3
+[WARN] QPainter::setCompositionMode: Painter not active
+[WARN] QPainter::fillRect: Painter not active
+[WARN] QPainter::setCompositionMode: Painter not active
+[WARN] QPainter::setBrush: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::drawPath: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::setFont: Painter not active
+[WARN] QPainter::setFont: Painter not active
+[WARN] QPainter::setBrush: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::setBrush: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::setBrush: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::setPen: Painter not active
+[WARN] QPainter::end: Painter not active, aborted
+[INFO] 截图取消
+[INFO] 选区确认(屏 0 ): QRect(516,278 1078x686)

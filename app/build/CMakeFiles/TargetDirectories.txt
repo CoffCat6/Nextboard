@@ -1,0 +1,6 @@
+D:/3project/rust/Nextboard/app/build/CMakeFiles/nextboard.dir
+D:/3project/rust/Nextboard/app/build/CMakeFiles/panel_assets.dir
+D:/3project/rust/Nextboard/app/build/CMakeFiles/edit_cache.dir
+D:/3project/rust/Nextboard/app/build/CMakeFiles/rebuild_cache.dir
+D:/3project/rust/Nextboard/app/build/CMakeFiles/nextboard_autogen_timestamp_deps.dir
+D:/3project/rust/Nextboard/app/build/CMakeFiles/nextboard_autogen.dir
