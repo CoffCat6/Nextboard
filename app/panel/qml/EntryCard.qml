@@ -121,14 +121,14 @@ Rectangle {
                 visible: root.pinned
                 text: "固定"; font.pixelSize: 10
                 padding: 3; leftPadding: 6; rightPadding: 6
-                color: "#222"; background: Rectangle { color: Theme.pin; radius: 4 }
+                color: Theme.onPin; background: Rectangle { color: Theme.pin; radius: 4 }
             }
             Label {
                 visible: root.source !== "" && root.source !== "clipboard"
                 text: root.source; font.pixelSize: 10
                 padding: 3; leftPadding: 6; rightPadding: 6
-                color: root.source === "capture" ? "#7ec2ff"
-                     : root.source === "translate" ? "#c9a7ff" : Theme.muted
+                color: root.source === "capture" ? Theme.sourceCapture
+                     : root.source === "translate" ? Theme.sourceTranslate : Theme.muted
                 background: Rectangle { color: Theme.surface2; radius: 4 }
             }
             Label {

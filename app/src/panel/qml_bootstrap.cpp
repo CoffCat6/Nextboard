@@ -7,9 +7,9 @@
 #include <QCoreApplication>
 #include <QEvent>
 #include <QGuiApplication>
-#include <QPalette>
 #include <QQmlEngine>
 #include <QQuickStyle>
+#include <QStyleHints>
 #include <QVariant>
 
 namespace nb {
@@ -17,31 +17,23 @@ namespace nb {
 static ClipEntryModel* s_entries = nullptr;
 
 void setupQmlEnvironment() {
-    // Basic 风格 + 全局暗色调色板:Basic 控件(Button/ComboBox/SpinBox 等)的
-    // 默认配色跟随系统 QPalette,不注入则亮灰刺眼。
+    // Basic 风格:控件(Button/ComboBox/SpinBox…)的配色跟随 QPalette,
+    // 而 QPalette 现在由 CoreFacade::applyTheme 按设置注入(亮/暗两套),
+    // 这里不再写死暗色。
     QQuickStyle::setStyle("Basic");
-    QPalette dark;
-    dark.setColor(QPalette::Window, QColor(0x1e1f24));
-    dark.setColor(QPalette::WindowText, QColor(0xdfe1e8));
-    dark.setColor(QPalette::Base, QColor(0x26272e));
-    dark.setColor(QPalette::AlternateBase, QColor(0x2d2e37));
-    dark.setColor(QPalette::Button, QColor(0x2d2e37));
-    dark.setColor(QPalette::ButtonText, QColor(0xdfe1e8));
-    dark.setColor(QPalette::Text, QColor(0xdfe1e8));
-    dark.setColor(QPalette::PlaceholderText, QColor(0x9aa0ab));
-    dark.setColor(QPalette::Highlight, QColor(0x4f8cff));
-    dark.setColor(QPalette::HighlightedText, QColor(0xffffff));
-    dark.setColor(QPalette::ToolTipBase, QColor(0x2d2e37));
-    dark.setColor(QPalette::ToolTipText, QColor(0xdfe1e8));
-    dark.setColor(QPalette::BrightText, QColor(0xffffff));
-    dark.setColor(QPalette::Link, QColor(0x4f8cff));
-    QGuiApplication::setPalette(dark);
 
     qmlRegisterSingletonInstance("Nextboard.Core", 1, 0, "Core", &CoreFacade::instance());
 
     s_entries = new ClipEntryModel(qApp);
     // QML 单例类型名必须大写开头;QML 侧以 Entries.xxx 访问模型
     qmlRegisterSingletonInstance("Nextboard.Core", 1, 0, "Entries", s_entries);
+
+    // 按 settings.theme 应用一次(QPalette + Theme 单例),并跟随系统配色变化
+    // (仅 theme=system 会真正改变)
+    CoreFacade& facade = CoreFacade::instance();
+    facade.refreshThemeFromSettings();
+    QObject::connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged,
+                     &facade, &CoreFacade::reapplyTheme);
 }
 
 namespace {

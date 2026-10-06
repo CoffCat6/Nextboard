@@ -21,6 +21,8 @@ class CoreFacade : public QObject {
     /// 分类计数(all/text/image/file/pinned)。QML 直接绑定 `Core.counts[viewId]`,
     /// 依赖 countsChanged 通知刷新;缺失键返回 undefined。
     Q_PROPERTY(QVariantMap counts READ counts NOTIFY countsChanged)
+    /// 当前是否为暗色主题。QML 的 Theme 单例绑定它,切换后全部引用点自动刷新。
+    Q_PROPERTY(bool darkTheme READ darkTheme NOTIFY themeChanged)
 public:
     static CoreFacade& instance();
 
@@ -38,6 +40,20 @@ public:
     void refreshCounts();
 
     const QVariantMap& counts() const { return m_counts; }
+
+    // ---- 主题 ----
+    /// 应用主题:mode = "system" | "light" | "dark"。
+    /// system 由 C++ 侧解析系统配色(QStyleHints::colorScheme),QML 侧不感知。
+    /// 同时刷新 QPalette(Basic 风格控件)与 darkTheme 属性(Theme 单例)。
+    Q_INVOKABLE void applyTheme(const QString& mode);
+
+    /// 启动时按 settings.theme 应用一次。
+    void refreshThemeFromSettings();
+
+    /// 系统配色变化时重新解析(仅 theme=system 会真正改变)。
+    void reapplyTheme() { applyTheme(m_themeMode); }
+
+    bool darkTheme() const { return m_darkTheme; }
 
     /// UI 反馈(toast 由 QML 侧显示;C++ 各处也能发)。
     Q_INVOKABLE void showToast(const QString& message);
@@ -70,6 +86,7 @@ signals:
     void countsChanged();
     /// 请求打开翻译抽屉并预填原文(截图翻译链路 F25)。
     void translatePrefill(const QString& text);
+    void themeChanged();
 
 public:
     /// PanelWindow::nativeEvent 转发 nbcore WM_APP 通知(刷新去抖由模型侧负责)。
@@ -81,6 +98,8 @@ private:
     ~CoreFacade() = default;
 
     QVariantMap m_counts;
+    QString m_themeMode = QStringLiteral("system");
+    bool m_darkTheme = true;
 };
 
 } // namespace nb

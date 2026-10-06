@@ -148,7 +148,7 @@ Rectangle {
                         text: tabDelegate.count !== undefined
                               ? tabDelegate.label + " " + tabDelegate.count
                               : tabDelegate.label
-                        color: tabs.current === tabDelegate.viewId ? "#fff" : Theme.muted
+                        color: tabs.current === tabDelegate.viewId ? Theme.onAccent : Theme.muted
                         font.pixelSize: 12
                     }
                     MouseArea {
@@ -287,7 +287,7 @@ Rectangle {
         height: 28
         opacity: 0
         Behavior on opacity { NumberAnimation { duration: 150 } }
-        Text { id: toastText; anchors.centerIn: parent; color: "#fff"; font.pixelSize: 12 }
+        Text { id: toastText; anchors.centerIn: parent; color: Theme.onAccent; font.pixelSize: 12 }
         Timer {
             id: hideTimer
             interval: 1400

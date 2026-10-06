@@ -21,6 +21,7 @@ AppDrawer {
         maxImage.value = s.maxImageMb
         monitorCheck.checked = s.monitorEnabled === true
         ocrCheck.checked = s.ocrEnabled === true
+        skipEditorCheck.checked = s.regionSkipEditor === true
         themeCombo.currentIndex = s.theme === "light" ? 1 : s.theme === "dark" ? 2 : 0
     }
 
@@ -56,12 +57,19 @@ AppDrawer {
             id: ocrCheck
             text: "OCR 自动识别(截图文字可搜索)"
         }
+        // 取消勾选后,框选截图会先进编辑器标注,「完成」才入库 + 写剪贴板
+        CheckBox {
+            id: skipEditorCheck
+            text: "截图后直接入库(跳过编辑器)"
+        }
 
         Label { text: "主题"; color: Theme.muted; font.pixelSize: 12 }
         ComboBox {
             id: themeCombo
             Layout.fillWidth: true
             model: ["跟随系统", "浅色", "深色"]
+            // 切换即生效(不必等"保存"),给用户即时反馈
+            onActivated: Core.applyTheme(["system", "light", "dark"][currentIndex])
         }
 
         RowLayout {
@@ -82,12 +90,16 @@ AppDrawer {
                     s.maxImageMb = maxImage.value
                     s.monitorEnabled = monitorCheck.checked
                     s.ocrEnabled = ocrCheck.checked
+                    s.regionSkipEditor = skipEditorCheck.checked
                     s.theme = ["system", "light", "dark"][themeCombo.currentIndex]
                     const resp = Core.call("save_settings", s)
                     statusLabel.text = resp.ok ? "已保存"
                         : "保存失败:" + (resp.error ? resp.error.message : "")
                     statusLabel.isError = !resp.ok
-                    if (resp.ok) Entries.refreshNow()
+                    if (resp.ok) {
+                        Core.applyTheme(s.theme)   // 落盘后立即按新主题重刷
+                        Entries.refreshNow()
+                    }
                 }
             }
             Button { text: "关闭"; onClicked: root.close() }

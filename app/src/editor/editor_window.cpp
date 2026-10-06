@@ -284,8 +284,10 @@ void EditorWindow::setTool(EditorTool tool) {
 }
 
 void EditorWindow::fitCanvas() {
+    // resizeEvent 可能在构造早期(视图/场景尚未建好)就被触发,必须判空
+    if (!m_scene || !m_view || !m_view->viewport()) return;
     const QRectF rect = m_scene->sceneRect();
-    if (rect.isEmpty() || !m_view->viewport()) return;
+    if (rect.isEmpty()) return;
     m_view->resetTransform();
     const QSizeF viewport = m_view->viewport()->size();
     const qreal scale = qMin(viewport.width() / rect.width(), viewport.height() / rect.height());

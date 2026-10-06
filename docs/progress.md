@@ -570,3 +570,47 @@ QUndoStack + Ctrl+S 另存),完成后才能收尾 **4.2** 的 `regionAutoConfirm
 
 **4.2 的 `regionAutoConfirm=false`**(选区 8 向手柄微调 + Enter/双击确认)未做 ——
 当前只有「松开鼠标即确认」一种模式。这是 S4 的最后一项。
+
+---
+
+## 2026-10-06(四)编辑器不可达 + 主题切换失效修复
+
+### 现象与定位(三条,其中两条同源)
+
+1. **编辑器不弹出**:排查 `app_config.json` 发现 `regionSkipEditor: true`(默认直通),
+   而**设置界面里根本没有这个开关** —— 用户无从打开;日志亦确认走的是直通路径
+   (直接出现 `截图已入库并写入剪贴板`,全程无任何编辑器日志)。
+2. **主题无法切换**:`Theme.qml` 是**硬编码暗色单例**,`setupQmlEnvironment()` 也只注入
+   一份固定暗色 `QPalette`;设置里的 `theme` 只写进配置、不作用于任何 UI,切换自然无效。
+3. **部分文字不显现**:与 2 同源 —— QML 里散落写死的颜色(`#fff` / `#222` / `#7ec2ff` /
+   `#c9a7ff`)不随主题变化,一旦主题真正生效就会出现浅底浅字而"看不见"。
+
+### 修复
+
+1. **设置界面补 `regionSkipEditor` 开关**(「截图后直接入库(跳过编辑器)」)——编辑器从此
+   可达:勾选 = 直通(默认),取消 = 框选后进编辑器标注,「完成」才入库 + 写剪贴板。
+2. **实现真正的主题系统**:
+   - `CoreFacade` 新增 `darkTheme` 属性 + `applyTheme(mode)` + `refreshThemeFromSettings()`;
+     `system` 由 C++ 侧用 `QStyleHints::colorScheme()` 解析,QML 侧不感知;
+   - `applyTheme()` **同时注入亮/暗两套 `QPalette`** —— Basic 风格的
+     Button/ComboBox/SpinBox/TextArea 走的是 QPalette,只改 QML 的 Theme 单例是不够的;
+   - `Theme.qml` 全部改为随 `Core.darkTheme` 联动,并新增 `onAccent` / `onPin` /
+     `sourceCapture` / `sourceTranslate` 语义色;
+   - 启动时按设置应用一次;并连接 `QStyleHints::colorSchemeChanged`,跟随系统主题实时变化;
+   - 设置里切换主题**即时生效**(不必等"保存"),保存后落盘。
+3. **清除 QML 内全部硬编码颜色**,统一走 Theme 语义色。
+4. **编辑器健壮性**:`fitCanvas()` 补判空 —— `resizeEvent` 可能在构造早期(视图/场景尚未
+   建好)就触发,原实现会解引用空指针。
+
+### 验证与限制
+
+- `qmllint` 0 error;app 编译链接通过(`[25/25] Linking`)、无编译警告。
+- ⚠️ 仍需真实桌面确认:设置里取消勾选「截图后直接入库」后框选应弹出编辑器;
+  主题切换应即时生效且无低对比文字。
+
+### 顺带记录(未修)
+
+日志中成组出现的 `QPainter::begin: Paint device returned engine == 0, type: 3` 发生在
+**两次截图之间**(遮罩显示期间),且含 `setCompositionMode` / `drawPath` —— 而
+`OverlayWidget::paintEvent` 并不调用这些,故不是遮罩自身绘制,疑为 Qt 离屏合成路径的噪声。
+截图结果正常(298×953 / 2430×1632 均正确入库),暂按观感问题记录,待后续排查。
