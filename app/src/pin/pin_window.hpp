@@ -5,11 +5,18 @@
 
 namespace nb {
 
+/// 贴图窗口的初始行为,来自设置 `pinDefaultOpacity` / `pinDoubleclickClose`。
+/// (这两个设置此前在代码里零引用 —— 改设置对贴图窗口毫无影响。)
+struct PinOptions {
+    int opacityPercent = 100;        // 30–100
+    bool doubleClickClose = true;
+};
+
 class PinWindow : public QWidget {
     Q_OBJECT
 public:
-    /// image:要贴出的图;logicalSize:逻辑尺寸(物理像素图在 2x 屏自动减半)。
-    PinWindow(QImage image, QWidget* parent = nullptr);
+    /// image:要贴出的图;options:初始透明度与双击关闭行为。
+    PinWindow(QImage image, const PinOptions& options = {}, QWidget* parent = nullptr);
 
     /// 文本条目贴图:把文本渲染成位图,复用同一套窗口与交互。
     /// 第一代允许"无图时贴最近文本内容",这里是它的渲染实现。
@@ -31,6 +38,7 @@ private:
     qreal m_opacity = 1.0;    // 0.3 ~ 1.0(滚轮 + Alt 调节,或 S3 工具条)
     bool m_dragging = false;
     QPoint m_dragOffset;
+    bool m_doubleClickClose = true;
 };
 
 } // namespace nb

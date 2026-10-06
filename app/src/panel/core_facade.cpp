@@ -189,6 +189,17 @@ void CoreFacade::ocrEntry(const QString& id) {
     processCapture(id, QStringLiteral("ocr"));
 }
 
+void CoreFacade::probeTranslate(const QString& provider) {
+    auto* job = new AsyncCall;
+    job->method = "translate_probe";
+    job->req = QJsonObject{{"provider", provider}};
+    job->setAutoDelete(true);
+    job->onDone = [this](const QJsonObject& resp) {
+        emit translateProbeFinished(jsonToVariant(resp).toMap());
+    };
+    QThreadPool::globalInstance()->start(job);
+}
+
 void CoreFacade::processCapture(const QString& id, const QString& mode) {
     auto* job = new AsyncCall;
     job->method = "ocr_entry";

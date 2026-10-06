@@ -61,6 +61,10 @@ public:
     /// 翻译(网络,慢):线程池执行,完成发 translateFinished。
     Q_INVOKABLE void translateText(const QString& text, const QString& from, const QString& to);
 
+    /// 测试翻译服务(网络,慢):线程池执行,完成发 translateProbeFinished。
+    /// 必须异步 —— 探测会真发一次请求,同步调用会把界面冻住整个超时时长。
+    Q_INVOKABLE void probeTranslate(const QString& provider);
+
     /// OCR(慢):线程池执行,完成发 ocrFinished。等价于 processCapture(id, "ocr")。
     Q_INVOKABLE void ocrEntry(const QString& id);
 
@@ -81,6 +85,8 @@ signals:
     void clipChanged();
     void settingsChanged();
     void translateFinished(QVariantMap resp);
+    /// 翻译服务探测结果(provider/available/message)。
+    void translateProbeFinished(QVariantMap resp);
     void ocrFinished(QVariantMap resp);
     void toastMessage(const QString& message);
     void countsChanged();

@@ -704,3 +704,41 @@ QML 把 **`on` + 大写字母开头的标识符当作信号处理器语法**,因
 - 编译链接通过(`[19/19] Linking`)、无编译警告。
 - ⚠️ 需真实桌面确认:底图应铺满画布(而非一小点);画几笔后点「完成」应正常入库且**不闪退**;
   滚轮可缩放。
+
+---
+
+## 2026-10-06(四)补齐设置缺口:翻译配置 UI / 贴图设置落地 / 崩溃日志兜底
+
+盘点发现三类「设置项存在、但界面无入口或代码未读取」的缺口,按优先级依次补齐。
+
+### 1. 翻译配置 UI(此前翻译功能**实际不可用**)
+
+core 侧 `settings.translate_provider` 的校验与分派都正常,但**没有任何界面入口** ——
+provider / apiKey / model 只能在 `app_config.json` 手改,等于翻译功能不可用。
+
+- `SettingsDrawer` 新增「翻译服务」区:提供方三选一(OpenAI 兼容 / 微软翻译 / 自定义 HTTP),
+  按提供方**条件显示**对应字段(openai: baseUrl/apiKey/model;microsoft: endpoint/apiKey/region;
+  custom: url/method/apiKey/model/headers/bodyTemplate/responsePath),外加超时。
+- 新增「测试连接」:`CoreFacade::probeTranslate()` **异步**执行 `translate_probe` ——
+  探测会真发一次网络请求,同步调用会把界面冻住整个超时时长;结果经
+  `translateProbeFinished` 回投,展示 `available + message`。
+- 抽屉内容整体移入 `Flickable` 可滚动 —— 抽屉宽度只有主面板的 46%,内容变多后不滚动会溢出。
+
+### 2. 贴图设置落地
+
+`pinDefaultOpacity` / `pinDoubleclickClose` 此前**全仓库零引用**:`PinWindow` 里透明度与
+双击关闭是写死的,用户改设置完全无效。新增 `PinOptions`,`pinLatest()` 从设置读取后传入,
+`PinWindow` 据此设置初始透明度与双击关闭开关。
+
+### 3. 崩溃日志兜底
+
+本次闪退表现为**静默进程死亡**(日志停在最后一条正常记录上),排查全靠推理。在 `main.cpp`
+安装 `SetUnhandledExceptionFilter` + `std::set_terminate`,把未处理异常以
+`[CRASH] 未处理异常 code=0x… address=…` 写进同一份 `nextboard.log`,至少留下异常码与地址
+(常见码已注释在代码里)。安装点必须在 QApplication 之后 —— `applicationDirPath()` 依赖它。
+
+### 验证与限制
+
+- `qmllint` 0 error(带桩);app 编译链接通过(`[22/22] Linking`)、无编译警告。
+- ⚠️ 需真实桌面确认:设置里能看到「翻译服务」区并能保存;「测试连接」有结果;
+  贴图窗口按设置的不透明度出现。

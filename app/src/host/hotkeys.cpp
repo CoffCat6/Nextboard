@@ -73,10 +73,19 @@ void pinLatest() {
         qWarning() << "pinLatest:条目无可贴内容, kind =" << kind;
         return;
     }
-    auto* pin = new PinWindow(image);
+    // 贴图窗口的初始行为取自设置(pinDefaultOpacity / pinDoubleclickClose)
+    PinOptions options;
+    const QJsonObject settings = core.call("get_settings");
+    if (settings.value("ok").toBool()) {
+        const QJsonObject data = settings.value("data").toObject();
+        options.opacityPercent = data.value("pinDefaultOpacity").toInt(100);
+        options.doubleClickClose = data.value("pinDoubleclickClose").toBool(true);
+    }
+    auto* pin = new PinWindow(image, options);
     pin->setAttribute(Qt::WA_DeleteOnClose);
     pin->show();
-    qInfo() << "pinLatest:已贴出" << kind << image.size();
+    qInfo() << "pinLatest:已贴出" << kind << image.size()
+            << "不透明度" << options.opacityPercent << "%";
 }
 } // namespace
 

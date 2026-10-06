@@ -47,11 +47,14 @@ QImage PinWindow::renderText(const QString& text) {
     return image;
 }
 
-PinWindow::PinWindow(QImage image, QWidget* parent)
+PinWindow::PinWindow(QImage image, const PinOptions& options, QWidget* parent)
     : QWidget(parent,
               Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool |
                   Qt::NoDropShadowWindowHint),
-      m_image(std::move(image)) {
+      m_image(std::move(image)),
+      // 初始透明度取自设置(第一代 pinDefaultOpacity,30–100)
+      m_opacity(qBound(0.3, options.opacityPercent / 100.0, 1.0)),
+      m_doubleClickClose(options.doubleClickClose) {
     setAttribute(Qt::WA_TranslucentBackground);
     setMouseTracking(true);
     // 2x DPI 屏:物理像素图按逻辑尺寸显示
@@ -112,8 +115,8 @@ void PinWindow::wheelEvent(QWheelEvent* e) {
 
 void PinWindow::mouseDoubleClickEvent(QMouseEvent* e) {
     Q_UNUSED(e);
-    // 双击关闭:第一代 Phase 9 默认(Snipaste 习惯)
-    close();
+    // 双击关闭:第一代 Phase 9 默认(Snipaste 习惯);设置里可关掉
+    if (m_doubleClickClose) close();
 }
 
 } // namespace nb

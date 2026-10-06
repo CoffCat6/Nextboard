@@ -11,6 +11,9 @@
 #include <QTimer>
 #include <QDebug>
 
+#include <cstdlib>
+#include <exception>
+
 #include <windows.h>
 
 // S2 阶段:qDebug/qInfo 全量落文件(发布期移除);WIN32 子程序无控制台,这是唯一可观测手段
@@ -32,6 +35,38 @@ static void fileMessageHandler(QtMsgType type, const QMessageLogContext& ctx, co
 #include "panel/panel_window.hpp"
 #include "panel/qml_bootstrap.hpp"
 
+// ---- 崩溃兜底 ----
+//
+// 本应用是托盘程序、没有控制台,而崩溃常常表现为**静默进程死亡**(日志停在最后一条
+// 正常记录上),事后完全无从下手。这里把未处理异常与 std::terminate 也写进同一份日志,
+// 至少留下异常码与地址。必须在 QApplication 之后安装(applicationDirPath 依赖它)。
+namespace {
+
+void appendCrashLog(const QString& text) {
+    QFile log(QCoreApplication::applicationDirPath() + "/nextboard.log");
+    if (log.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
+        log.write(QStringLiteral("[CRASH] %1\n").arg(text).toUtf8());
+}
+
+/// 常见异常码:0xC0000005 访问违例 / 0xC0000409 栈溢出或 fail-fast /
+/// 0xE06D7363 未捕获的 C++ 异常 / 0xC0000094 整数除零。
+LONG WINAPI unhandledExceptionFilter(EXCEPTION_POINTERS* info) {
+    const DWORD code = (info && info->ExceptionRecord) ? info->ExceptionRecord->ExceptionCode : 0;
+    const void* address =
+        (info && info->ExceptionRecord) ? info->ExceptionRecord->ExceptionAddress : nullptr;
+    appendCrashLog(QStringLiteral("未处理异常 code=0x%1 address=%2")
+                       .arg(static_cast<quint32>(code), 8, 16, QLatin1Char('0'))
+                       .arg(reinterpret_cast<quintptr>(address), 0, 16));
+    return EXCEPTION_EXECUTE_HANDLER;   // 记完即终止,不再弹系统崩溃框
+}
+
+void onTerminate() {
+    appendCrashLog(QStringLiteral("std::terminate(未捕获的 C++ 异常 / noexcept 违反)"));
+    std::abort();
+}
+
+} // namespace
+
 int main(int argc, char* argv[]) {
     // 隐藏自启参数(与第一代 --hidden 语义一致)
     bool startHidden = false;
@@ -52,6 +87,8 @@ int main(int argc, char* argv[]) {
     // 常驻托盘(第一代语义):关闭/隐藏最后一个窗口不退出,退出仅走托盘菜单
     QApplication::setQuitOnLastWindowClosed(false);
     qInstallMessageHandler(fileMessageHandler);
+    ::SetUnhandledExceptionFilter(unhandledExceptionFilter);
+    std::set_terminate(onTerminate);
     qInfo() << "Nextboard starting, appDir =" << QCoreApplication::applicationDirPath();
 
     // 1. nbcore 初始化(数据目录、通知窗口稍后由面板提供;先 0 = 仅全局通知)。
