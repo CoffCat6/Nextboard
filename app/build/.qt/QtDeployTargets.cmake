@@ -1,3 +1,0 @@
-set(__QT_DEPLOY_TARGET_nextboard_FILE D:/3project/rust/Nextboard/app/build/nextboard.exe)
-set(__QT_DEPLOY_TARGET_nextboard_TYPE EXECUTABLE)
-set(__QT_DEPLOY_TARGET_nextboard_RUNTIME_DLLS D:/Qt/6.9.0/msvc2022_64/bin/Qt6QuickControls2.dll;D:/Qt/6.9.0/msvc2022_64/bin/Qt6QuickWidgets.dll;D:/Qt/6.9.0/msvc2022_64/bin/Qt6QuickTemplates2.dll;D:/Qt/6.9.0/msvc2022_64/bin/Qt6Widgets.dll;D:/Qt/6.9.0/msvc2022_64/bin/Qt6Quick.dll;D:/Qt/6.9.0/msvc2022_64/bin/Qt6QmlMeta.dll;D:/Qt/6.9.0/msvc2022_64/bin/Qt6QmlWorkerScript.dll;D:/Qt/6.9.0/msvc2022_64/bin/Qt6QmlModels.dll;D:/Qt/6.9.0/msvc2022_64/bin/Qt6Qml.dll;D:/Qt/6.9.0/msvc2022_64/bin/Qt6Network.dll;D:/Qt/6.9.0/msvc2022_64/bin/Qt6OpenGL.dll;D:/Qt/6.9.0/msvc2022_64/bin/Qt6Gui.dll;D:/Qt/6.9.0/msvc2022_64/bin/Qt6Core.dll)
