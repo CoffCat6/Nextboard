@@ -16,6 +16,80 @@ AppDrawer {
     readonly property var providers: ["openai", "microsoft", "custom"]
     readonly property string provider: providers[Math.max(0, providerCombo.currentIndex)]
 
+    /// 快捷键录制控件:点击进入录制态,按下组合键即捕获。
+    /// 产出形如 "Ctrl+Shift+V" 的字符串;合法性(至少一个修饰键、各动作两两不重复、
+    /// 不可为空)由 core 的 settings 校验负责 —— 这里不做客户端校验,直接展示后端错误。
+    component HotkeyField: Item {
+        id: hk
+        property string value: ""
+        property bool recording: false
+        implicitHeight: 30
+
+        function keyName(key) {
+            if (key >= Qt.Key_A && key <= Qt.Key_Z) return String.fromCharCode(key)
+            if (key >= Qt.Key_0 && key <= Qt.Key_9) return String.fromCharCode(key)
+            if (key >= Qt.Key_F1 && key <= Qt.Key_F24) return "F" + (key - Qt.Key_F1 + 1)
+            return ""
+        }
+
+        Rectangle {
+            anchors.fill: parent
+            radius: 6
+            color: Theme.surface2
+            border.width: 1
+            border.color: hk.recording ? Theme.accent : Theme.border
+            Text {
+                anchors.fill: parent
+                anchors.leftMargin: 8
+                anchors.rightMargin: 8
+                verticalAlignment: Text.AlignVCenter
+                elide: Text.ElideRight
+                font.pixelSize: 12
+                color: hk.recording ? Theme.accent
+                     : hk.value === "" ? Theme.muted : Theme.text
+                text: hk.recording ? "按下组合键…(Esc 取消)" : (hk.value || "未设置")
+            }
+        }
+
+        MouseArea {
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            onClicked: {
+                hk.recording = true
+                hk.forceActiveFocus()
+            }
+        }
+
+        Keys.onPressed: function(event) {
+            if (!hk.recording) return
+            if (event.key === Qt.Key_Escape) {
+                hk.recording = false
+                event.accepted = true
+                return
+            }
+            // 只按修饰键时继续等待主键
+            if (event.key === Qt.Key_Control || event.key === Qt.Key_Shift
+                    || event.key === Qt.Key_Alt || event.key === Qt.Key_Meta) {
+                event.accepted = true
+                return
+            }
+            const name = hk.keyName(event.key)
+            if (name === "") {
+                event.accepted = true
+                return
+            }
+            const parts = []
+            if (event.modifiers & Qt.ControlModifier) parts.push("Ctrl")
+            if (event.modifiers & Qt.ShiftModifier) parts.push("Shift")
+            if (event.modifiers & Qt.AltModifier) parts.push("Alt")
+            if (event.modifiers & Qt.MetaModifier) parts.push("Win")
+            parts.push(name)
+            hk.value = parts.join("+")
+            hk.recording = false
+            event.accepted = true
+        }
+    }
+
     function errText(resp) {
         return resp && resp.error ? resp.error.message : ""
     }
@@ -36,6 +110,14 @@ AppDrawer {
         skipEditorCheck.checked = s.regionSkipEditor === true
         autoConfirmCheck.checked = s.regionAutoConfirm === true
         themeCombo.currentIndex = s.theme === "light" ? 1 : s.theme === "dark" ? 2 : 0
+
+        const hk = s.hotkeys || {}
+        hkToggleMain.value = hk.toggleMain || ""
+        hkCaptureRegion.value = hk.captureRegion || ""
+        hkCaptureFullscreen.value = hk.captureFullscreen || ""
+        hkPinLatest.value = hk.pinLatest || ""
+        hkOpenTranslate.value = hk.openTranslate || ""
+        hkCaptureTranslate.value = hk.captureTranslate || ""
 
         const index = providers.indexOf(s.translateProvider)
         providerCombo.currentIndex = index < 0 ? 0 : index
@@ -80,6 +162,15 @@ AppDrawer {
         s.regionAutoConfirm = autoConfirmCheck.checked
         s.theme = ["system", "light", "dark"][themeCombo.currentIndex]
 
+        const hk = s.hotkeys || {}
+        hk.toggleMain = hkToggleMain.value
+        hk.captureRegion = hkCaptureRegion.value
+        hk.captureFullscreen = hkCaptureFullscreen.value
+        hk.pinLatest = hkPinLatest.value
+        hk.openTranslate = hkOpenTranslate.value
+        hk.captureTranslate = hkCaptureTranslate.value
+        s.hotkeys = hk
+
         s.translateProvider = provider
         const oa = s.translateOpenai || {}
         oa.baseUrl = oaBaseUrl.text
@@ -110,6 +201,7 @@ AppDrawer {
         statusLabel.isError = !resp.ok
         if (resp.ok) {
             Core.applyTheme(s.theme)   // 落盘后立即按新主题重刷
+            Core.reloadHotkeys()       // 快捷键立即重新注册(否则要重启才生效)
             Entries.refreshNow()
         }
     }
@@ -181,6 +273,34 @@ AppDrawer {
                 // 切换即生效(不必等"保存"),给用户即时反馈
                 onActivated: Core.applyTheme(["system", "light", "dark"][currentIndex])
             }
+
+            // ---- 快捷键 ----
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.topMargin: 10
+                implicitHeight: 1
+                color: Theme.border
+            }
+            Label { text: "快捷键"; font.pixelSize: 14; font.bold: true; color: Theme.text }
+            Label {
+                Layout.fillWidth: true
+                text: "点击后按下组合键即可录制。需含至少一个修饰键(Ctrl/Alt/Shift/Win),单按 F1–F24 也可;保存后立即生效。"
+                color: Theme.muted
+                font.pixelSize: 11
+                wrapMode: Text.WrapAnywhere
+            }
+            Label { text: "呼出/隐藏面板"; color: Theme.muted; font.pixelSize: 12 }
+            HotkeyField { id: hkToggleMain; Layout.fillWidth: true }
+            Label { text: "矩形截图"; color: Theme.muted; font.pixelSize: 12 }
+            HotkeyField { id: hkCaptureRegion; Layout.fillWidth: true }
+            Label { text: "全屏截图"; color: Theme.muted; font.pixelSize: 12 }
+            HotkeyField { id: hkCaptureFullscreen; Layout.fillWidth: true }
+            Label { text: "一键贴图"; color: Theme.muted; font.pixelSize: 12 }
+            HotkeyField { id: hkPinLatest; Layout.fillWidth: true }
+            Label { text: "打开翻译"; color: Theme.muted; font.pixelSize: 12 }
+            HotkeyField { id: hkOpenTranslate; Layout.fillWidth: true }
+            Label { text: "截图翻译"; color: Theme.muted; font.pixelSize: 12 }
+            HotkeyField { id: hkCaptureTranslate; Layout.fillWidth: true }
 
             // ---- 翻译服务 ----
             Rectangle {

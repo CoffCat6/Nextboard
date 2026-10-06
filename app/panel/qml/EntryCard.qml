@@ -21,6 +21,31 @@ Rectangle {
     /// 请求翻译本条内容(翻译抽屉位于 Main.qml 作用域,跨组件经信号上抛)。
     signal translateRequested(string text)
 
+    /// 卡片右下角的快捷按钮:小胶囊 + 悬停高亮。
+    component CardAction: Rectangle {
+        id: action
+        property string label: ""
+        signal triggered()
+        implicitWidth: actionLabel.implicitWidth + 14
+        implicitHeight: 20
+        radius: 4
+        color: actionHover.containsMouse ? Theme.accent : Theme.surface2
+        Text {
+            id: actionLabel
+            anchors.centerIn: parent
+            text: action.label
+            font.pixelSize: 11
+            color: actionHover.containsMouse ? Theme.accentText : Theme.muted
+        }
+        MouseArea {
+            id: actionHover
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: action.triggered()
+        }
+    }
+
     /// 翻译:文本条目取全文交抽屉;图片/文件暂无取字链路,明确提示而非静默失败。
     function requestTranslate() {
         if (root.kind !== "text") {
@@ -148,6 +173,33 @@ Rectangle {
                 color: Theme.muted; background: Rectangle { color: Theme.surface2; radius: 4 }
             }
             Item { Layout.fillWidth: true }
+
+            // ---- 右下角快捷按钮 ----
+            // 贴图:图片直贴;文本渲染成位图后贴(文件条目无可贴内容,故隐藏)
+            CardAction {
+                Layout.alignment: Qt.AlignVCenter
+                visible: root.kind !== "file"
+                label: "贴图"
+                onTriggered: Core.pinEntry(root.entryId)
+            }
+            CardAction {
+                Layout.alignment: Qt.AlignVCenter
+                visible: root.kind === "image"
+                label: "编辑"
+                onTriggered: {
+                    panelWindow.hidePanel()   // 编辑器会遮住面板,先收起
+                    Core.editEntry(root.entryId)
+                }
+            }
+            CardAction {
+                Layout.alignment: Qt.AlignVCenter
+                label: "删除"
+                onTriggered: {
+                    const resp = Entries.deleteEntry(root.entryId)
+                    if (resp.ok) Core.showToast("已删除")
+                    else Core.showToast("删除失败:" + (resp.error ? resp.error.message : ""))
+                }
+            }
         }
     }
 

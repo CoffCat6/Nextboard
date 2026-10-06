@@ -117,6 +117,11 @@ Hotkeys::~Hotkeys() {
 }
 
 void Hotkeys::applyFromSettings() {
+    // 先撤销既有注册:改设置后重新应用时必须先清干净 —— registerAction 每次分配
+    // 新 id,不清理的话旧组合键会一直留在系统里(改了等于没改,还多占一个组合键)。
+    for (int id : m_registered.keys()) ::UnregisterHotKey(nullptr, id);
+    m_registered.clear();
+
     const QJsonObject resp = m_core.call("get_settings");
     const QJsonObject hotkeys = resp.value("data").toObject().value("hotkeys").toObject();
     const QMap<Action, QString> names{

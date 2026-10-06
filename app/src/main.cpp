@@ -32,6 +32,7 @@ static void fileMessageHandler(QtMsgType type, const QMessageLogContext& ctx, co
 #include "host/core_bridge.hpp"
 #include "host/tray.hpp"
 #include "host/hotkeys.hpp"
+#include "panel/core_facade.hpp"
 #include "panel/panel_window.hpp"
 #include "panel/qml_bootstrap.hpp"
 
@@ -133,6 +134,9 @@ int main(int argc, char* argv[]) {
     // 3. 托盘与热键
     nb::Tray tray(panel, core);
     nb::Hotkeys hotkeys(panel, core);
+    // 设置里改完快捷键后重新注册(信号由 CoreFacade 发出,避免它依赖 Hotkeys 实例)
+    QObject::connect(&nb::CoreFacade::instance(), &nb::CoreFacade::hotkeysChanged,
+                     &hotkeys, &nb::Hotkeys::applyFromSettings);
 
     // nbcore 通知 HWND = 主面板窗口;WM_APP → PanelWindow::clipChanged
     // → ClipEntryModel::refresh(200ms 去抖)。

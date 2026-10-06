@@ -88,6 +88,10 @@ public:
     /// 因此它同时服务「热键打开翻译」与「截图翻译完成后回填」两条链路。
     Q_INVOKABLE void openTranslate() { emit translatePrefill(QString()); }
 
+    /// 请求重新注册全局快捷键(设置里改完热键后调用)。
+    /// 本类不认识 Hotkeys 实例,故只发信号,由 main.cpp 接线。
+    Q_INVOKABLE void reloadHotkeys() { emit hotkeysChanged(); }
+
 signals:
     /// nbcore 通知(剪贴板/设置变化)→ QML Connections 订阅。
     void clipChanged();
@@ -98,6 +102,8 @@ signals:
     void ocrFinished(QVariantMap resp);
     void toastMessage(const QString& message);
     void countsChanged();
+    /// 快捷键设置已变更,请重新注册(见 reloadHotkeys)。
+    void hotkeysChanged();
     /// 请求打开翻译抽屉并预填原文(截图翻译链路 F25)。
     void translatePrefill(const QString& text);
     void themeChanged();
