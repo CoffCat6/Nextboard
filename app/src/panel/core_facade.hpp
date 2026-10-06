@@ -18,6 +18,9 @@ namespace nb {
 
 class CoreFacade : public QObject {
     Q_OBJECT
+    /// 分类计数(all/text/image/file/pinned)。QML 直接绑定 `Core.counts[viewId]`,
+    /// 依赖 countsChanged 通知刷新;缺失键返回 undefined。
+    Q_PROPERTY(QVariantMap counts READ counts NOTIFY countsChanged)
 public:
     static CoreFacade& instance();
 
@@ -29,6 +32,12 @@ public:
 
     /// 分类计数(entry_counts 的展平:all/text/image/file/pinned,-1 表示取不到)。
     Q_INVOKABLE int entryCount(const QString& kind);
+
+    /// 重新拉取分类计数;有变化才发 countsChanged(避免无谓的绑定重算)。
+    /// 条目增删/固定/清空、以及剪贴板变化后调用。
+    void refreshCounts();
+
+    const QVariantMap& counts() const { return m_counts; }
 
     /// UI 反馈(toast 由 QML 侧显示;C++ 各处也能发)。
     Q_INVOKABLE void showToast(const QString& message);
@@ -46,6 +55,7 @@ signals:
     void translateFinished(QVariantMap resp);
     void ocrFinished(QVariantMap resp);
     void toastMessage(const QString& message);
+    void countsChanged();
 
 public:
     /// PanelWindow::nativeEvent 转发 nbcore WM_APP 通知(刷新去抖由模型侧负责)。
@@ -55,6 +65,8 @@ public:
 private:
     CoreFacade() = default;
     ~CoreFacade() = default;
+
+    QVariantMap m_counts;
 };
 
 } // namespace nb

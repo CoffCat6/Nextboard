@@ -105,6 +105,14 @@ QVariantMap ClipEntryModel::copyEntry(const QString& id) {
     return CoreFacade::instance().call("copy_entry", {{"id", id}});
 }
 
+QVariantMap ClipEntryModel::copyByIndex(int index) {
+    if (index < 0 || index >= m_rows.size())
+        return {{"ok", false},
+                {"error", QVariantMap{{"code", "OutOfRange"},
+                                      {"message", QStringLiteral("序号越界")}}}};
+    return copyEntry(m_rows[index].id);
+}
+
 QVariantMap ClipEntryModel::deleteEntry(const QString& id) {
     const QVariantMap resp = CoreFacade::instance().call("delete_entry", {{"id", id}});
     if (resp.value("ok").toBool()) reload(m_limit);
@@ -114,9 +122,13 @@ QVariantMap ClipEntryModel::deleteEntry(const QString& id) {
 void ClipEntryModel::togglePin(const QString& id, bool pinned) {
     const QVariantMap resp =
         CoreFacade::instance().call("set_pinned", {{"id", id}, {"pinned", pinned}});
-    if (!resp.value("ok").toBool())
+    if (!resp.value("ok").toBool()) {
         emit toast(QStringLiteral("固定失败:%1").arg(
             resp.value("error").toMap().value("message").toString()));
+        return;
+    }
+    // 固定状态改变排序(固定置顶),重拉对齐第一代 refetch 语义
+    reload(m_limit);
 }
 
 QString ClipEntryModel::imageUrlFor(const QString& id, bool thumb) const {
@@ -209,22 +221,27 @@ void ClipEntryModel::applyPage(const QVariantMap& resp, bool append) {
         rows.append(std::move(r));
     }
     const int newTotal = data.value("total").toInt();
+    // 以服务端 total 为准(首屏与翻页统一更新):翻页期间条目被增删也能收敛,
+    // hasMore 不会因 total 陈旧而误判。
+    m_total = newTotal;
     if (append) {
         const int first = m_rows.size();
         const int count = rows.size();
-        if (count == 0) return;
-        beginInsertRows({}, first, first + count - 1);
-        m_rows += rows;
-        endInsertRows();
+        if (count > 0) {
+            beginInsertRows({}, first, first + count - 1);
+            m_rows += rows;
+            endInsertRows();
+        }
     } else {
         beginResetModel();
         m_rows = rows;
-        m_total = newTotal;
         endResetModel();
     }
     emit totalChanged();
     emit countChanged();
     emit hasMoreChanged();
+    // 分类徽标与列表同源:列表重拉后同步刷新计数(无变化则不发信号)
+    CoreFacade::instance().refreshCounts();
 }
 
 } // namespace nb

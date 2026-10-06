@@ -214,7 +214,7 @@ pub fn touch(conn: &Connection, id: &str, last_used_at: i64) -> AppResult<()> {
 pub fn get(conn: &Connection, id: &str) -> AppResult<Option<ClipEntry>> {
     let entry = conn
         .query_row(
-            "SELECT id, kind, text_content, blob_path, file_paths, width, height, hash, byte_size, preview, pinned, created_at, last_used_at
+            "SELECT id, kind, text_content, blob_path, file_paths, width, height, hash, byte_size, preview, pinned, created_at, last_used_at, source, tags
              FROM clip_entries WHERE id = ?1",
             params![id],
             ClipEntry::from_row,
@@ -261,7 +261,7 @@ pub fn list(
     let pattern = query.map(like_pattern);
     let items = conn
         .prepare(
-            "SELECT id, kind, text_content, blob_path, file_paths, width, height, hash, byte_size, preview, pinned, created_at, last_used_at
+            "SELECT id, kind, text_content, blob_path, file_paths, width, height, hash, byte_size, preview, pinned, created_at, last_used_at, source, tags
              FROM clip_entries
              WHERE (?1 IS NULL OR text_content LIKE ?1 ESCAPE '\\'
                     OR (kind = 'file' AND file_paths LIKE ?1 ESCAPE '\\')
@@ -301,7 +301,7 @@ fn list_via_fts(
     let items = conn
         .prepare(
             "SELECT e.id, e.kind, e.text_content, e.blob_path, e.file_paths, e.width, e.height,
-                    e.hash, e.byte_size, e.preview, e.pinned, e.created_at, e.last_used_at
+                    e.hash, e.byte_size, e.preview, e.pinned, e.created_at, e.last_used_at, e.source, e.tags
              FROM clip_fts f
              JOIN clip_entries e ON e.id = f.entry_id
              WHERE clip_fts MATCH ?1
@@ -501,7 +501,7 @@ pub fn latest_pinnable(conn: &Connection) -> AppResult<Option<ClipEntry>> {
     for kind in ["image", "text"] {
         let entry = conn
             .query_row(
-                "SELECT id, kind, text_content, blob_path, file_paths, width, height, hash, byte_size, preview, pinned, created_at, last_used_at
+                "SELECT id, kind, text_content, blob_path, file_paths, width, height, hash, byte_size, preview, pinned, created_at, last_used_at, source, tags
                  FROM clip_entries
                  WHERE kind = ?1
                  ORDER BY last_used_at DESC, created_at DESC
@@ -953,6 +953,8 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM clip_fts", [], |row| row.get(0))
             .unwrap();
         assert_eq!(indexed, 1, "存量行应已被 rebuild 进索引");
+        // list() 面向**最新 schema**(v5 起含 source/tags 列):补到 v5 再验证可搜索性
+        conn.execute_batch(crate::store::MIGRATION_V5).unwrap();
         let (items, _) = list(&conn, Some("legacy"), None, None, 10, 0).unwrap();
         assert_eq!(items.len(), 1, "迁移后存量数据应可被搜到");
     }

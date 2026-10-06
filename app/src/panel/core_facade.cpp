@@ -26,6 +26,16 @@ int CoreFacade::entryCount(const QString& kind) {
     return resp.value("data").toMap().value(kind).toInt();
 }
 
+void CoreFacade::refreshCounts() {
+    const QVariantMap resp = call("entry_counts");
+    const QVariantMap data =
+        resp.value("ok").toBool() ? resp.value("data").toMap() : QVariantMap{};
+    if (data != m_counts) {
+        m_counts = data;
+        emit countsChanged();
+    }
+}
+
 void CoreFacade::showToast(const QString& message) {
     emit toastMessage(message);
 }
@@ -108,10 +118,28 @@ void CoreFacade::ocrEntry(const QString& id) {
     job->setAutoDelete(true);
     job->onDone = [this](const QJsonObject& resp) {
         emit ocrFinished(jsonToVariant(resp).toMap());
-        const bool ok = resp.value("ok").toBool();
-        emit toastMessage(ok ? QStringLiteral("OCR 完成,已写入条目")
-                             : QStringLiteral("OCR 失败:%1").arg(
-                                   resp.value("error").toObject().value("message").toString()));
+        if (!resp.value("ok").toBool()) {
+            emit toastMessage(QStringLiteral("OCR 失败:%1").arg(
+                resp.value("error").toObject().value("message").toString()));
+            return;
+        }
+        const QString text = resp.value("data").toObject().value("text").toString();
+        if (text.isEmpty()) {
+            emit toastMessage(QStringLiteral("未识别到文字(图片可能不含可识别文本)"));
+            return;
+        }
+        // 对齐第一代 actions.ocr:识别成功后把文本写入剪贴板,用户可直接粘贴。
+        // 仍走线程池,与 nb_call 的串行化互斥保持一致。
+        auto* copyJob = new AsyncCall;
+        copyJob->method = "copy_text_to_clipboard";
+        copyJob->req = QJsonObject{{"text", text}};
+        copyJob->setAutoDelete(true);
+        copyJob->onDone = [this, text](const QJsonObject& r) {
+            emit toastMessage(r.value("ok").toBool()
+                ? QStringLiteral("已识别 %1 个字符并复制到剪贴板").arg(text.size())
+                : QStringLiteral("识别成功,但写入剪贴板失败"));
+        };
+        QThreadPool::globalInstance()->start(copyJob);
     };
     QThreadPool::globalInstance()->start(job);
 }

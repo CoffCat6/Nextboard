@@ -18,23 +18,54 @@ Rectangle {
     required property bool pinned
     required property string source
 
+    /// 请求翻译本条内容(翻译抽屉位于 Main.qml 作用域,跨组件经信号上抛)。
+    signal translateRequested(string text)
+
+    /// 翻译:文本条目取全文交抽屉;图片/文件暂无取字链路,明确提示而非静默失败。
+    function requestTranslate() {
+        if (root.kind !== "text") {
+            Core.showToast(root.kind === "image" ? "图片请先「识别文字」再翻译"
+                                                 : "文件条目不支持翻译")
+            return
+        }
+        const resp = Core.call("get_entry", { id: root.entryId })
+        if (resp.ok && resp.data.textContent) root.translateRequested(resp.data.textContent)
+        else Core.showToast("读取条目内容失败")
+    }
+
     radius: 8
     color: ma.containsMouse || menu.opened ? Theme.surface2 : Theme.surface
     border.color: ma.containsMouse || menu.opened ? Theme.accent : Theme.border
     border.width: 1
     implicitHeight: cardLayout.implicitHeight + 20
 
+    // 条目操作菜单(顺序与第一代 App.tsx ctx-menu 对齐)。
+    // 「贴到屏幕」「编辑」待 S4(需按条目贴图 FFI 与 QGraphicsScene 编辑器)。
     Menu {
         id: menu
+        MenuItem {
+            text: "复制"
+            onTriggered: {
+                const resp = Entries.copyEntry(root.entryId)
+                if (resp.ok) panelWindow.hidePanel()   // 复制即收起,便于粘贴
+                else Core.showToast("复制失败:" + (resp.error ? resp.error.message : ""))
+            }
+        }
+        MenuItem {
+            text: "翻译"
+            visible: root.kind !== "file"
+            onTriggered: root.requestTranslate()
+        }
+        MenuItem {
+            text: "识别文字"
+            visible: root.kind === "image"
+            onTriggered: Core.ocrEntry(root.entryId)
+        }
         MenuItem {
             text: root.pinned ? "取消固定" : "固定"
             onTriggered: Entries.togglePin(root.entryId, !root.pinned)
         }
-        MenuItem {
-            text: "OCR 识别文字"
-            visible: root.kind === "image"
-            onTriggered: Core.ocrEntry(root.entryId)
-        }
+        MenuSeparator {}
         MenuItem {
             text: "删除"
             onTriggered: {
@@ -50,13 +81,18 @@ Rectangle {
         anchors.fill: parent
         hoverEnabled: true
         acceptedButtons: Qt.LeftButton | Qt.RightButton
+        // 滚动转发:卡片不拦截滚轮,显式转交父级 ListView 滚动。
+        // (Sciter 时代需宿主手动转发滚轮进引擎;QML 化后由场景图直接派发,
+        //  此处仅固定语义、防后续给卡片加 onWheel 时误吞滚动。)
+        onWheel: function(wheel) { wheel.accepted = false }
         onClicked: function(mouse) {
             if (mouse.button === Qt.RightButton) {
                 menu.popup()
             } else {
                 const resp = Entries.copyEntry(root.entryId)
-                Core.showToast(resp.ok ? "已复制到剪贴板"
-                               : "复制失败:" + (resp.error ? resp.error.message : ""))
+                // 复制成功即收起面板,便于直接粘贴到目标应用(第一代 use-entries.copy 语义)
+                if (resp.ok) panelWindow.hidePanel()
+                else Core.showToast("复制失败:" + (resp.error ? resp.error.message : ""))
             }
         }
     }

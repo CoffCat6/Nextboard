@@ -31,6 +31,17 @@ Rectangle {
         if (event.key === Qt.Key_F && (event.modifiers & Qt.ControlModifier)) {
             searchInput.forceActiveFocus()
             event.accepted = true
+            return
+        }
+        // Ctrl+1..9:复制当前视图第 N 条(编号 = 过滤后列表自上而下,第一代 F2);
+        // 成功后隐藏面板,便于直接粘贴到目标应用。抽屉打开时不生效(第一代同语义)。
+        if ((event.modifiers & Qt.ControlModifier)
+                && !settingsDrawer.opened && !translateDrawer.opened
+                && event.key >= Qt.Key_1 && event.key <= Qt.Key_9) {
+            const resp = Entries.copyByIndex(event.key - Qt.Key_1)
+            if (resp.ok) panelWindow.hidePanel()
+            else Core.showToast("复制失败:" + (resp.error ? resp.error.message : ""))
+            event.accepted = true
         }
     }
 
@@ -123,7 +134,9 @@ Rectangle {
                     id: tabDelegate
                     required property string label
                     required property string viewId
-                    readonly property int count: Core.entryCount(viewId)
+                    // 计数来自 Core.counts(单一数据源 + countsChanged 通知):
+                    // 条目增删后徽标自动更新,且不再每个标签各发一次同步查询。
+                    readonly property var count: Core.counts[viewId]
                     radius: 6
                     height: 26
                     width: tabLabel.implicitWidth + 20
@@ -132,7 +145,7 @@ Rectangle {
                     Text {
                         id: tabLabel
                         anchors.centerIn: parent
-                        text: tabDelegate.count >= 0
+                        text: tabDelegate.count !== undefined
                               ? tabDelegate.label + " " + tabDelegate.count
                               : tabDelegate.label
                         color: tabs.current === tabDelegate.viewId ? "#fff" : Theme.muted
@@ -176,6 +189,7 @@ Rectangle {
             delegate: EntryCard {
                 required property int index
                 width: list.width
+                onTranslateRequested: function(text) { translateDrawer.openWith(text) }
             }
 
             // 触底自动加载(fetchMore 由 ListView 自动调用,这里提前 200px 预取)
@@ -241,6 +255,14 @@ Rectangle {
     // ---- 抽屉 ----
     SettingsDrawer { id: settingsDrawer }
     TranslateDrawer { id: translateDrawer }
+
+    // ---- Core 信号订阅 ----
+    // toastMessage 是全局提示通道(C++ 与各抽屉都经 Core.showToast 发出);
+    // 面板内只在此处订阅,避免多处弹窗重复。
+    Connections {
+        target: Core
+        function onToastMessage(message) { toast.showMsg(message) }
+    }
 
     // ---- toast ----
     Rectangle {

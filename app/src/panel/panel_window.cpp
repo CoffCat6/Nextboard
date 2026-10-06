@@ -5,6 +5,8 @@
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QMetaObject>
+#include <QQmlContext>
+#include <QQmlEngine>
 #include <QQuickItem>
 #include <QQuickWidget>
 #include <QScreen>
@@ -46,6 +48,10 @@ void PanelWindow::setupUi() {
     m_quick = new QQuickWidget(this);
     m_quick->setResizeMode(QQuickWidget::ResizeMode::SizeRootObjectToView);
     m_quick->setClearColor(palette().window().color());
+    // 把本窗口注入 QML 根上下文:Main.qml 的 ESC 处理要调 panelWindow.hidePanel()。
+    // 必须在 setSource 之前注册——QML 组件在 setSource 时即编译/实例化。
+    if (QQmlEngine* engine = m_quick->engine())
+        engine->rootContext()->setContextProperty(QStringLiteral("panelWindow"), this);
     // QML 源经 qt_add_qml_module 打进 qrc(QML_FILES 以 panel/qml/ 相对路径引用,
     // 别名拼接后实际地址多一层 panel/qml,无运行期文件依赖)。
     m_quick->setSource(QUrl("qrc:/qt/qml/Nextboard/panel/panel/qml/Main.qml"));

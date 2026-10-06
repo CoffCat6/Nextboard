@@ -191,11 +191,14 @@ CopyFromScreen 截图逐步定位,先后修掉四个叠加的问题:
 
 ### 遗留(S3 收尾/S4)
 
-- 搜索框 UI 注入验收(待 sciter::host::call_function,需主 VM;逻辑已由 core 单测覆盖);
-- 滚轮事件转发引擎(列表滚动,S3 收尾);
-- 分页加载更多(loadMore)与条目右键菜单(删除/固定/OCR);
-- 翻译抽屉的语言选择持久化;设置页自定义数据目录;
-- S4:编辑器(QGraphicsScene)、commit_capture 闭环。
+- ~~搜索框 UI 注入验收~~ → QML 版由 `PanelWindow::applySearchText` + `--query` 覆盖;
+- ~~滚轮事件转发引擎(列表滚动)~~ → QML 化后由场景图直接派发,无需宿主转发
+  (EntryCard 的 MouseArea 显式 `wheel.accepted = false` 转交列表,防回归);
+- ~~分页加载更多(loadMore)~~ / ~~条目右键菜单~~ → 已补齐:菜单含
+  复制 / 翻译 / 识别文字 / 固定 / 删除;loadMore 的 append 分支改为以服务端 total 收敛;
+- ~~翻译抽屉的语言选择持久化~~ → 落 `settings.translateTargetLang`(打开载入、切换回写);
+- 设置页自定义数据目录(需 nbcore 以新数据目录重载,未做);
+- S4:编辑器(QGraphicsScene)、commit_capture 闭环、按条目贴图 FFI、定位文件(reveal)。
 
 ---
 
@@ -277,3 +280,60 @@ UI 点击(mouse_event 受前台锁/焦点限制)都不可靠,自动化验收在�
 ### 下一步
 
 S3 收尾(滚动转发/右键菜单/loadMore)→ S4 编辑器与截图闭环。
+
+---
+
+## 2026-10-06(四)面板迁移 Qt Quick/QML + S3 收尾
+
+主面板由 Sciter 迁移到 Qt Quick/QML(`QQuickWidget` 承载,提交 `a71275d`)。迁移
+只搬了 UI,事件接线未同步,导致面板交互闭环断裂;本轮先补闭环,再收尾 S3。
+
+### 一、交互闭环缺陷(同一类:迁移遗留的接线缺失)
+
+| # | 缺陷 | 证据 | 修复 |
+| --- | --- | --- | --- |
+| 1 | ESC 无法收起面板 | 真机日志 `Main.qml:26 ReferenceError: panelWindow is not defined`——`PanelWindow` 从未注册进 QML | `setupUi()` 在 `setSource` **之前** `engine()->rootContext()->setContextProperty("panelWindow", this)` |
+| 2 | 全部 toast 静默失效 | 全项目 `grep Connections` 为空,`Core.toastMessage` 无人订阅 | Main.qml 增 `Connections` 订阅 toastMessage |
+| 3 | 译文永不显示(翻译实际不可用) | 同上,`Core.translateFinished` 无人订阅 | TranslateDrawer 增 `Connections` 写入译文区 |
+| 4 | 引用未定义的 `app` | `TranslateDrawer.qml:105 app.showToast(...)` | 改 `Core.showToast` |
+| 5 | 复制条目后不收面板 | 第一代 `use-entries.ts` copy() 有 `getCurrentWindow().hide()` | 复制成功后 `panelWindow.hidePanel()` |
+| 6 | `Ctrl+1..9` 序号复制缺失 | 第一代 `App.tsx` F2 | 新增 `ClipEntryModel::copyByIndex(int)` |
+| 7 | 分类计数永不刷新 | `Core.entryCount(viewId)` 是无依赖的一次性绑定,且每次求值触发 5 次同步 DB 查询 | `CoreFacade` 新增 `counts(QVariantMap)` 属性 + `countsChanged`,模型在 `applyPage` 后 `refreshCounts()` |
+| 8 | 来源徽标永不显示 | `store/entry.rs` 的 `get/list/list_via_fts/latest_pinnable` SELECT 漏取 `source`/`tags`,`from_row` 回退为 `"clipboard"` | 四处 SELECT 补齐列(`list()` 因此依赖 v5 schema,`migration_v4_indexes_existing_rows` 测试补跑 `MIGRATION_V5` 再断言) |
+
+### 二、S3 收尾
+
+- **滚动转发**:原为 Sciter 时代遗留(宿主需手动把滚轮转发进引擎)。QML 化后由
+  场景图直接派发,问题在架构上消失;EntryCard 的 MouseArea 显式 `wheel.accepted = false`
+  固定"卡片不吞滚轮"语义,防后续加 `onWheel` 时误吞滚动。
+- **右键菜单**:对齐第一代 `App.tsx` ctx-menu —— 复制 / 翻译 / 识别文字 / 固定 / 删除
+  (「贴到屏幕」「编辑」留 S4:缺按条目贴图 FFI 与编辑器)。翻译抽屉在 Main.qml 作用域,
+  EntryCard 经 `signal translateRequested(string)` 上抛;文本条目取全文直填,图片提示
+  先「识别文字」。
+- **loadMore**:`applyPage` 的 append 分支原先不更新 `m_total`(仅首屏更新),翻页期间
+  条目增删会让 `hasMore` 失真;改为两分支统一以服务端 `total` 收敛。
+- **OCR 结果**:core 的 `ocr_entry` 只返回 `{text}`(不写条目、不写剪贴板),而门面提示
+  写的是"已写入条目"——错误信息。对齐第一代:识别成功后把文本写入剪贴板并提示字符数;
+  未识别到文字给出明确提示。
+- **翻译语言持久化**:目标语言落 `settings.translateTargetLang`(打开载入、切换回写)。
+
+### 三、验收与限制
+
+- core 单测 142 通过(18 项 `translate::*` 环回测试因**沙箱禁止绑定 socket**失败,与改动无关);
+- app 编译链接通过;`qmllint` 0 error(96 项 warning 均因 C++ 注册模块不在静态导入路径);
+- **沙箱(含放开沙箱)无法启动 GUI**:`nextboard.exe` 卡在 `QApplication` 平台插件初始化,
+  日志不增长,offscreen 平台亦无效。**运行时行为须在真实桌面手动验证**。
+- 构建 app 需手动注入 MSVC + SDK 环境:本机 Windows SDK 装在**非默认路径**
+  `D:\Windows Kits\10`,而 `vcvars64.bat` 依赖 `reg.exe` 读注册表 `KitsRoot10` 定位它;
+  沙箱硬黑名单拦截 `reg.exe`(不可绕过),故 INCLUDE 缺 UCRT 路径报 `C1083 stddef.h`。
+  绕过办法:手动设 INCLUDE/LIB/PATH 指向 MSVC 14.44.35207 与 `D:\Windows Kits\10`,再跑 ninja。
+
+### 四、仓库卫生
+
+`app/build/` 与 `core/target/` 的构建产物曾被 git 跟踪(`.gitignore` 对已跟踪文件无效),
+每次构建 diff 噪声达数千行。已执行 `git rm -r --cached app/build core/target` 并从索引移除
+5665 条(工作区文件保留),`.gitignore` 补 `core/target`。**删除已暂存,待提交。**
+
+### 下一步
+
+S4:编辑器(QGraphicsScene)+ 截图/贴图闭环(4.1–4.5)。

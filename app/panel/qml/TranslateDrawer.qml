@@ -8,9 +8,38 @@ import Nextboard.panel
 AppDrawer {
     id: root
 
+    /// 目标语言持久化:settings.translateTargetLang 为唯一来源(progress.md 遗留项)。
+    function loadTargetLang() {
+        const resp = Core.call("get_settings")
+        if (!resp.ok) return
+        const code = resp.data.translateTargetLang
+        for (let i = 0; i < targetLang.count; ++i) {
+            if (targetLang.valueAt(i) === code) { targetLang.currentIndex = i; break }
+        }
+    }
+
+    function saveTargetLang(code) {
+        const resp = Core.call("get_settings")
+        if (!resp.ok) return
+        const s = resp.data
+        if (s.translateTargetLang === code) return
+        s.translateTargetLang = code
+        Core.call("save_settings", s)
+    }
+
     function openAndFocus() {
         open()
+        loadTargetLang()
         input.forceActiveFocus()
+    }
+
+    /// 条目右键「翻译」入口:预填原文并立即翻译。
+    function openWith(text) {
+        open()
+        loadTargetLang()
+        input.text = text
+        if (text && text.trim().length > 0) doTranslate()
+        else input.forceActiveFocus()
     }
 
     function doTranslate() {
@@ -60,6 +89,7 @@ AppDrawer {
                     { label: "日本語",   code: "ja" },
                     { label: "한국어",    code: "ko" }
                 ]
+                onActivated: root.saveTargetLang(currentValue)
             }
             Button { text: "翻译"; highlighted: true; onClicked: root.doTranslate() }
         }
@@ -102,11 +132,28 @@ AppDrawer {
                 enabled: output.text.length > 0
                 onClicked: {
                     const resp = Core.call("copy_text_to_clipboard", { text: output.text })
-                    app.showToast(resp.ok ? "译文已复制"
+                    Core.showToast(resp.ok ? "译文已复制"
                                   : "复制失败:" + (resp.error ? resp.error.message : ""))
                 }
             }
             Item { Layout.fillWidth: true }
+        }
+    }
+
+    // 翻译是线程池异步执行(Core.translateText),结果经 translateFinished 回投。
+    // 原实现漏接此信号,译文永远不会显示——补齐后翻译抽屉才真正可用。
+    Connections {
+        target: Core
+        function onTranslateFinished(resp) {
+            if (resp.ok) {
+                const data = resp.data
+                output.text = data && data.text ? data.text : ""
+                statusLabel.text = "完成 · " + (data && data.provider ? data.provider : "")
+                statusLabel.isError = false
+            } else {
+                statusLabel.text = "翻译失败:" + (resp.error ? resp.error.message : "")
+                statusLabel.isError = true
+            }
         }
     }
 }

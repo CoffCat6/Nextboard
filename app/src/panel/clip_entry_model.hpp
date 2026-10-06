@@ -61,6 +61,9 @@ public:
     Q_INVOKABLE void refreshNow();                      // 立即重拉(打开面板/翻页后)
     Q_INVOKABLE void fetchMoreRequest();                // 触底预取(内部防重入)
     Q_INVOKABLE QVariantMap copyEntry(const QString& id);
+    /// 复制当前视图(含分页/过滤)第 index 条(Ctrl+1..9 序号复制,第一代 F2 语义)。
+    /// 越界返回 ok=false;调用方据 ok 决定是否隐藏面板。
+    Q_INVOKABLE QVariantMap copyByIndex(int index);
     Q_INVOKABLE QVariantMap deleteEntry(const QString& id);
     Q_INVOKABLE void togglePin(const QString& id, bool pinned);
 
