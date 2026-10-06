@@ -1,4 +1,4 @@
-# Nextboard 一键构建脚本
+﻿# Nextboard 一键构建脚本
 #
 # 用法(在仓库根目录):
 #   powershell -ExecutionPolicy Bypass -File build.ps1            # 构建 core + app
@@ -80,11 +80,14 @@ if ($LASTEXITCODE -ne 0) { Die 'app 构建失败(细节见上方输出)' }
 Ok 'nextboard.exe 构建完成'
 
 # ---- 第 3 步:Qt 运行库部署 ----
-# 判定"部署完整"的标准不是 Qt6Widgets.dll 存在,而是**平台插件** qwindows.dll——
-# 缺它时 exe 启动即弹 "could not find the Qt platform plugin" 或静默无窗口。
+# 判定"部署完整"的标准:
+#  - platforms\qwindows.dll:缺它 exe 启动即弹 "could not find the Qt platform plugin" 或静默无窗口;
+#  - Qt6Quick.dll / qml\ 插件目录:QML 面板(v0.2 起)的运行库,缺它面板空白。
 $needDeploy = $Deploy -or
     -not (Test-Path (Join-Path $BuildDir 'Qt6Widgets.dll')) -or
-    -not (Test-Path (Join-Path $BuildDir 'platforms\qwindows.dll'))
+    -not (Test-Path (Join-Path $BuildDir 'platforms\qwindows.dll')) -or
+    -not (Test-Path (Join-Path $BuildDir 'Qt6Quick.dll')) -or
+    -not (Test-Path (Join-Path $BuildDir 'qml'))
 if ($needDeploy) {
     Step '部署 Qt 运行库 (windeployqt)'
     & (Join-Path $QtBin 'windeployqt.exe') --no-translations --no-system-d3d-compiler `
@@ -93,12 +96,14 @@ if ($needDeploy) {
     if (-not (Test-Path (Join-Path $BuildDir 'platforms\qwindows.dll'))) {
         Die 'windeployqt 后仍缺 platforms\qwindows.dll,检查 Qt 安装'
     }
+    if (-not (Test-Path (Join-Path $BuildDir 'Qt6Quick.dll'))) {
+        Die 'windeployqt 后仍缺 Qt6Quick.dll:QML 面板无法启动,检查 Qt Quick 组件是否已安装'
+    }
     Ok 'Qt DLL + 平台插件 + Quick/QML 运行库已部署'
 } else {
     Write-Host '  Qt 运行库已部署,跳过(强制重跑用 -Deploy)'
 }
 # nbcore.dll 由 CMake POST_BUILD 自动拷贝;QML 经 qrc 打进 exe,无需部署资源目录
-
 # ---- 完成 ----
 $exe = Join-Path $BuildDir 'nextboard.exe'
 Write-Host "`n==== 构建完成 ====" -ForegroundColor Cyan

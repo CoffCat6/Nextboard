@@ -1,2 +1,5 @@
+# 构建产物（不纳入版本库）
 app/build
 build
+core/target
+.workbuddy-ai

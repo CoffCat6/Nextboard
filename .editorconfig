@@ -1,0 +1,11 @@
+# 统一文件编码约束。
+# 重点:含中文的 .ps1 必须以 UTF-8 **带 BOM** 保存——
+# Windows PowerShell 5.1 在无 BOM 时按系统 ANSI(本机 936/GBK)解码脚本,
+# 会破坏中文字符串并导致解析失败(如 "缺少右)" )。
+root = true
+
+[*]
+charset = utf-8
+
+[*.ps1]
+charset = utf-8-bom
