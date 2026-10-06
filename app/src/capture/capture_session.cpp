@@ -1,13 +1,15 @@
 #include "capture_session.hpp"
 #include "host/core_bridge.hpp"
 
-#include <QGuiApplication>
 #include <QBuffer>
 #include <QCursor>
+#include <QGuiApplication>
 #include <QIODevice>
 #include <QKeyEvent>
+#include <QList>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPointer>
 #include <QScreen>
 
 #include <windows.h>
@@ -15,8 +17,29 @@
 namespace nb {
 
 namespace {
-// 忙碌标记:防热键重入(第一代 capture/mod.rs CAPTURE_BUSY 语义)
-bool g_busy = false;
+// 当前会话的全部遮罩(多屏各一块);用 QPointer 防关闭后悬空。
+// "会话进行中"直接以它为准(见 pruneOverlays),不再单独维护布尔标记——
+// 遮罩若被外部销毁(Alt+F4 / WM 关闭),下一次触发会自动解除忙碌,不会卡死。
+QList<QPointer<OverlayWidget>> g_overlays;
+
+/// 剔除已销毁的遮罩;返回是否仍有活跃遮罩(即会话进行中)。
+bool pruneOverlays() {
+    g_overlays.removeIf([](const QPointer<OverlayWidget>& p) { return p.isNull(); });
+    return !g_overlays.isEmpty();
+}
+
+/// 收起本次会话的全部遮罩。
+///
+/// 先把列表清空再逐个 close():close() 触发 WA_DeleteOnClose → deleteLater(),
+/// 因此关闭**当前发信的那块遮罩**也是安全的(延迟删除,不在信号发射栈上析构),
+/// 且重入调用会看到空列表而直接返回。
+void closeAllOverlays() {
+    const QList<QPointer<OverlayWidget>> overlays = g_overlays;
+    g_overlays.clear();
+    for (const QPointer<OverlayWidget>& overlay : overlays) {
+        if (overlay) overlay->close();
+    }
+}
 
 QString quickPngBase64(const QImage& image) {
     QBuffer buffer;
@@ -58,14 +81,11 @@ void ingestAndCopyToClipboard(const QImage& image) {
 } // namespace
 
 void startCaptureSession(CaptureIntent intent) {
-    if (g_busy) {
+    // 会话进行中 = 屏幕上还有遮罩(第一代 CAPTURE_BUSY 语义)
+    if (pruneOverlays()) {
         qInfo() << "截图进行中,忽略本次触发";
         return;
     }
-    g_busy = true;
-    struct BusyGuard {
-        ~BusyGuard() { g_busy = false; }
-    } guard;
 
     const QList<QScreen*> screens = QGuiApplication::screens();
     if (screens.isEmpty()) return;
@@ -74,30 +94,41 @@ void startCaptureSession(CaptureIntent intent) {
     int cursorScreen = 0;
     const QPoint cursor = QCursor::pos();
     for (int i = 0; i < screens.size(); ++i) {
-        if (screens[i]->geometry().contains(cursor)) { cursorScreen = i; break; }
+        if (screens[i]->geometry().contains(cursor)) {
+            cursorScreen = i;
+            break;
+        }
     }
 
     CoreBridge& core = CoreBridge::instance();
     if (intent == CaptureIntent::Fullscreen) {
-        // 直通:捕获 → 入库(source=capture)→ 写剪贴板
+        // 直通:捕获 → 入库(source=capture)→ 写剪贴板,同步完成
         const QImage shot = core.captureMonitor(static_cast<unsigned>(cursorScreen));
         if (shot.isNull()) {
             qWarning() << "全屏捕获失败";
-            return;
+        } else {
+            ingestAndCopyToClipboard(shot);
         }
-        ingestAndCopyToClipboard(shot);
         return;
     }
 
-    // 框选:每屏一个遮罩,拿各自冻结底图
+    // 框选:每屏一块遮罩,各自拿本屏冻结底图
     for (int i = 0; i < screens.size(); ++i) {
+        QScreen* screen = screens[i];
         const QImage frozen = core.captureMonitor(static_cast<unsigned>(i));
-        auto* overlay = new OverlayWidget(frozen, i);
+        if (frozen.isNull()) {
+            qWarning() << "屏" << i << "捕获失败,跳过该屏遮罩";
+            continue;
+        }
+        auto* overlay = new OverlayWidget(frozen, i, screen);
         overlay->setAttribute(Qt::WA_DeleteOnClose);
-        // 冻结底图已在宿主侧(QImage 隐式共享,捕获代价为 0):
-        // 裁剪仍走核心 RGBA 通道 nb_capture_crop,保持"有逻辑的归 Rust"
+        g_overlays.append(overlay);
+
+        // 冻结底图已在宿主侧(QImage 隐式共享,lambda 捕获代价为 0);
+        // 裁剪仍走核心 RGBA 通道 nb_capture_crop,保持"有逻辑的归 Rust"。
         QObject::connect(overlay, &OverlayWidget::regionConfirmed, overlay,
                 [frozen](const QRect& physicalRect) {
+            closeAllOverlays();   // 任一屏确认即收起全部遮罩
             const QImage cropped = CoreBridge::instance().captureCrop(frozen, physicalRect);
             if (cropped.isNull()) {
                 qWarning() << "选区裁剪失败(空选区或越界)";
@@ -105,47 +136,89 @@ void startCaptureSession(CaptureIntent intent) {
             }
             ingestAndCopyToClipboard(cropped);
         });
-        QObject::connect(overlay, &OverlayWidget::cancelled, overlay,
-                         [] { qInfo() << "截图取消"; });
+        QObject::connect(overlay, &OverlayWidget::cancelled, overlay, [] {
+            closeAllOverlays();
+            qInfo() << "截图已取消";
+        });
+
+        // ⚠️ showFullScreen() 只把窗口放到"它当前所在的屏",而新建窗口默认落在主屏:
+        // 多屏时若不先定位,所有遮罩会**叠在主屏上**,看到的其实是别屏的底图被拉伸
+        // (既糊又错位),点一次只关掉最上面那块 → 表现为"逐屏依次确认"。
+        // 先指定目标屏 + 设好几何,再全屏,才能做到每屏一块。
+        overlay->setScreen(screen);
+        overlay->setGeometry(screen->geometry());
         overlay->showFullScreen();
+    }
+
+    if (g_overlays.isEmpty()) return;
+    // 让最后一块遮罩拿到键盘焦点,Esc 才有接收者;点击其它屏时 Windows 会自动
+    // 激活被点的窗口,所以任意屏上的 Esc 都能取消整个会话。
+    if (OverlayWidget* last = g_overlays.last().data()) {
+        last->raise();
+        last->activateWindow();
+        last->setFocus();
     }
 }
 
 // ---- OverlayWidget ----
 
-OverlayWidget::OverlayWidget(QImage frozen, int screenIndex, QWidget* parent)
+OverlayWidget::OverlayWidget(QImage frozen, int screenIndex, QScreen* screen, QWidget* parent)
     : QWidget(parent, Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool),
-      m_frozen(std::move(frozen)), m_screenIndex(screenIndex) {
+      m_frozen(std::move(frozen)),
+      m_screenIndex(screenIndex),
+      m_screen(screen) {
     setCursor(Qt::CrossCursor);
     setMouseTracking(true);
 }
 
+qreal OverlayWidget::dpr() const {
+    // 用所属屏幕的 DPR 而非窗口的:窗口在 show 之前 DPR 可能还是主屏的值,
+    // 而本遮罩的底图是按 m_screen 采的,两者必须同一口径。
+    return m_screen ? m_screen->devicePixelRatio() : devicePixelRatioF();
+}
+
+QRect OverlayWidget::selectionPhysical() const {
+    const qreal scale = dpr();
+    const QRect sel = m_selection.normalized();
+    return QRectF(QPointF(sel.topLeft()) * scale, QSizeF(sel.size()) * scale).toAlignedRect();
+}
+
 void OverlayWidget::paintEvent(QPaintEvent*) {
     QPainter painter(this);
-    // 冻结底图铺满(缩放到窗口大小 = 物理像素映射)
+    const qreal scale = dpr();
+
+    // 冻结底图是**物理像素**,窗口坐标是**逻辑像素**:
+    // 按 DPR 反向缩放绘制,使 1 图像像素 = 1 设备像素。若直接
+    // drawImage(rect(), frozen),Qt 会把图重采样到逻辑矩形,高分屏上预览发虚。
     if (!m_frozen.isNull()) {
-        painter.drawImage(rect(), m_frozen);
+        painter.save();
+        painter.scale(1.0 / scale, 1.0 / scale);
+        painter.drawImage(QPoint(0, 0), m_frozen);
+        painter.restore();
     } else {
         painter.fillRect(rect(), QColor(30, 30, 34));
     }
-    // 半透明黑罩
+
+    // 半透明黑罩(逻辑坐标,覆盖整窗)
     painter.fillRect(rect(), QColor(0, 0, 0, 90));
-    // 选区内恢复原图(亮框)
-    if (!m_selection.isNull()) {
+
+    const QRect sel = m_selection.normalized();
+    if (!sel.isNull()) {
+        // 选区内恢复原图:目标矩形是逻辑坐标,但**源矩形必须是物理像素**,
+        // 否则会从底图上取到错位的区域。
+        const QRect src = selectionPhysical();
         painter.setRenderHint(QPainter::SmoothPixmapTransform);
-        painter.drawImage(m_selection, m_frozen,
-                          QRectF(m_selection).normalized());
-        QPen pen(QColor(80, 160, 255), 2);
-        painter.setPen(pen);
+        painter.drawImage(sel, m_frozen, src);
+
+        painter.setPen(QPen(QColor(80, 160, 255), 2));
         painter.setBrush(Qt::NoBrush);
-        painter.drawRect(m_selection.normalized());
-        // 尺寸提示
-        const QSize size = m_selection.normalized().size();
+        painter.drawRect(sel);
+
+        // 尺寸提示按**物理像素**显示,即最终截出来的分辨率
         painter.setPen(QColor(255, 255, 255));
-        painter.drawText(QPoint(m_selection.normalized().x(),
-                                m_selection.normalized().y() - 6),
-                         QStringLiteral("%1 × %2").arg(size.width()).arg(size.height()));
-    } else {
+        painter.drawText(QPoint(sel.x(), sel.y() - 6),
+                         QStringLiteral("%1 × %2").arg(src.width()).arg(src.height()));
+    } else if (!m_selecting) {
         painter.setPen(QColor(255, 255, 255, 200));
         painter.drawText(rect(), Qt::AlignHCenter | Qt::AlignTop,
                          QStringLiteral("拖拽框选,Esc 取消(屏 %1)").arg(m_screenIndex));
@@ -174,24 +247,15 @@ void OverlayWidget::mouseReleaseEvent(QMouseEvent* e) {
         m_selection = QRect(m_origin, e->pos()).normalized();
         if (m_selection.width() < 4 || m_selection.height() < 4) {
             emit cancelled();
-            close();
             return;
         }
-        // 选区是窗口局部**逻辑**坐标,而冻结底图是**物理**像素:
-        // 按本窗口 DPR 换算后再交给核心裁剪(否则 2x 屏上会裁错区域)。
-        const qreal dpr = devicePixelRatioF();
-        const QRect physical =
-            QRectF(QPointF(m_selection.topLeft()) * dpr, QSizeF(m_selection.size()) * dpr)
-                .toAlignedRect();
-        emit regionConfirmed(physical);
-        close();
+        emit regionConfirmed(selectionPhysical());
     }
 }
 
 void OverlayWidget::keyPressEvent(QKeyEvent* e) {
     if (e->key() == Qt::Key_Escape) {
         emit cancelled();
-        close();
     }
 }
 
