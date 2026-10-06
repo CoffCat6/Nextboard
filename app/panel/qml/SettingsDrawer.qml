@@ -114,15 +114,18 @@ AppDrawer {
         }
     }
 
-    /// 自带色板弹层。
+    /// 内联色板(36 色常用色)。
     ///
-    /// ⚠️ **刻意不用 `QtQuick.Dialogs.ColorDialog`**:windeployqt 不会部署该模块
-    /// (QML 已编译进 qrc,它扫描不到 import),运行时 `import QtQuick.Dialogs` 直接
-    /// 报 "module is not installed" → 整个 SettingsDrawer 加载失败 → 主面板空白。
-    /// 自带一份常用色板既无部署依赖,也够日常用;要精确值仍可直接输 hex。
-    component ColorPalettePopup: Popup {
-        id: palette
-        /// 当前值(用于高亮已选中的色块)。
+    /// ⚠️ 两点刻意的取舍,都是踩过的坑:
+    /// 1. **不用 `QtQuick.Dialogs.ColorDialog`** —— windeployqt 不会部署该模块(QML 已
+    ///    编译进 qrc,它扫描不到 import),运行时 `import QtQuick.Dialogs` 直接报
+    ///    "module is not installed" → 整个 SettingsDrawer 加载失败 → **主面板空白**。
+    /// 2. **也不用 `Popup`** —— 外层 SettingsDrawer 本身就是 Popup,嵌套 Popup 的定位与
+    ///    事件派发不可靠(实测点色块没反应)。内联网格没有这个问题,而且设置页本来就可
+    ///    滚动,就地展开比浮层更自然。
+    component ColorSwatchGrid: GridLayout {
+        id: grid
+        /// 当前值,用于高亮已选中的色块。
         property string current: "#000000"
         signal picked(string color)
 
@@ -135,36 +138,24 @@ AppDrawer {
             "#7ec2ff", "#c9a7ff", "#e8b339", "#e5534b", "#4f8cff", "#2f6fe4"
         ]
 
-        padding: 10
-        background: Rectangle {
-            color: Theme.surface
-            border.color: Theme.border
-            border.width: 1
-            radius: 6
-        }
-        contentItem: GridLayout {
-            columns: 6
-            rowSpacing: 4
-            columnSpacing: 4
-            Repeater {
-                model: palette.swatches
-                delegate: Rectangle {
-                    readonly property bool isCurrent:
-                        String(modelData).toLowerCase() === palette.current.toLowerCase()
-                    implicitWidth: 24
-                    implicitHeight: 24
-                    radius: 3
-                    color: modelData
-                    border.width: isCurrent ? 2 : 1
-                    border.color: isCurrent ? Theme.accent : Theme.border
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            palette.picked(modelData)
-                            palette.close()
-                        }
-                    }
+        columns: 6
+        rowSpacing: 4
+        columnSpacing: 4
+        Repeater {
+            model: grid.swatches
+            delegate: Rectangle {
+                readonly property bool isCurrent:
+                    String(modelData).toLowerCase() === grid.current.toLowerCase()
+                implicitWidth: 24
+                implicitHeight: 24
+                radius: 3
+                color: modelData
+                border.width: isCurrent ? 2 : 1
+                border.color: isCurrent ? Theme.accent : Theme.border
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: grid.picked(modelData)
                 }
             }
         }
@@ -421,22 +412,19 @@ AppDrawer {
                 onClicked: root.scheduleSave()
             }
 
-            Label { text: "文本贴图 · 背景色(点色块选色)"; color: Theme.muted; font.pixelSize: 12 }
+            Label { text: "文本贴图 · 背景色(点色块展开色板)"; color: Theme.muted; font.pixelSize: 12 }
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 6
                 Rectangle {
                     implicitWidth: 34; implicitHeight: 22; radius: 4
                     color: root.isHexColor(pinTextBg.text) ? pinTextBg.text : Theme.surface2
-                    border.color: Theme.border
-                    border.width: 1
+                    border.color: root.paletteTarget === "bg" ? Theme.accent : Theme.border
+                    border.width: root.paletteTarget === "bg" ? 2 : 1
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            root.paletteTarget = "bg"
-                            colorPalette.open()
-                        }
+                        onClicked: root.paletteTarget = root.paletteTarget === "bg" ? "" : "bg"
                     }
                 }
                 TextField {
@@ -446,22 +434,30 @@ AppDrawer {
                     onTextEdited: root.scheduleSave()
                 }
             }
-            Label { text: "文本贴图 · 文字色(点色块选色)"; color: Theme.muted; font.pixelSize: 12 }
+            // 就地展开的色板(不用 Popup,原因见 ColorSwatchGrid 注释)
+            ColorSwatchGrid {
+                Layout.fillWidth: true
+                visible: root.paletteTarget === "bg"
+                current: pinTextBg.text
+                onPicked: function(color) {
+                    pinTextBg.text = color
+                    root.paletteTarget = ""
+                    root.scheduleSave()
+                }
+            }
+            Label { text: "文本贴图 · 文字色(点色块展开色板)"; color: Theme.muted; font.pixelSize: 12 }
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 6
                 Rectangle {
                     implicitWidth: 34; implicitHeight: 22; radius: 4
                     color: root.isHexColor(pinTextColor.text) ? pinTextColor.text : Theme.surface2
-                    border.color: Theme.border
-                    border.width: 1
+                    border.color: root.paletteTarget === "color" ? Theme.accent : Theme.border
+                    border.width: root.paletteTarget === "color" ? 2 : 1
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            root.paletteTarget = "color"
-                            colorPalette.open()
-                        }
+                        onClicked: root.paletteTarget = root.paletteTarget === "color" ? "" : "color"
                     }
                 }
                 TextField {
@@ -469,6 +465,16 @@ AppDrawer {
                     Layout.fillWidth: true
                     placeholderText: "#dfe1e8"
                     onTextEdited: root.scheduleSave()
+                }
+            }
+            ColorSwatchGrid {
+                Layout.fillWidth: true
+                visible: root.paletteTarget === "color"
+                current: pinTextColor.text
+                onPicked: function(color) {
+                    pinTextColor.text = color
+                    root.paletteTarget = ""
+                    root.scheduleSave()
                 }
             }
             Label { text: "文本贴图 · 背景不透明度(%)"; color: Theme.muted; font.pixelSize: 12 }
@@ -730,18 +736,6 @@ AppDrawer {
                 font.pixelSize: 12
                 wrapMode: Text.WrapAnywhere
             }
-        }
-    }
-
-    // 色板:点色块打开。放在根级(而不是布局里)—— 它是 Popup,
-    // 塞进 ColumnLayout 会被当成普通 Item 参与布局。
-    ColorPalettePopup {
-        id: colorPalette
-        current: root.paletteTarget === "color" ? pinTextColor.text : pinTextBg.text
-        onPicked: function(color) {
-            if (root.paletteTarget === "color") pinTextColor.text = color
-            else pinTextBg.text = color
-            root.scheduleSave()
         }
     }
 

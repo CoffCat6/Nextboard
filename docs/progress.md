@@ -987,3 +987,40 @@ done
 - 模块部署校验:`QtQuick` / `QtQuick.Controls.Basic` / `QtQuick.Layouts` 全部 **OK**;
   `qmllint` 0 error;app 编译链接通过(`[6/6] Linking`)、无编译警告。
 - ⚠️ 需真实桌面确认:面板恢复正常;设置里点色块应弹出**内置色板**(不再是系统取色器)。
+
+---
+
+## 2026-10-07(三)色板点击无效:改为内联网格
+
+### 现象
+
+设置里点色块后,点击色板中的颜色**不生效**。
+
+### 根因(推断)
+
+上一版把色板做成 `Popup`(`ColorPalettePopup`),而**外层 `SettingsDrawer` 本身就是
+`Popup`(Drawer)** —— 嵌套 Popup 的定位与事件派发在 Qt Quick Controls 里不可靠,
+色块上的 `MouseArea` 收不到点击(或浮层根本没正常显示)。
+
+### 修复
+
+改为**内联网格** `ColorSwatchGrid`(根节点是 `GridLayout`,36 色),直接展开在对应颜色
+字段下方,由 `root.paletteTarget`("" / "bg" / "color")控制哪一块可见:
+
+- 点色块 → 就地展开色板(色块描边高亮表示展开中);
+- 点颜色 → 写回输入框 + 收起 + 自动保存。
+
+**不用 `Popup`、不用 `QtQuick.Dialogs`** —— 两者都已踩过坑(见上文"主面板空白"一节)。
+
+### 验证与限制
+
+- `qmllint` 0 error;无残留 `ColorPalettePopup` 引用;app 编译链接通过(`[6/6] Linking`)、
+  无编译警告。
+- ⚠️ 需真实桌面确认:点色块应就地展开 36 色网格,点其中任一色应立即写入输入框并保存。
+
+### 附:关于沙箱
+
+本轮尝试确认"关闭沙箱后能否运行 GUI"——结论是**仍然不能**:
+`build.ps1 -Run` 能执行完成并 `Start-Process` 成功,但进程不留下(日志无新记录);
+Bash 里直接启动被拦。且 `reg.exe` 仍在黑名单,`vcvars64` 仍受限。
+**因此 GUI 改动依旧只能由用户在真机验证。**
