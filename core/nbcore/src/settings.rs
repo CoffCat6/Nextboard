@@ -52,6 +52,8 @@ pub struct Settings {
     pub pin_text_bg_opacity: i64,
     /// 框选截图是否松开鼠标即自动确认（Phase 5 增强）：关闭时保留手柄微调 + Enter/双击确认。
     pub region_auto_confirm: bool,
+    /// 框选时鼠标右键是否取消本次截图(默认开启;第一代无此项,按用户习惯补)。
+    pub region_right_click_cancel: bool,
     /// 框选确认后是否**跳过编辑器**：默认开启，确认即入库 + 写剪贴板（原 S2 直通行为），
     /// 与 `region_auto_confirm` 叠加即为"拖拽松手 → 已复制"一步到位；
     /// 需要标注时关闭本项（框选进编辑器），或走历史图片右键「编辑」。
@@ -310,6 +312,7 @@ impl Default for Settings {
             pin_text_max_width: 520,
             pin_text_bg_opacity: 92,
             region_auto_confirm: true,
+            region_right_click_cancel: true,
             // 默认"松手即复制"：截图后立刻可粘贴，不经过编辑器
             region_skip_editor: true,
             ocr_language: "auto".into(),

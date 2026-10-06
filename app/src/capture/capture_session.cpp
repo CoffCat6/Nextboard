@@ -61,8 +61,9 @@ QString quickPngBase64(const QImage& image) {
 /// 读到同一张图时按 hash 命中去重,只 touch 不新建,不会产生重复条目。
 QString ingestImageAndCopy(const QImage& image) {
     CoreBridge& core = CoreBridge::instance();
+    const QString pngBase64 = quickPngBase64(image);
     const QJsonObject resp = core.call("ingest_capture_png", {
-        {"png_base64", quickPngBase64(image)},
+        {"png_base64", pngBase64},
         {"source", "capture"},
     });
     if (!resp.value("ok").toBool()) {
@@ -70,11 +71,17 @@ QString ingestImageAndCopy(const QImage& image) {
                    << resp.value("error").toObject().value("message").toString();
         return {};
     }
-    // entry 为 null = 超过图片大小上限被忽略(不落盘,自然也不写剪贴板)
+    // entry 为 null = 超过图片大小上限被忽略
     const QString id =
         resp.value("data").toObject().value("entry").toObject().value("id").toString();
     if (id.isEmpty()) {
-        qInfo() << "截图超过大小上限,已忽略";
+        // 未入库,但**仍要写剪贴板**:否则用户按了截图热键却"毫无反应"
+        // (第一代同语义:超限时"未入库,仅写剪贴板")。
+        qInfo() << "截图超过大小上限,未入库;仅写入剪贴板";
+        const QJsonObject direct = core.call("copy_image_png", {{"png_base64", pngBase64}});
+        if (!direct.value("ok").toBool())
+            qWarning() << "超限截图写剪贴板失败:"
+                       << direct.value("error").toObject().value("message").toString();
         return {};
     }
     const QJsonObject copied = core.call("copy_entry", {{"id", id}});
@@ -106,11 +113,7 @@ bool skipEditor() {
 
 /// regionAutoConfirm(默认 true):框选松开鼠标即确认;false 则选区保留、可用 8 向
 /// 手柄微调,需 Enter 或双击确认(第一代 F10 的两种确认方式)。
-bool autoConfirmRegion() {
-    const QJsonObject resp = CoreBridge::instance().call("get_settings");
-    if (!resp.value("ok").toBool()) return true;
-    return resp.value("data").toObject().value("regionAutoConfirm").toBool(true);
-}
+/// regionRightClickCancel(默认 true):框选时右键取消本次截图。
 } // namespace
 
 void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured, bool allowEditor) {
@@ -149,8 +152,12 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured, bool allo
     }
 
     // 框选:每屏一块遮罩,各自拿本屏冻结底图。
-    // 确认方式由设置 regionAutoConfirm 决定,会话内只读一次。
-    const bool autoConfirm = autoConfirmRegion();
+    // 确认方式与右键取消都由设置决定,会话内只读一次。
+    const QJsonObject settings = CoreBridge::instance().call("get_settings");
+    const QJsonObject data =
+        settings.value("ok").toBool() ? settings.value("data").toObject() : QJsonObject{};
+    const bool autoConfirm = data.value("regionAutoConfirm").toBool(true);
+    const bool rightClickCancel = data.value("regionRightClickCancel").toBool(true);
     for (int i = 0; i < screens.size(); ++i) {
         QScreen* screen = screens[i];
         const QImage frozen = core.captureMonitor(static_cast<unsigned>(i));
@@ -158,7 +165,7 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured, bool allo
             qWarning() << "屏" << i << "捕获失败,跳过该屏遮罩";
             continue;
         }
-        auto* overlay = new OverlayWidget(frozen, i, screen, autoConfirm);
+        auto* overlay = new OverlayWidget(frozen, i, screen, autoConfirm, rightClickCancel);
         overlay->setAttribute(Qt::WA_DeleteOnClose);
         g_overlays.append(overlay);
 
@@ -222,12 +229,13 @@ constexpr int kMinSelection = 4;
 } // namespace
 
 OverlayWidget::OverlayWidget(QImage frozen, int screenIndex, QScreen* screen, bool autoConfirm,
-                             QWidget* parent)
+                             bool rightClickCancel, QWidget* parent)
     : QWidget(parent, Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool),
       m_frozen(std::move(frozen)),
       m_screenIndex(screenIndex),
       m_screen(screen),
-      m_autoConfirm(autoConfirm) {
+      m_autoConfirm(autoConfirm),
+      m_rightClickCancel(rightClickCancel) {
     setCursor(Qt::CrossCursor);
     setMouseTracking(true);
 }
@@ -380,6 +388,11 @@ void OverlayWidget::paintEvent(QPaintEvent*) {
 }
 
 void OverlayWidget::mousePressEvent(QMouseEvent* e) {
+    // 右键取消(可在设置里关掉)
+    if (e->button() == Qt::RightButton) {
+        if (m_rightClickCancel) emit cancelled();
+        return;
+    }
     if (e->button() != Qt::LeftButton) return;
 
     // 微调模式:已有选区时,按在手柄/内部上就进入调整,而不是重新框选

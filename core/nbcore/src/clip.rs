@@ -369,7 +369,11 @@ fn process(core: &Core, item: ClipItem, hash: &str, settings: &Settings) -> AppR
         return Ok(updated);
     }
 
-    let new_entry = build_entry(&core.blobs_dir, item, hash, now)?;
+    let new_entry = build_entry(&core.blobs_dir, item, hash, now, settings.max_image_mb)?;
+    let Some(new_entry) = new_entry else {
+        debug!("图片超过大小上限({}MB),未入库", settings.max_image_mb);
+        return Ok(None);
+    };
     entry::insert(&db, &new_entry)?;
     for blob in entry::evict(&db, settings.history_limit)? {
         remove_blob(&resolve_blob_path(&core.blobs_dir, &blob));
@@ -501,19 +505,33 @@ pub fn resolve_blob_path(blobs_dir: &Path, stored: &str) -> PathBuf {
     }
 }
 
+/// 便宜的前置过滤(文本按字符量、文件按数量)。
+///
+/// **图片不在这里判**:图片的体积上限针对**落盘的 PNG**(真正占磁盘的东西),而那要等
+/// 编码完才知道 —— 见 [`build_entry`]。沿用旧口径(拿原始 RGBA 比)会让
+/// 3840x2160 的整屏截图(33MB RGBA)永远超限、一张都进不了历史。
 fn is_oversized(item: &ClipItem, settings: &Settings) -> bool {
     match item {
         ClipItem::Text(_) => item.byte_size() > settings.max_text_kb * 1024,
-        ClipItem::Image { .. } => item.byte_size() > settings.max_image_mb * 1024 * 1024,
+        ClipItem::Image { .. } => false,
         ClipItem::File(paths) => paths.len() > MAX_FILE_COUNT,
     }
 }
 
 /// 构建待入库条目;图片先编码 PNG 落盘到 `blobs/YYYY-MM/`。
-fn build_entry(blobs_dir: &Path, item: ClipItem, hash: &str, now: i64) -> AppResult<ClipEntry> {
+///
+/// 返回 `None` 表示**图片超过大小上限**:不落盘、不入库(调用方据此提示)。
+/// 上限针对**编码后的 PNG 体积** —— 那才是真正占磁盘的东西。
+fn build_entry(
+    blobs_dir: &Path,
+    item: ClipItem,
+    hash: &str,
+    now: i64,
+    max_image_mb: i64,
+) -> AppResult<Option<ClipEntry>> {
     let id = uuid::Uuid::now_v7().to_string();
     match item {
-        ClipItem::Text(text) => Ok(ClipEntry {
+        ClipItem::Text(text) => Ok(Some(ClipEntry {
             preview: entry::make_preview(&text),
             byte_size: text.len() as i64,
             kind: EntryKind::Text,
@@ -529,13 +547,16 @@ fn build_entry(blobs_dir: &Path, item: ClipItem, hash: &str, now: i64) -> AppRes
             last_used_at: now,
             source: "clipboard".into(),
             tags: None,
-        }),
+        })),
         ClipItem::Image {
             rgba,
             width,
             height,
         } => {
             let png = encode_png(&rgba, width, height)?;
+            if png.len() as i64 > max_image_mb * 1024 * 1024 {
+                return Ok(None);
+            }
             // 存相对路径(相对 blobs 目录),自定义数据目录迁移后仍有效(第一代 docs/phase4.md)
             let relative = format!("{}/{}.png", month_dir(now), id);
             let path = blobs_dir.join(&relative);
@@ -547,7 +568,7 @@ fn build_entry(blobs_dir: &Path, item: ClipItem, hash: &str, now: i64) -> AppRes
             // 列表缩略图随入库一并生成(同一份 RGBA,免二次解码):
             // 主面板列表只加载缩略图,避免为 110px 卡片解码整张 4K 原图。
             write_thumbnail_from_rgba(&rgba, width, height, &thumbnail_path(&path));
-            Ok(ClipEntry {
+            Ok(Some(ClipEntry {
                 byte_size: png.len() as i64,
                 kind: EntryKind::Image,
                 text_content: None,
@@ -563,7 +584,7 @@ fn build_entry(blobs_dir: &Path, item: ClipItem, hash: &str, now: i64) -> AppRes
                 last_used_at: now,
                 source: "clipboard".into(),
                 tags: None,
-            })
+            }))
         }
         ClipItem::File(paths) => {
             let byte_size: i64 = paths
@@ -571,7 +592,7 @@ fn build_entry(blobs_dir: &Path, item: ClipItem, hash: &str, now: i64) -> AppRes
                 .filter_map(|p| std::fs::metadata(p).ok())
                 .map(|m| m.len() as i64)
                 .sum();
-            Ok(ClipEntry {
+            Ok(Some(ClipEntry {
                 preview: entry::make_file_preview(&paths),
                 byte_size,
                 kind: EntryKind::File,
@@ -587,7 +608,7 @@ fn build_entry(blobs_dir: &Path, item: ClipItem, hash: &str, now: i64) -> AppRes
                 last_used_at: now,
                 source: "clipboard".into(),
                 tags: None,
-            })
+            }))
         }
     }
 }
@@ -1010,5 +1031,29 @@ mod tests {
         let big = ClipItem::Text("x".repeat(2048));
         assert!(!is_oversized(&small, &settings));
         assert!(is_oversized(&big, &settings));
+    }
+
+    /// 图片大小上限改为按**编码后的 PNG** 判断的回归测试。
+    ///
+    /// 旧口径拿**原始 RGBA** 比大小:1920x1080 的 RGBA 就是 8MB、4K 是 33MB,
+    /// 在默认 20MB 上限下整屏截图永远进不了历史(实测:3072x1920 的屏截不了、
+    /// 1080x1920 的屏正常 —— 正是这个差异暴露的问题)。
+    #[test]
+    fn image_size_limit_uses_encoded_png_not_raw_rgba() {
+        let (w, h) = (2000u32, 2000u32);
+        let rgba = vec![0u8; (w * h * 4) as usize];
+        let raw_mb = rgba.len() as f64 / (1024.0 * 1024.0);
+        let png = encode_png(&rgba, w, h).expect("编码应成功");
+        let png_mb = png.len() as f64 / (1024.0 * 1024.0);
+        assert!(raw_mb > 15.0, "同图原始 RGBA 很大({raw_mb:.1}MB)");
+        assert!(png_mb < 1.0, "而 PNG 很小({png_mb:.2}MB)—— 上限该按它判");
+
+        // 前置过滤不再拦图片(体积判断移到 build_entry,那里才有 PNG)
+        let item = ClipItem::Image {
+            rgba,
+            width: w,
+            height: h,
+        };
+        assert!(!is_oversized(&item, &Settings::default()));
     }
 }

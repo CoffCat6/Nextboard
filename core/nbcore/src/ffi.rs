@@ -383,6 +383,17 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
             Ok(serde_json::Value::Null)
         }
         "read_clipboard_text" => Ok(serde_json::json!(crate::clip::read_text_from_clipboard()?)),
+        // 直接把一张 PNG 写进系统剪贴板(不经过条目)。
+        // 用途:截图超过大小上限、未入库时,仍要让用户的"截一下"落到剪贴板 ——
+        // 第一代对超限截图的处理就是"未入库,仅写剪贴板",否则表现为"按了没反应"。
+        "copy_image_png" => {
+            let png_b64 = str_req(req, "png_base64")?;
+            let png = base64::engine::general_purpose::STANDARD
+                .decode(png_b64.as_bytes())
+                .map_err(|err| AppError::InvalidInput(format!("PNG base64 非法: {err}")))?;
+            crate::clip::write_png_to_clipboard(&png)?;
+            Ok(serde_json::Value::Null)
+        }
         "copy_entry" => {
             // 把条目内容写回系统剪贴板(第一代 commands.rs 的 copy_entry 语义):
             // 文本直写;图片读 blob → 解码 RGBA → CF_DIBV5 直写;文件重写 CF_HDROP。

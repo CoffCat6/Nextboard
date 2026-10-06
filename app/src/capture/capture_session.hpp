@@ -46,8 +46,9 @@ public:
     /// screen:本遮罩所属屏幕(frozen 即该屏的物理像素底图)。
     /// autoConfirm:对应设置 regionAutoConfirm —— true = 松开鼠标即确认(默认);
     ///              false = 选区保留,可用 8 向手柄微调,Enter/双击确认。
+    /// rightClickCancel:对应设置 regionRightClickCancel —— 右键是否取消本次截图。
     OverlayWidget(QImage frozen, int screenIndex, QScreen* screen, bool autoConfirm,
-                  QWidget* parent = nullptr);
+                  bool rightClickCancel, QWidget* parent = nullptr);
 
 signals:
     /// 选区确认:**本屏物理像素**坐标,相对该屏左上角(直接供 nb_capture_crop)。
@@ -87,6 +88,7 @@ private:
     int m_screenIndex;
     QScreen* m_screen = nullptr;
     bool m_autoConfirm = true;
+    bool m_rightClickCancel = true;
 
     QPoint m_origin;          // 新选区的起点(局部逻辑坐标)
     QRect m_selection;        // 当前选区(局部逻辑坐标)

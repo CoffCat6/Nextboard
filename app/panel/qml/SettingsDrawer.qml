@@ -5,6 +5,7 @@
 // 只能手改 app_config.json —— 等于翻译功能不可用。
 import QtQuick
 import QtQuick.Controls.Basic
+import QtQuick.Dialogs
 import QtQuick.Layouts
 import Nextboard.Core 1.0
 import Nextboard.panel
@@ -16,6 +17,22 @@ AppDrawer {
     readonly property var providers: ["openai", "microsoft", "custom"]
     readonly property string provider: providers[Math.max(0, providerCombo.currentIndex)]
 
+    /// 快捷键是否被改过 —— 只有改过才重新注册,避免每次自动保存都注销/重注册一遍。
+    property bool hotkeysDirty: false
+
+    /// 改动去抖后自动落盘(不再有底部「保存」按钮)。
+    /// 各控件只接**用户操作**信号(valueModified / clicked / textEdited / activated),
+    /// 因此加载时回填值不会误触发保存,也就不需要 loading 守卫。
+    Timer {
+        id: autoSave
+        interval: 400
+        onTriggered: root.save()
+    }
+
+    function scheduleSave() {
+        autoSave.restart()
+    }
+
     /// 快捷键录制控件:点击进入录制态,按下组合键即捕获。
     /// 产出形如 "Ctrl+Shift+V" 的字符串;合法性(至少一个修饰键、各动作两两不重复、
     /// 不可为空)由 core 的 settings 校验负责 —— 这里不做客户端校验,直接展示后端错误。
@@ -23,6 +40,8 @@ AppDrawer {
         id: hk
         property string value: ""
         property bool recording: false
+        /// 录制完成、值真的变了才发(用于触发自动保存与热键重注册)。
+        signal valueModified()
         implicitHeight: 30
 
         function keyName(key) {
@@ -84,8 +103,11 @@ AppDrawer {
             if (event.modifiers & Qt.AltModifier) parts.push("Alt")
             if (event.modifiers & Qt.MetaModifier) parts.push("Win")
             parts.push(name)
-            hk.value = parts.join("+")
+            const next = parts.join("+")
+            const changed = next !== hk.value
+            hk.value = next
             hk.recording = false
+            if (changed) hk.valueModified()
             event.accepted = true
         }
     }
@@ -114,6 +136,7 @@ AppDrawer {
         ocrCheck.checked = s.ocrEnabled === true
         skipEditorCheck.checked = s.regionSkipEditor === true
         autoConfirmCheck.checked = s.regionAutoConfirm === true
+        rightClickCancelCheck.checked = s.regionRightClickCancel === true
         themeCombo.currentIndex = s.theme === "light" ? 1 : s.theme === "dark" ? 2 : 0
 
         pinOpacity.value = s.pinDefaultOpacity > 0 ? s.pinDefaultOpacity : 100
@@ -173,6 +196,7 @@ AppDrawer {
         s.ocrEnabled = ocrCheck.checked
         s.regionSkipEditor = skipEditorCheck.checked
         s.regionAutoConfirm = autoConfirmCheck.checked
+        s.regionRightClickCancel = rightClickCancelCheck.checked
         s.theme = ["system", "light", "dark"][themeCombo.currentIndex]
 
         s.pinDefaultOpacity = pinOpacity.value
@@ -221,8 +245,13 @@ AppDrawer {
         statusLabel.text = resp.ok ? "已保存" : "保存失败:" + errText(resp)
         statusLabel.isError = !resp.ok
         if (resp.ok) {
-            Core.applyTheme(s.theme)   // 落盘后立即按新主题重刷
-            Core.reloadHotkeys()       // 快捷键立即重新注册(否则要重启才生效)
+            Core.applyTheme(s.theme)   // 幂等:主题没变时不会重刷
+            // 只有快捷键真的改过才重新注册 —— 每次自动保存都注销/重注册一遍会留下
+            // 短暂的空窗,期间按热键会丢。
+            if (root.hotkeysDirty) {
+                Core.reloadHotkeys()
+                root.hotkeysDirty = false
+            }
             Entries.refreshNow()
         }
     }
@@ -258,6 +287,8 @@ AppDrawer {
                 id: historyLimit
                 Layout.fillWidth: true
                 from: 100; to: 100000; stepSize: 500
+                editable: true
+                onValueModified: root.scheduleSave()
             }
 
             Label { text: "单张图片上限(MB)"; color: Theme.muted; font.pixelSize: 12 }
@@ -265,25 +296,36 @@ AppDrawer {
                 id: maxImage
                 Layout.fillWidth: true
                 from: 1; to: 200
+                editable: true
+                onValueModified: root.scheduleSave()
             }
 
             CheckBox {
                 id: monitorCheck
                 text: "剪贴板监听"
+                onClicked: root.scheduleSave()
             }
             CheckBox {
                 id: ocrCheck
                 text: "OCR 自动识别(截图文字可搜索)"
+                onClicked: root.scheduleSave()
             }
             // 取消勾选后,框选截图会先进编辑器标注,「完成」才入库 + 写剪贴板
             CheckBox {
                 id: skipEditorCheck
                 text: "截图后直接入库(跳过编辑器)"
+                onClicked: root.scheduleSave()
             }
             // 取消勾选后,选区保留并可拖 8 向手柄微调,Enter 或双击才确认
             CheckBox {
                 id: autoConfirmCheck
                 text: "框选后松开鼠标即确认"
+                onClicked: root.scheduleSave()
+            }
+            CheckBox {
+                id: rightClickCancelCheck
+                text: "框选时鼠标右键取消截图"
+                onClicked: root.scheduleSave()
             }
 
             Label { text: "主题"; color: Theme.muted; font.pixelSize: 12 }
@@ -291,8 +333,11 @@ AppDrawer {
                 id: themeCombo
                 Layout.fillWidth: true
                 model: ["跟随系统", "浅色", "深色"]
-                // 切换即生效(不必等"保存"),给用户即时反馈
-                onActivated: Core.applyTheme(["system", "light", "dark"][currentIndex])
+                // 切换即生效(不必等保存),给用户即时反馈
+                onActivated: {
+                    Core.applyTheme(["system", "light", "dark"][currentIndex])
+                    root.scheduleSave()
+                }
             }
 
             // ---- 贴图 ----
@@ -309,42 +354,57 @@ AppDrawer {
                 id: pinOpacity
                 Layout.fillWidth: true
                 from: 30; to: 100; stepSize: 5
+                editable: true
+                onValueModified: root.scheduleSave()
             }
             CheckBox {
                 id: pinDoubleClick
                 text: "双击关闭贴图窗口"
+                onClicked: root.scheduleSave()
             }
 
-            Label { text: "文本贴图 · 背景色(#RRGGBB)"; color: Theme.muted; font.pixelSize: 12 }
+            Label { text: "文本贴图 · 背景色(点色块选色)"; color: Theme.muted; font.pixelSize: 12 }
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 6
                 Rectangle {
-                    implicitWidth: 22; implicitHeight: 22; radius: 4
+                    implicitWidth: 34; implicitHeight: 22; radius: 4
                     color: root.isHexColor(pinTextBg.text) ? pinTextBg.text : Theme.surface2
                     border.color: Theme.border
                     border.width: 1
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: pinTextBgDialog.open()
+                    }
                 }
                 TextField {
                     id: pinTextBg
                     Layout.fillWidth: true
                     placeholderText: "#26272e"
+                    onTextEdited: root.scheduleSave()
                 }
             }
-            Label { text: "文本贴图 · 文字色(#RRGGBB)"; color: Theme.muted; font.pixelSize: 12 }
+            Label { text: "文本贴图 · 文字色(点色块选色)"; color: Theme.muted; font.pixelSize: 12 }
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 6
                 Rectangle {
-                    implicitWidth: 22; implicitHeight: 22; radius: 4
+                    implicitWidth: 34; implicitHeight: 22; radius: 4
                     color: root.isHexColor(pinTextColor.text) ? pinTextColor.text : Theme.surface2
                     border.color: Theme.border
                     border.width: 1
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: pinTextColorDialog.open()
+                    }
                 }
                 TextField {
                     id: pinTextColor
                     Layout.fillWidth: true
                     placeholderText: "#dfe1e8"
+                    onTextEdited: root.scheduleSave()
                 }
             }
             Label { text: "文本贴图 · 背景不透明度(%)"; color: Theme.muted; font.pixelSize: 12 }
@@ -352,18 +412,24 @@ AppDrawer {
                 id: pinTextBgOpacity
                 Layout.fillWidth: true
                 from: 0; to: 100; stepSize: 5
+                editable: true
+                onValueModified: root.scheduleSave()
             }
             Label { text: "文本贴图 · 字号(像素)"; color: Theme.muted; font.pixelSize: 12 }
             SpinBox {
                 id: pinTextFontSize
                 Layout.fillWidth: true
                 from: 8; to: 96
+                editable: true
+                onValueModified: root.scheduleSave()
             }
             Label { text: "文本贴图 · 最大宽度(像素)"; color: Theme.muted; font.pixelSize: 12 }
             SpinBox {
                 id: pinTextMaxWidth
                 Layout.fillWidth: true
                 from: 120; to: 2000; stepSize: 40
+                editable: true
+                onValueModified: root.scheduleSave()
             }
 
             // ---- 快捷键 ----
@@ -382,17 +448,59 @@ AppDrawer {
                 wrapMode: Text.WrapAnywhere
             }
             Label { text: "呼出/隐藏面板"; color: Theme.muted; font.pixelSize: 12 }
-            HotkeyField { id: hkToggleMain; Layout.fillWidth: true }
+            HotkeyField {
+                id: hkToggleMain
+                Layout.fillWidth: true
+                onValueModified: {
+                    root.hotkeysDirty = true
+                    root.scheduleSave()
+                }
+            }
             Label { text: "矩形截图"; color: Theme.muted; font.pixelSize: 12 }
-            HotkeyField { id: hkCaptureRegion; Layout.fillWidth: true }
+            HotkeyField {
+                id: hkCaptureRegion
+                Layout.fillWidth: true
+                onValueModified: {
+                    root.hotkeysDirty = true
+                    root.scheduleSave()
+                }
+            }
             Label { text: "全屏截图"; color: Theme.muted; font.pixelSize: 12 }
-            HotkeyField { id: hkCaptureFullscreen; Layout.fillWidth: true }
+            HotkeyField {
+                id: hkCaptureFullscreen
+                Layout.fillWidth: true
+                onValueModified: {
+                    root.hotkeysDirty = true
+                    root.scheduleSave()
+                }
+            }
             Label { text: "一键贴图"; color: Theme.muted; font.pixelSize: 12 }
-            HotkeyField { id: hkPinLatest; Layout.fillWidth: true }
+            HotkeyField {
+                id: hkPinLatest
+                Layout.fillWidth: true
+                onValueModified: {
+                    root.hotkeysDirty = true
+                    root.scheduleSave()
+                }
+            }
             Label { text: "打开翻译"; color: Theme.muted; font.pixelSize: 12 }
-            HotkeyField { id: hkOpenTranslate; Layout.fillWidth: true }
+            HotkeyField {
+                id: hkOpenTranslate
+                Layout.fillWidth: true
+                onValueModified: {
+                    root.hotkeysDirty = true
+                    root.scheduleSave()
+                }
+            }
             Label { text: "截图翻译"; color: Theme.muted; font.pixelSize: 12 }
-            HotkeyField { id: hkCaptureTranslate; Layout.fillWidth: true }
+            HotkeyField {
+                id: hkCaptureTranslate
+                Layout.fillWidth: true
+                onValueModified: {
+                    root.hotkeysDirty = true
+                    root.scheduleSave()
+                }
+            }
 
             // ---- 翻译服务 ----
             Rectangle {
@@ -406,12 +514,14 @@ AppDrawer {
                 id: providerCombo
                 Layout.fillWidth: true
                 model: ["OpenAI 兼容接口", "微软翻译", "自定义 HTTP"]
+                onActivated: root.scheduleSave()
             }
 
             // OpenAI 兼容(含国内兼容端点)
             Label { text: "接口地址"; visible: root.provider === "openai"; color: Theme.muted; font.pixelSize: 12 }
             TextField {
                 id: oaBaseUrl
+                onTextEdited: root.scheduleSave()
                 visible: root.provider === "openai"
                 Layout.fillWidth: true
                 placeholderText: "https://api.openai.com/v1"
@@ -419,6 +529,7 @@ AppDrawer {
             Label { text: "API Key"; visible: root.provider === "openai"; color: Theme.muted; font.pixelSize: 12 }
             TextField {
                 id: oaApiKey
+                onTextEdited: root.scheduleSave()
                 visible: root.provider === "openai"
                 Layout.fillWidth: true
                 echoMode: TextInput.Password
@@ -427,6 +538,7 @@ AppDrawer {
             Label { text: "模型"; visible: root.provider === "openai"; color: Theme.muted; font.pixelSize: 12 }
             TextField {
                 id: oaModel
+                onTextEdited: root.scheduleSave()
                 visible: root.provider === "openai"
                 Layout.fillWidth: true
                 placeholderText: "gpt-4o-mini"
@@ -436,6 +548,7 @@ AppDrawer {
             Label { text: "接口地址"; visible: root.provider === "microsoft"; color: Theme.muted; font.pixelSize: 12 }
             TextField {
                 id: msEndpoint
+                onTextEdited: root.scheduleSave()
                 visible: root.provider === "microsoft"
                 Layout.fillWidth: true
                 placeholderText: "https://api.translator.azure.cn"
@@ -443,6 +556,7 @@ AppDrawer {
             Label { text: "API Key"; visible: root.provider === "microsoft"; color: Theme.muted; font.pixelSize: 12 }
             TextField {
                 id: msApiKey
+                onTextEdited: root.scheduleSave()
                 visible: root.provider === "microsoft"
                 Layout.fillWidth: true
                 echoMode: TextInput.Password
@@ -450,6 +564,7 @@ AppDrawer {
             Label { text: "区域(可选)"; visible: root.provider === "microsoft"; color: Theme.muted; font.pixelSize: 12 }
             TextField {
                 id: msRegion
+                onTextEdited: root.scheduleSave()
                 visible: root.provider === "microsoft"
                 Layout.fillWidth: true
                 placeholderText: "如 eastasia"
@@ -459,6 +574,7 @@ AppDrawer {
             Label { text: "请求地址"; visible: root.provider === "custom"; color: Theme.muted; font.pixelSize: 12 }
             TextField {
                 id: cuUrl
+                onTextEdited: root.scheduleSave()
                 visible: root.provider === "custom"
                 Layout.fillWidth: true
                 placeholderText: "https://…"
@@ -469,10 +585,12 @@ AppDrawer {
                 visible: root.provider === "custom"
                 Layout.fillWidth: true
                 model: ["POST", "GET"]
+                onActivated: root.scheduleSave()
             }
             Label { text: "API Key(可选)"; visible: root.provider === "custom"; color: Theme.muted; font.pixelSize: 12 }
             TextField {
                 id: cuApiKey
+                onTextEdited: root.scheduleSave()
                 visible: root.provider === "custom"
                 Layout.fillWidth: true
                 echoMode: TextInput.Password
@@ -480,12 +598,14 @@ AppDrawer {
             Label { text: "模型(可选)"; visible: root.provider === "custom"; color: Theme.muted; font.pixelSize: 12 }
             TextField {
                 id: cuModel
+                onTextEdited: root.scheduleSave()
                 visible: root.provider === "custom"
                 Layout.fillWidth: true
             }
             Label { text: "请求头(每行一条 Name: Value)"; visible: root.provider === "custom"; color: Theme.muted; font.pixelSize: 12 }
             TextArea {
                 id: cuHeaders
+                onTextEdited: root.scheduleSave()
                 visible: root.provider === "custom"
                 Layout.fillWidth: true
                 Layout.preferredHeight: 54
@@ -495,6 +615,7 @@ AppDrawer {
             Label { text: "请求体模板"; visible: root.provider === "custom"; color: Theme.muted; font.pixelSize: 12 }
             TextArea {
                 id: cuBody
+                onTextEdited: root.scheduleSave()
                 visible: root.provider === "custom"
                 Layout.fillWidth: true
                 Layout.preferredHeight: 66
@@ -504,6 +625,7 @@ AppDrawer {
             Label { text: "响应取值路径"; visible: root.provider === "custom"; color: Theme.muted; font.pixelSize: 12 }
             TextField {
                 id: cuPath
+                onTextEdited: root.scheduleSave()
                 visible: root.provider === "custom"
                 Layout.fillWidth: true
                 placeholderText: "如 data.translations[0].text"
@@ -514,6 +636,8 @@ AppDrawer {
                 id: timeoutSpin
                 Layout.fillWidth: true
                 from: 5; to: 120
+                editable: true
+                onValueModified: root.scheduleSave()
             }
 
             RowLayout {
@@ -531,33 +655,40 @@ AppDrawer {
                 wrapMode: Text.WrapAnywhere
             }
 
-            // ---- 操作 ----
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.topMargin: 10
-                implicitHeight: 1
-                color: Theme.border
-            }
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 8
-                Button {
-                    text: "保存"
-                    highlighted: true
-                    onClicked: root.save()
-                }
-                Button { text: "关闭"; onClicked: root.close() }
-                Item { Layout.fillWidth: true }
-            }
-
+            // 改动即时保存(去抖 400ms),故不再有「保存 / 关闭」按钮 ——
+            // 关闭抽屉走标题栏的 ✕。状态行只用于反馈结果(尤其是校验失败)。
             Label {
                 id: statusLabel
                 property bool isError: false
                 Layout.fillWidth: true
+                Layout.topMargin: 12
                 color: isError ? Theme.danger : Theme.muted
                 font.pixelSize: 12
                 wrapMode: Text.WrapAnywhere
             }
+        }
+    }
+
+    // 取色器:点色块打开。放在根级(而不是布局里)—— 它是 Popup,
+    // 塞进 ColumnLayout 会被当成普通 Item 参与布局。
+    ColorDialog {
+        id: pinTextBgDialog
+        title: "文本贴图 · 背景色"
+        showAlphaChannel: false
+        selectedColor: root.isHexColor(pinTextBg.text) ? pinTextBg.text : "#26272e"
+        onAccepted: {
+            pinTextBg.text = selectedColor.toString()
+            root.scheduleSave()
+        }
+    }
+    ColorDialog {
+        id: pinTextColorDialog
+        title: "文本贴图 · 文字色"
+        showAlphaChannel: false
+        selectedColor: root.isHexColor(pinTextColor.text) ? pinTextColor.text : "#dfe1e8"
+        onAccepted: {
+            pinTextColor.text = selectedColor.toString()
+            root.scheduleSave()
         }
     }
 
