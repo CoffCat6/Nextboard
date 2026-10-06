@@ -5,7 +5,6 @@
 // 只能手改 app_config.json —— 等于翻译功能不可用。
 import QtQuick
 import QtQuick.Controls.Basic
-import QtQuick.Dialogs
 import QtQuick.Layouts
 import Nextboard.Core 1.0
 import Nextboard.panel
@@ -19,6 +18,9 @@ AppDrawer {
 
     /// 快捷键是否被改过 —— 只有改过才重新注册,避免每次自动保存都注销/重注册一遍。
     property bool hotkeysDirty: false
+
+    /// 当前取色目标("" / "bg" / "color")——两个颜色字段共用一个色板弹层。
+    property string paletteTarget: ""
 
     /// 改动去抖后自动落盘(不再有底部「保存」按钮)。
     /// 各控件只接**用户操作**信号(valueModified / clicked / textEdited / activated),
@@ -109,6 +111,62 @@ AppDrawer {
             hk.recording = false
             if (changed) hk.valueModified()
             event.accepted = true
+        }
+    }
+
+    /// 自带色板弹层。
+    ///
+    /// ⚠️ **刻意不用 `QtQuick.Dialogs.ColorDialog`**:windeployqt 不会部署该模块
+    /// (QML 已编译进 qrc,它扫描不到 import),运行时 `import QtQuick.Dialogs` 直接
+    /// 报 "module is not installed" → 整个 SettingsDrawer 加载失败 → 主面板空白。
+    /// 自带一份常用色板既无部署依赖,也够日常用;要精确值仍可直接输 hex。
+    component ColorPalettePopup: Popup {
+        id: palette
+        /// 当前值(用于高亮已选中的色块)。
+        property string current: "#000000"
+        signal picked(string color)
+
+        readonly property var swatches: [
+            "#000000", "#3b3b3b", "#6b6b6b", "#9a9a9a", "#c8c8c8", "#ffffff",
+            "#e03131", "#f76707", "#fab009", "#40c057", "#1c7ed6", "#7048e8",
+            "#ff8787", "#ffa94d", "#ffe066", "#8ce99a", "#74c0fc", "#b197fc",
+            "#a61e1e", "#b35309", "#a37b00", "#2b8a3e", "#1552a3", "#4c2f9e",
+            "#1e1f24", "#26272e", "#2d2e37", "#33353d", "#dfe1e8", "#9aa0ab",
+            "#7ec2ff", "#c9a7ff", "#e8b339", "#e5534b", "#4f8cff", "#2f6fe4"
+        ]
+
+        padding: 10
+        background: Rectangle {
+            color: Theme.surface
+            border.color: Theme.border
+            border.width: 1
+            radius: 6
+        }
+        contentItem: GridLayout {
+            columns: 6
+            rowSpacing: 4
+            columnSpacing: 4
+            Repeater {
+                model: palette.swatches
+                delegate: Rectangle {
+                    readonly property bool isCurrent:
+                        String(modelData).toLowerCase() === palette.current.toLowerCase()
+                    implicitWidth: 24
+                    implicitHeight: 24
+                    radius: 3
+                    color: modelData
+                    border.width: isCurrent ? 2 : 1
+                    border.color: isCurrent ? Theme.accent : Theme.border
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            palette.picked(modelData)
+                            palette.close()
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -375,7 +433,10 @@ AppDrawer {
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: pinTextBgDialog.open()
+                        onClicked: {
+                            root.paletteTarget = "bg"
+                            colorPalette.open()
+                        }
                     }
                 }
                 TextField {
@@ -397,7 +458,10 @@ AppDrawer {
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: pinTextColorDialog.open()
+                        onClicked: {
+                            root.paletteTarget = "color"
+                            colorPalette.open()
+                        }
                     }
                 }
                 TextField {
@@ -669,25 +733,14 @@ AppDrawer {
         }
     }
 
-    // 取色器:点色块打开。放在根级(而不是布局里)—— 它是 Popup,
+    // 色板:点色块打开。放在根级(而不是布局里)—— 它是 Popup,
     // 塞进 ColumnLayout 会被当成普通 Item 参与布局。
-    ColorDialog {
-        id: pinTextBgDialog
-        title: "文本贴图 · 背景色"
-        showAlphaChannel: false
-        selectedColor: root.isHexColor(pinTextBg.text) ? pinTextBg.text : "#26272e"
-        onAccepted: {
-            pinTextBg.text = selectedColor.toString()
-            root.scheduleSave()
-        }
-    }
-    ColorDialog {
-        id: pinTextColorDialog
-        title: "文本贴图 · 文字色"
-        showAlphaChannel: false
-        selectedColor: root.isHexColor(pinTextColor.text) ? pinTextColor.text : "#dfe1e8"
-        onAccepted: {
-            pinTextColor.text = selectedColor.toString()
+    ColorPalettePopup {
+        id: colorPalette
+        current: root.paletteTarget === "color" ? pinTextColor.text : pinTextBg.text
+        onPicked: function(color) {
+            if (root.paletteTarget === "color") pinTextColor.text = color
+            else pinTextBg.text = color
             root.scheduleSave()
         }
     }

@@ -939,3 +939,51 @@ S4 起一直缺(当时标注为"待 S4:需按条目贴图 FFI 与 QGraphicsScene
   app 编译链接通过(`[11/11] Linking`)、无编译警告。
 - ⚠️ 需真实桌面确认:两块屏的全屏截图都应入库;设置改动应**即时落盘**(不再需要保存按钮);
   SpinBox 可直接输数字;色块能打开取色器。
+
+---
+
+## 2026-10-07(三)主面板再次空白:QtQuick.Dialogs 未部署
+
+### 现象与根因
+
+主面板整片空白。日志一行定位:
+
+```
+SettingsDrawer.qml:8:1: module "QtQuick.Dialogs" is not installed
+```
+
+→ `SettingsDrawer` 加载失败 → `Main.qml` 整体失败 → 面板空白。
+
+上一轮为做"色板选色"引入了 `import QtQuick.Dialogs` + `ColorDialog`。
+**`qmllint` 是通过的** —— 它从 Qt 安装目录解析 import;但**运行时解析不到**:
+已部署的 `app/build/qml/QtQuick/Dialogs/` 里**只有 `quickimpl/` 子目录**,缺 `qmldir` /
+`plugins.qmltypes` / `qtquickdialogsplugin.dll`。
+
+为什么没部署:**windeployqt 检测不到这个 import** —— QML 已编译进 qrc,它扫描的是
+二进制 / qmlcachegen 产物,看不见新引入的模块。(本想重跑 windeployqt 验证,但沙箱拦住了
+它依赖的 `qtpaths`,无法确认。)
+
+### 修复
+
+**去掉该依赖**:改为自带的 `ColorPalettePopup`(36 色常用色板,`GridLayout` + `Repeater`,
+高亮当前值),保留 hex 输入框用于精确取值。**零部署依赖**,不再受 windeployqt 行为影响。
+
+### 教训(已固化为可执行检查)
+
+> **`qmllint` 通过 ≠ 运行时可用。** 它从 Qt 安装解析 import,而运行时要的是**已部署**的
+> 模块。每新增一个 Qt 模块 import,就多一份部署风险。
+
+现在有一行检查可以提前发现(已写入项目记忆):
+
+```bash
+# 校验 QML 里 import 的 Qt 模块是否都已在 app/build/qml 下部署(存在 qmldir)
+for m in $(grep -rhoE "^import Qt[A-Za-z.]*" app/panel/qml/*.qml | sed 's/^import //' | sort -u); do
+  p="app/build/qml/$(echo "$m" | tr '.' '/')"; [ -f "$p/qmldir" ] && echo "OK $m" || echo "MISS $m"
+done
+```
+
+### 验证与限制
+
+- 模块部署校验:`QtQuick` / `QtQuick.Controls.Basic` / `QtQuick.Layouts` 全部 **OK**;
+  `qmllint` 0 error;app 编译链接通过(`[6/6] Linking`)、无编译警告。
+- ⚠️ 需真实桌面确认:面板恢复正常;设置里点色块应弹出**内置色板**(不再是系统取色器)。
