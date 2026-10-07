@@ -74,7 +74,7 @@ AppDrawer {
                 elide: Text.ElideRight
                 font.pixelSize: Theme.metrics.fontCaption
                 color: hk.recording ? Theme.colors.accent
-                     : hk.value === "" ? Theme.colors.textTertiary : Theme.colors.textPrimary
+                     : hk.value === "" ? Theme.colors.textSecondary : Theme.colors.textPrimary
                 text: hk.recording ? "按下组合键…(Esc 取消)" : (hk.value || "未设置")
             }
         }
@@ -452,12 +452,14 @@ AppDrawer {
                 Layout.topMargin: Theme.metrics.spacingXs
             }
             component FieldLabel: Label {
+                // 字段标签是与控件直接交互的引导文字,暗色下用 Secondary 的提亮值
                 color: Theme.colors.textSecondary
                 font.pixelSize: Theme.metrics.fontCaption
             }
             component HintLabel: Label {
                 Layout.fillWidth: true
-                color: Theme.colors.textTertiary
+                // 说明文字较长,是"看不清"的重灾区:暗色下改用 Secondary(提亮档)
+                color: Theme.colors.textSecondary
                 font.pixelSize: Theme.metrics.fontMicro + 1
                 wrapMode: Text.WrapAnywhere
             }

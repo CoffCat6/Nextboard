@@ -30,6 +30,7 @@ AppDrawer {
 
     function openAndFocus() {
         open()
+        reset()
         loadTargetLang()
         input.forceActiveFocus()
     }
@@ -37,10 +38,21 @@ AppDrawer {
     /// 条目右键「翻译」入口:预填原文并立即翻译。
     function openWith(text) {
         open()
+        reset()
         loadTargetLang()
         input.text = text
         if (text && text.trim().length > 0) doTranslate()
         else input.forceActiveFocus()
+    }
+
+    /// 重开抽屉即清空上一次会话(原文/译文/状态),残留内容易被误读为新结果;
+    /// openWith 在 reset 之后预填,自动翻译链路不受影响。
+    function reset() {
+        input.clear()
+        output.text = ""
+        statusLabel.text = ""
+        statusLabel.isError = false
+        root.translating = false
     }
 
     function doTranslate() {

@@ -23,8 +23,9 @@ QtObject {
         readonly property color borderStrong: dark ? "#37424E" : "#C7D0DA"
 
         readonly property color textPrimary:   dark ? "#F1F4F7" : "#17202A"
-        readonly property color textSecondary: dark ? "#AAB4BF" : "#5E6A78"
-        readonly property color textTertiary:  dark ? "#737E8A" : "#8994A1"
+        readonly property color textSecondary: dark ? "#C2CBD4" : "#5E6A78"
+        // Tertiary 只用于装饰性弱文本(占位/图标),暗色较文档原值提亮一档保可读
+        readonly property color textTertiary:  dark ? "#8D99A6" : "#8994A1"
         readonly property color textDisabled:  dark ? "#4D5762" : "#B6BEC8"
 
         readonly property color accent:        dark ? "#4C9AFF" : "#3B82F6"

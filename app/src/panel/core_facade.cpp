@@ -77,7 +77,8 @@ QPalette buildPalette(bool dark) {
         p.setColor(QPalette::Button, QColor(0x1A, 0x20, 0x28));
         p.setColor(QPalette::ButtonText, QColor(0xF1, 0xF4, 0xF7));
         p.setColor(QPalette::Text, QColor(0xF1, 0xF4, 0xF7));
-        p.setColor(QPalette::PlaceholderText, QColor(0x73, 0x7E, 0x8A));
+        // 与 Theme.qml textTertiary 对齐(暗色提亮一档保可读)
+        p.setColor(QPalette::PlaceholderText, QColor(0x8D, 0x99, 0xA6));
         p.setColor(QPalette::Highlight, QColor(0x4C, 0x9A, 0xFF));
         p.setColor(QPalette::HighlightedText, QColor(0xFF, 0xFF, 0xFF));
         p.setColor(QPalette::ToolTipBase, QColor(0x1A, 0x20, 0x28));
