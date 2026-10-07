@@ -35,6 +35,7 @@ static void fileMessageHandler(QtMsgType type, const QMessageLogContext& ctx, co
 #include "panel/core_facade.hpp"
 #include "panel/panel_window.hpp"
 #include "panel/qml_bootstrap.hpp"
+#include "translate/translate_window.hpp"
 
 // ---- 崩溃兜底 ----
 //
@@ -108,6 +109,17 @@ int main(int argc, char* argv[]) {
     nb::qmlAttachPanel(&panel);
     panel.showAtCursor();
     if (startHidden) panel.hide();
+
+    // 翻译窗口:独立于主面板的顶层窗口(不随面板失焦隐藏,可独立移动)。
+    // 三条打开链路(面板按钮 / 条目右键 / 全局热键)统一走 translatePrefill;
+    // 截图翻译完成后回填也走同一条信号。
+    nb::TranslateWindow translate;
+    QObject::connect(&nb::CoreFacade::instance(), &nb::CoreFacade::translatePrefill,
+                     &translate, [&panel, &translate](const QString& text) {
+                         // 两个窗口不并存:打开翻译即收起面板,避免互相遮挡
+                         panel.hide();
+                         translate.openWith(text);
+                     });
 
     // --screenshot <path>:启动后延时自截(grab 渲染结果),自动化验收用。
     // --query <text>:与 --screenshot 联动,先注入搜索词再截图(验收搜索链路)。

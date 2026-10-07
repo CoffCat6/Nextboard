@@ -11,6 +11,11 @@ import Nextboard.Core 1.0
 QtObject {
     readonly property bool dark: Core.darkTheme
 
+    /// 全局字体族(中文由 Qt 的回退链自动落到 Microsoft YaHei UI)。
+    /// 与 C++ 侧 QApplication::setFont 保持一致;QML 里显式声明族名是为了
+    /// 不依赖"应用字体是否已被设置",避免不同引擎实例表现不一致。
+    readonly property string fontFamily: "Segoe UI"
+
     // ---- 色板(theme.md §7/§8) ----
     readonly property QtObject colors: QtObject {
         readonly property color background:       dark ? "#0E1217" : "#F4F6F8"
@@ -69,11 +74,15 @@ QtObject {
         readonly property int controlHeightLg: 36
         readonly property int borderWidth: 1
 
-        readonly property int fontPageTitle: 16
-        readonly property int fontSection:   14
-        readonly property int fontBody:      13
+        // ---- 字号(theme.md §39:PageTitle 20 / Section 16 / Body 14 / Secondary 13 / Caption 12) ----
+        // 早先整体偏小一档(body 13 / micro 10),中文在 1.75x 高 DPI 下显得局促;
+        // 这里按规范对齐,并新增 Secondary 档给卡片的次级正文使用。
+        readonly property int fontPageTitle: 18
+        readonly property int fontSection:   15
+        readonly property int fontBody:      14
+        readonly property int fontSecondary: 13
         readonly property int fontCaption:   12
-        readonly property int fontMicro:     10
+        readonly property int fontMicro:     11
     }
 
     // ---- 动画(theme.md §30/31):fast 反馈,normal 状态/面板,slow 大过渡 ----
@@ -101,7 +110,7 @@ QtObject {
     readonly property color sourceTranslate: colors.sourceTranslate
 
     readonly property font baseFont: Qt.font({
-        family: "Segoe UI, Microsoft YaHei",
+        family: fontFamily,
         pixelSize: metrics.fontBody
     })
 }

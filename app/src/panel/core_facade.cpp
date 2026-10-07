@@ -252,7 +252,7 @@ void CoreFacade::processCapture(const QString& id, const QString& mode) {
             return;
         }
         if (mode == QLatin1String("translate")) {
-            // 交回 QML:打开翻译抽屉、预填原文并自动翻译(截图翻译 F25)
+            // 交回订阅方(TranslateWindow):打开翻译窗口、预填原文并自动翻译(截图翻译 F25)
             emit translatePrefill(text);
             return;
         }
@@ -273,7 +273,7 @@ void CoreFacade::processCapture(const QString& id, const QString& mode) {
 }
 
 void CoreFacade::captureOcr() {
-    // 调用方(翻译抽屉)已先收起面板;这里再等窗口真正消失,避免面板被拍进画面。
+    // 调用方(翻译窗口)已先收起自身;这里再等窗口真正消失,避免被拍进画面。
     // allowEditor=false:取字链路始终直通,不弹标注编辑器。
     QTimer::singleShot(150, [] {
         startCaptureSession(CaptureIntent::Region, [](const QString& entryId) {

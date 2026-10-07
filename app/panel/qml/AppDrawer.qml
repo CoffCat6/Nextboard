@@ -6,7 +6,8 @@ import Nextboard.panel
 Drawer {
     id: root
     edge: Qt.RightEdge
-    width: parent.width * 0.46
+    // 设置项较多(通用/数据/贴图/快捷键/翻译服务/代理),占比过小会让字段行频繁折行
+    width: parent.width * 0.52
     height: parent.height
     modal: false
     interactive: false

@@ -1,5 +1,8 @@
 // 主面板(theme.md 布局):Header(标题/搜索/翻译/设置) + 导航标签 + 历史列表
-// + 底部状态栏(快捷键提示) + 抽屉 + 右下角 Toast。
+// + 底部状态栏(快捷键提示) + 设置抽屉 + 右下角 Toast。
+//
+// 翻译已独立为单独窗口(TranslateWindow.qml),面板内不再有翻译抽屉 ——
+// 面板专注"呼出即用、用完即走"的剪贴板历史。
 import QtQuick
 import QtQuick.Controls.Basic
 import QtQuick.Layouts
@@ -9,6 +12,8 @@ import Nextboard.panel
 Rectangle {
     id: root
     color: Theme.colors.background
+    border.width: Theme.metrics.borderWidth
+    border.color: Theme.colors.border
     focus: true
 
     function showToast(message) { toast.showMsg(message) }
@@ -20,9 +25,8 @@ Rectangle {
     }
 
     Keys.onEscapePressed: {
-        if (settingsDrawer.opened || translateDrawer.opened) {
+        if (settingsDrawer.opened) {
             settingsDrawer.close()
-            translateDrawer.close()
         } else {
             panelWindow.hidePanel()
         }
@@ -37,7 +41,7 @@ Rectangle {
             return
         }
         if ((event.modifiers & Qt.ControlModifier)
-                && !settingsDrawer.opened && !translateDrawer.opened
+                && !settingsDrawer.opened
                 && event.key >= Qt.Key_1 && event.key <= Qt.Key_9) {
             const resp = Entries.copyByIndex(event.key - Qt.Key_1)
             if (resp.ok) panelWindow.hidePanel()
@@ -50,115 +54,160 @@ Rectangle {
         anchors.fill: parent
         spacing: 0
 
-        // ---- Header(§16:44~52px,标题 + 搜索 + 动作) ----
-        RowLayout {
+        // ---- Header(§16/§17:Surface 底 + 底边线,标题 + 搜索 + 动作) ----
+        Rectangle {
             Layout.fillWidth: true
             Layout.preferredHeight: Theme.metrics.headerHeight
-            Layout.leftMargin: Theme.metrics.spacingMd
-            Layout.rightMargin: Theme.metrics.spacingMd
-            spacing: Theme.metrics.spacingSm
+            color: Theme.colors.surface
 
-            Label {
-                text: "Nextboard"
-                font.pixelSize: Theme.metrics.fontPageTitle
-                font.weight: Font.DemiBold
-                color: Theme.colors.textPrimary
-                Layout.alignment: Qt.AlignVCenter
-            }
-
-            // 搜索框(§27:34px,聚焦 Accent 边框;Focus 动画不改变布局)
             Rectangle {
-                id: searchBox
-                Layout.fillWidth: true
-                Layout.preferredHeight: Theme.metrics.searchHeight
-                radius: Theme.metrics.radiusInput
-                color: Theme.colors.surface
-                border.width: Theme.metrics.borderWidth
-                border.color: searchInput.activeFocus ? Theme.colors.accent
-                            : searchBoxMa.containsMouse ? Theme.colors.borderStrong
-                            : Theme.colors.border
-                Behavior on border.color { ColorAnimation { duration: Theme.animation.fast } }
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: Theme.metrics.borderWidth
+                color: Theme.colors.border
+            }
 
-                // 整框 hover 态与"点空白处聚焦"(放在 RowLayout 之后声明以覆盖空白区,
-                // 但 searchInput 与清空按钮在其上层,输入与清除不受影响)
-                MouseArea {
-                    id: searchBoxMa
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.IBeamCursor
-                    onClicked: searchInput.forceActiveFocus()
-                }
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: Theme.metrics.spacingMd
+                anchors.rightMargin: Theme.metrics.spacingMd
+                spacing: Theme.metrics.spacingSm
 
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: Theme.metrics.spacingSm
-                    anchors.rightMargin: 6
-                    spacing: 6
+                // 品牌标记 + 标题:同时作为窗口拖动区(无边框窗口的移动入口)
+                Item {
+                    Layout.alignment: Qt.AlignVCenter
+                    implicitWidth: brandRow.implicitWidth
+                    implicitHeight: brandRow.implicitHeight
 
-                    // 放大镜图标(Outline:圆环 + 手柄,§38)
-                    Item {
-                        Layout.preferredWidth: 14
-                        Layout.preferredHeight: 14
-                        Layout.alignment: Qt.AlignVCenter
+                    RowLayout {
+                        id: brandRow
+                        spacing: Theme.metrics.spacingSm
                         Rectangle {
-                            anchors.centerIn: parent
-                            anchors.verticalCenterOffset: -1
-                            width: 9; height: 9; radius: 5
-                            color: "transparent"
-                            border.color: Theme.colors.textTertiary
-                            border.width: 1.5
+                            Layout.alignment: Qt.AlignVCenter
+                            implicitWidth: 8; implicitHeight: 8; radius: 4
+                            color: Theme.colors.accent
                         }
-                        Rectangle {
-                            anchors.right: parent.right
-                            anchors.bottom: parent.bottom
-                            width: 5; height: 1.5; radius: 1
-                            rotation: 45
-                            color: Theme.colors.textTertiary
+                        Label {
+                            text: "Nextboard"
+                            font.family: Theme.fontFamily
+                            font.pixelSize: Theme.metrics.fontPageTitle
+                            font.weight: Font.DemiBold
+                            color: Theme.colors.textPrimary
+                            Layout.alignment: Qt.AlignVCenter
                         }
                     }
 
-                    TextInput {
-                        id: searchInput
-                        Layout.fillWidth: true
-                        Layout.alignment: Qt.AlignVCenter
-                        color: Theme.colors.textPrimary
-                        font.pixelSize: Theme.metrics.fontBody
-                        clip: true
-                        verticalAlignment: TextInput.AlignVCenter
-                        selectByMouse: true
-                        Text {
-                            visible: searchInput.text === "" && !searchInput.activeFocus
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: "搜索历史(文本 / OCR / 文件名)…"
-                            color: Theme.colors.textTertiary
+                    DragHandler {
+                        // 无边框窗口的移动:交系统处理,避免逐帧 setPosition 的抖动
+                        onActiveChanged: if (active) panelWindow.startSystemMove()
+                    }
+                }
+
+                // 搜索框(§27:34px,聚焦 Accent 边框;Focus 动画不改变布局)
+                Rectangle {
+                    id: searchBox
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: Theme.metrics.searchHeight
+                    radius: Theme.metrics.radiusInput
+                    color: Theme.colors.surfaceSecondary
+                    border.width: Theme.metrics.borderWidth
+                    border.color: searchInput.activeFocus ? Theme.colors.accent
+                                : searchBoxMa.containsMouse ? Theme.colors.borderStrong
+                                : Theme.colors.border
+                    Behavior on border.color { ColorAnimation { duration: Theme.animation.fast } }
+
+                    // 整框 hover 态与"点空白处聚焦"(放在 RowLayout 之后声明以覆盖空白区,
+                    // 但 searchInput 与清空按钮在其上层,输入与清除不受影响)
+                    MouseArea {
+                        id: searchBoxMa
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.IBeamCursor
+                        onClicked: searchInput.forceActiveFocus()
+                    }
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: Theme.metrics.spacingSm
+                        anchors.rightMargin: 6
+                        spacing: 6
+
+                        // 放大镜图标(Outline:圆环 + 手柄,§38)
+                        Item {
+                            Layout.preferredWidth: 14
+                            Layout.preferredHeight: 14
+                            Layout.alignment: Qt.AlignVCenter
+                            Rectangle {
+                                anchors.centerIn: parent
+                                anchors.verticalCenterOffset: -1
+                                width: 9; height: 9; radius: 5
+                                color: "transparent"
+                                border.color: searchInput.activeFocus ? Theme.colors.accent
+                                                                      : Theme.colors.textTertiary
+                                border.width: 1.5
+                                Behavior on border.color { ColorAnimation { duration: Theme.animation.fast } }
+                            }
+                            Rectangle {
+                                anchors.right: parent.right
+                                anchors.bottom: parent.bottom
+                                width: 5; height: 1.5; radius: 1
+                                rotation: 45
+                                color: searchInput.activeFocus ? Theme.colors.accent
+                                                               : Theme.colors.textTertiary
+                                Behavior on color { ColorAnimation { duration: Theme.animation.fast } }
+                            }
+                        }
+
+                        TextInput {
+                            id: searchInput
+                            Layout.fillWidth: true
+                            Layout.alignment: Qt.AlignVCenter
+                            color: Theme.colors.textPrimary
+                            font.family: Theme.fontFamily
                             font.pixelSize: Theme.metrics.fontBody
+                            clip: true
+                            verticalAlignment: TextInput.AlignVCenter
+                            selectByMouse: true
+                            selectionColor: Theme.colors.accent
+                            selectedTextColor: Theme.colors.accentText
+                            Text {
+                                visible: searchInput.text === "" && !searchInput.activeFocus
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: "搜索历史(文本 / OCR / 文件名)…"
+                                color: Theme.colors.textTertiary
+                                font: searchInput.font
+                            }
+                            onTextEdited: Entries.setQuery(text)
                         }
-                        onTextEdited: Entries.setQuery(text)
-                    }
 
-                    Text {
-                        visible: searchInput.text !== ""
-                        text: "✕"
-                        color: Theme.colors.textTertiary
-                        MouseArea {
-                            anchors.fill: parent
-                            anchors.margins: -6
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: { searchInput.clear(); Entries.setQuery(""); Entries.refreshNow() }
+                        Text {
+                            visible: searchInput.text !== ""
+                            text: "✕"
+                            color: Theme.colors.textTertiary
+                            font.pixelSize: Theme.metrics.fontSecondary
+                            MouseArea {
+                                anchors.fill: parent
+                                anchors.margins: -6
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: { searchInput.clear(); Entries.setQuery(""); Entries.refreshNow() }
+                            }
                         }
                     }
                 }
-            }
 
-            Button {
-                text: "翻译"
-                Layout.preferredHeight: Theme.metrics.controlHeight
-                onClicked: translateDrawer.openAndFocus()
-            }
-            Button {
-                text: "设置"
-                Layout.preferredHeight: Theme.metrics.controlHeight
-                onClicked: settingsDrawer.openAndLoad()
+                ThemedButton {
+                    variant: "ghost"
+                    text: "翻译"
+                    Layout.alignment: Qt.AlignVCenter
+                    onClicked: Core.openTranslate()
+                }
+                ThemedButton {
+                    variant: "ghost"
+                    text: "设置"
+                    Layout.alignment: Qt.AlignVCenter
+                    onClicked: settingsDrawer.openAndLoad()
+                }
             }
         }
 
@@ -168,6 +217,7 @@ Rectangle {
             Layout.fillWidth: true
             Layout.leftMargin: Theme.metrics.spacingMd
             Layout.rightMargin: Theme.metrics.spacingMd
+            Layout.topMargin: Theme.metrics.spacingSm
             Layout.bottomMargin: Theme.metrics.spacingXs + 2
             spacing: Theme.metrics.spacingXs
 
@@ -217,7 +267,8 @@ Rectangle {
                               : tabDelegate.label
                         color: tabDelegate.selected ? Theme.colors.textPrimary
                              : Theme.colors.textSecondary
-                        font.pixelSize: Theme.metrics.fontCaption
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.metrics.fontSecondary
                     }
                     MouseArea {
                         id: tabMa
@@ -265,7 +316,8 @@ Rectangle {
             delegate: EntryCard {
                 required property int index
                 width: list.width
-                onTranslateRequested: function(text) { translateDrawer.openWith(text) }
+                // 翻译走独立窗口:打开即收起面板(C++ 侧也会兜底收起)
+                onTranslateRequested: function(text) { Core.openTranslateWith(text) }
             }
         }
 
@@ -301,6 +353,7 @@ Rectangle {
 
                 Text {
                     anchors.horizontalCenter: parent.horizontalCenter
+                    font.family: Theme.fontFamily
                     font.pixelSize: Theme.metrics.fontSection
                     font.weight: Font.DemiBold
                     color: Theme.colors.textPrimary
@@ -313,6 +366,7 @@ Rectangle {
                 }
                 Text {
                     anchors.horizontalCenter: parent.horizontalCenter
+                    font.family: Theme.fontFamily
                     font.pixelSize: Theme.metrics.fontCaption
                     color: Entries.errorText !== "" ? Theme.colors.error
                          : Theme.colors.textSecondary
@@ -333,6 +387,7 @@ Rectangle {
                     Text {
                         text: "呼出 / 隐藏面板"
                         color: Theme.colors.textSecondary
+                        font.family: Theme.fontFamily
                         font.pixelSize: Theme.metrics.fontCaption
                         anchors.verticalCenter: parent.verticalCenter
                     }
@@ -361,6 +416,7 @@ Rectangle {
                 Text {
                     text: "搜索"
                     color: Theme.colors.textSecondary
+                    font.family: Theme.fontFamily
                     font.pixelSize: Theme.metrics.fontMicro
                     Layout.rightMargin: Theme.metrics.spacingSm
                 }
@@ -369,30 +425,27 @@ Rectangle {
                 Text {
                     text: "复制条目"
                     color: Theme.colors.textSecondary
+                    font.family: Theme.fontFamily
                     font.pixelSize: Theme.metrics.fontMicro
                 }
                 Item { Layout.fillWidth: true }
                 Text {
                     text: Entries.loading ? "加载中…" : "Nextboard"
                     color: Theme.colors.textSecondary
+                    font.family: Theme.fontFamily
                     font.pixelSize: Theme.metrics.fontMicro
                 }
             }
         }
     }
 
-    // ---- 抽屉 ----
+    // ---- 抽屉(设置仍留在面板内;翻译已独立为窗口) ----
     SettingsDrawer { id: settingsDrawer }
-    TranslateDrawer { id: translateDrawer }
 
     // ---- Core 信号订阅 ----
     Connections {
         target: Core
         function onToastMessage(message) { toast.showMsg(message) }
-        function onTranslatePrefill(text) {
-            panelWindow.showPanel()
-            translateDrawer.openWith(text)
-        }
     }
 
     // ---- Toast(§36:右下角通知卡,Surface+Border+柔和层级,非 accent 大色块) ----
@@ -421,6 +474,7 @@ Rectangle {
             id: toastText
             anchors.centerIn: parent
             color: Theme.colors.textPrimary
+            font.family: Theme.fontFamily
             font.pixelSize: Theme.metrics.fontCaption
         }
         Timer {

@@ -444,7 +444,13 @@ AppDrawer {
                     font.weight: Font.DemiBold; color: Theme.colors.textPrimary
                 }
                 Item { Layout.fillWidth: true }
-                ToolButton { text: "✕"; onClicked: root.close() }
+                ThemedButton {
+                    variant: "ghost"
+                    square: true
+                    text: "✕"
+                    Layout.alignment: Qt.AlignVCenter
+                    onClicked: root.close()
+                }
             }
 
             Label { text: "历史上限(条)"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
@@ -513,6 +519,7 @@ AppDrawer {
                 color: Theme.colors.border
             }
             component SectionTitle: Label {
+                font.family: Theme.fontFamily
                 font.pixelSize: Theme.metrics.fontSection
                 font.weight: Font.DemiBold
                 color: Theme.colors.textPrimary
@@ -520,14 +527,16 @@ AppDrawer {
             }
             component FieldLabel: Label {
                 // 字段标签是与控件直接交互的引导文字,暗色下用 Secondary 的提亮值
+                font.family: Theme.fontFamily
                 color: Theme.colors.textSecondary
                 font.pixelSize: Theme.metrics.fontCaption
             }
             component HintLabel: Label {
                 Layout.fillWidth: true
                 // 说明文字较长,是"看不清"的重灾区:暗色下改用 Secondary(提亮档)
+                font.family: Theme.fontFamily
                 color: Theme.colors.textSecondary
-                font.pixelSize: Theme.metrics.fontMicro + 1
+                font.pixelSize: Theme.metrics.fontCaption
                 wrapMode: Text.WrapAnywhere
             }
 
@@ -872,7 +881,7 @@ AppDrawer {
             RowLayout {
                 Layout.fillWidth: true
                 spacing: Theme.metrics.spacingSm
-                Button { text: "测试连接"; onClicked: root.probe() }
+                ThemedButton { variant: "secondary"; text: "测试连接"; onClicked: root.probe() }
                 Item { Layout.fillWidth: true }
             }
             Label {
@@ -948,7 +957,7 @@ AppDrawer {
             RowLayout {
                 Layout.fillWidth: true
                 spacing: Theme.metrics.spacingSm
-                Button { text: "测试代理链路"; onClicked: root.probeProxy() }
+                ThemedButton { variant: "secondary"; text: "测试代理链路"; onClicked: root.probeProxy() }
                 Item { Layout.fillWidth: true }
             }
             Label {

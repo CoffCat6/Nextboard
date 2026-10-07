@@ -77,7 +77,7 @@ Rectangle {
                 : Theme.colors.border
     Behavior on color { ColorAnimation { duration: Theme.animation.fast } }
     Behavior on border.color { ColorAnimation { duration: Theme.animation.fast } }
-    implicitHeight: cardLayout.implicitHeight + 20
+    implicitHeight: cardLayout.implicitHeight + 24
 
     // 条目操作菜单(顺序与第一代 App.tsx ctx-menu 对齐)
     Menu {
@@ -193,8 +193,8 @@ Rectangle {
     ColumnLayout {
         id: cardLayout
         anchors.fill: parent
-        anchors.margins: 10
-        spacing: 6
+        anchors.margins: 12
+        spacing: 8
 
         Loader {
             id: bodyLoader

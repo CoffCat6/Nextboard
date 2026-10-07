@@ -1,5 +1,7 @@
 #include "panel_window.hpp"
 
+#include "host/window_effects.hpp"
+
 #include <QCursor>
 #include <QDebug>
 #include <QGuiApplication>
@@ -13,6 +15,7 @@
 #include <QTimer>
 #include <QUrl>
 #include <QVariant>
+#include <QWindow>
 
 #include <windows.h>
 
@@ -77,6 +80,10 @@ HWND PanelWindow::nativeHandle() const {
     return reinterpret_cast<HWND>(winId());
 }
 
+void PanelWindow::startSystemMove() {
+    if (QWindow* handle = windowHandle()) handle->startSystemMove();
+}
+
 void PanelWindow::applySearchText(const QString& text) {
     // 自动化验收入口:QML 侧 setSearch(text) 由 C++ 直调(Main.qml root 实现)。
     if (m_quick && m_quick->rootObject())
@@ -86,6 +93,8 @@ void PanelWindow::applySearchText(const QString& text) {
 
 void PanelWindow::showEvent(QShowEvent* e) {
     QWidget::showEvent(e);
+    // 无边框窗口在 Windows 11 上取系统圆角(Win10 上无副作用,退化为直角)
+    applyRoundedCorners(this);
     m_blurTimer->stop();
     // showAtCursor 的 activateWindow 是异步的:give the WM a beat, then re-check
     QTimer::singleShot(120, this, [this] {

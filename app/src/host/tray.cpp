@@ -1,4 +1,5 @@
 #include "tray.hpp"
+#include "panel/core_facade.hpp"
 #include "panel/panel_window.hpp"
 
 #include <QApplication>
@@ -32,6 +33,7 @@ void Tray::buildMenu() {
         "QMenu::separator { height: 1px; background: #D9E0E7; margin: 4px 8px; }"
         "QMenu::indicator { width: 14px; height: 14px; }"));
     m_menu->addAction("打开主面板", [this] { m_panel.showAtCursor(); });
+    m_menu->addAction("打开翻译窗口", [] { CoreFacade::instance().openTranslate(); });
     m_pauseAction = m_menu->addAction("暂停监听");
     m_pauseAction->setCheckable(true);
     connect(m_pauseAction, &QAction::toggled, this, [this](bool paused) {

@@ -93,12 +93,11 @@ Hotkeys::Hotkeys(PanelWindow& panel, CoreBridge& core, QObject* parent)
                 CoreFacade::instance().pinLatest();
                 break;
             case Action::OpenTranslate:
-                // 打开面板并切到翻译抽屉(手动输入)
-                m_panel.showAtCursor();
+                // 打开独立翻译窗口;主面板由 translatePrefill 的订阅方负责收起
                 CoreFacade::instance().openTranslate();
                 break;
             case Action::CaptureTranslate:
-                // 截图翻译(F25):收起面板 → 框选 → 入库 → OCR → 抽屉预填并翻译。
+                // 截图翻译(F25):收起面板 → 框选 → 入库 → OCR → 翻译窗口预填并翻译。
                 // allowEditor=false:取内容链路始终直通,不弹标注编辑器。
                 hidePanelThenCapture(m_panel, nb::CaptureIntent::Region,
                                      [](const QString& entryId) {

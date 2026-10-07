@@ -81,7 +81,7 @@ public:
     ///  - mode = "translate" → 发 translatePrefill,QML 打开翻译抽屉预填并自动翻译
     Q_INVOKABLE void processCapture(const QString& id, const QString& mode);
 
-    /// 截图取字入口(翻译抽屉按钮):调用方先收起面板 → 框选 → OCR → 文本进剪贴板。
+    /// 截图取字入口(翻译窗口按钮):调用方先收起自身窗口 → 框选 → OCR → 文本进剪贴板。
     Q_INVOKABLE void captureOcr();
 
     // ---- 条目操作(主面板右键菜单) ----
@@ -96,9 +96,13 @@ public:
     /// 用系统默认程序打开文件条目(左键点击文件的默认行为,对齐第一代 open)。
     Q_INVOKABLE void openEntry(const QString& id);
 
-    /// 请求打开翻译抽屉(空文本 = 手动输入)。QML 订阅 translatePrefill 打开抽屉,
-    /// 因此它同时服务「热键打开翻译」与「截图翻译完成后回填」两条链路。
+    /// 请求打开独立翻译窗口(空文本 = 手动输入)。订阅方(TranslateWindow)在
+    /// translatePrefill 里完成"收起面板 + 显示窗口 + 预填",因此它同时服务
+    /// 「热键 / 面板按钮」与「截图翻译完成后回填」两条链路。
     Q_INVOKABLE void openTranslate() { emit translatePrefill(QString()); }
+
+    /// 用指定原文打开翻译窗口(条目右键「翻译」入口)。
+    Q_INVOKABLE void openTranslateWith(const QString& text) { emit translatePrefill(text); }
 
     /// 请求重新注册全局快捷键(设置里改完热键后调用)。
     /// 本类不认识 Hotkeys 实例,故只发信号,由 main.cpp 接线。
@@ -117,7 +121,7 @@ signals:
     void countsChanged();
     /// 快捷键设置已变更,请重新注册(见 reloadHotkeys)。
     void hotkeysChanged();
-    /// 请求打开翻译抽屉并预填原文(截图翻译链路 F25)。
+    /// 请求打开翻译窗口并预填原文(截图翻译链路 F25)。
     void translatePrefill(const QString& text);
     void themeChanged();
 
