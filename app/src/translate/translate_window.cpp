@@ -1,6 +1,7 @@
 #include "translate_window.hpp"
 
 #include "host/window_effects.hpp"
+#include "panel/qml_bootstrap.hpp"
 
 #include <QCursor>
 #include <QDebug>
@@ -45,10 +46,9 @@ void TranslateWindow::setupUi() {
         engine->rootContext()->setContextProperty(QStringLiteral("translateWindow"), this);
 
     m_quick->setSource(QUrl("qrc:/qt/qml/Nextboard/panel/panel/qml/TranslateWindow.qml"));
-    if (m_quick->status() == QQuickWidget::Error)
-        qWarning() << "Translate QML load errors:" << m_quick->errors();
-
     layout->addWidget(m_quick);
+    // 与主面板同一兜底:加载失败时显示错误而非一片空白
+    handleQmlLoadFailure(m_quick, layout);
 }
 
 void TranslateWindow::showWindow() {
@@ -75,12 +75,38 @@ void TranslateWindow::openWith(const QString& text) {
 }
 
 void TranslateWindow::startSystemMove() {
-    if (QWindow* handle = windowHandle()) handle->startSystemMove();
+    if (QWindow* handle = windowHandle()) {
+        if (handle->startSystemMove()) return;
+    }
+    // 与主面板同一兜底:合成长按标题栏。无边框窗口是 WS_POPUP,Qt 的
+    // startSystemMove 在部分环境下会被平台拒绝(false),Win32 老办法照样能进入
+    // 系统模态移动循环(必须先 ReleaseCapture)。
+    const HWND hwnd = m_cachedHwnd ? m_cachedHwnd : reinterpret_cast<HWND>(winId());
+    if (hwnd) {
+        ::ReleaseCapture();
+        ::SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+    }
 }
 
 void TranslateWindow::showEvent(QShowEvent* e) {
     QWidget::showEvent(e);
+    m_cachedHwnd = reinterpret_cast<HWND>(winId());
     applyRoundedCorners(this);
+}
+
+bool TranslateWindow::nativeEvent(const QByteArray& eventType, void* message, qint64* result) {
+    if (eventType == "windows_generic_MSG" && m_cachedHwnd) {
+        auto* msg = static_cast<MSG*>(message);
+        // 无边框窗口的边缘缩放(与主面板同一套逻辑)
+        if (msg->hwnd == m_cachedHwnd && msg->message == WM_NCHITTEST) {
+            const int hit = framelessResizeHitTest(this, m_cachedHwnd, msg->lParam);
+            if (hit != -1) {
+                if (result) *result = hit;
+                return true;
+            }
+        }
+    }
+    return QWidget::nativeEvent(eventType, message, result);
 }
 
 } // namespace nb

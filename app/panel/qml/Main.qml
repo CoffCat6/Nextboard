@@ -68,39 +68,34 @@ Rectangle {
                 color: Theme.colors.border
             }
 
+            // ⚠️ 顶部**不挂任何拖动**:图标 / 标题 / 搜索框 / 按钮都不可拖动。
+            // 曾经把整个头部做成拖动区,结果在搜索框里按住拖选文字时,指针一旦
+            // 移出搜索框,DragHandler 就被激活 → 窗口跟着跑,体验很差。
+            // 窗口移动改为状态栏左侧的专用把手(见底部 DragGrip)。
+
             RowLayout {
                 anchors.fill: parent
                 anchors.leftMargin: Theme.metrics.spacingMd
                 anchors.rightMargin: Theme.metrics.spacingMd
                 spacing: Theme.metrics.spacingSm
 
-                // 品牌标记 + 标题:同时作为窗口拖动区(无边框窗口的移动入口)
-                Item {
+                // 品牌标记 + 标题:纯展示,不参与任何鼠标交互(钉死)
+                RowLayout {
                     Layout.alignment: Qt.AlignVCenter
-                    implicitWidth: brandRow.implicitWidth
-                    implicitHeight: brandRow.implicitHeight
+                    spacing: Theme.metrics.spacingSm
 
-                    RowLayout {
-                        id: brandRow
-                        spacing: Theme.metrics.spacingSm
-                        Rectangle {
-                            Layout.alignment: Qt.AlignVCenter
-                            implicitWidth: 8; implicitHeight: 8; radius: 4
-                            color: Theme.colors.accent
-                        }
-                        Label {
-                            text: "Nextboard"
-                            font.family: Theme.fontFamily
-                            font.pixelSize: Theme.metrics.fontPageTitle
-                            font.weight: Font.DemiBold
-                            color: Theme.colors.textPrimary
-                            Layout.alignment: Qt.AlignVCenter
-                        }
+                    AppMark {
+                        Layout.alignment: Qt.AlignVCenter
+                        implicitWidth: 20
+                        implicitHeight: 20
                     }
-
-                    DragHandler {
-                        // 无边框窗口的移动:交系统处理,避免逐帧 setPosition 的抖动
-                        onActiveChanged: if (active) panelWindow.startSystemMove()
+                    Label {
+                        text: "Nextboard"
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.metrics.fontPageTitle
+                        font.weight: Font.DemiBold
+                        color: Theme.colors.textPrimary
+                        Layout.alignment: Qt.AlignVCenter
                     }
                 }
 
@@ -198,15 +193,32 @@ Rectangle {
 
                 ThemedButton {
                     variant: "ghost"
+                    iconName: "translate"
                     text: "翻译"
                     Layout.alignment: Qt.AlignVCenter
                     onClicked: Core.openTranslate()
                 }
                 ThemedButton {
                     variant: "ghost"
+                    iconName: "settings"
                     text: "设置"
                     Layout.alignment: Qt.AlignVCenter
                     onClicked: settingsDrawer.openAndLoad()
+                }
+                // 固定:开启后点其它地方不会自动隐藏(选中态用 accent 底反馈)
+                ThemedButton {
+                    variant: panelWindow.pinned ? "primary" : "ghost"
+                    iconName: "pin"
+                    text: "固定"
+                    Layout.alignment: Qt.AlignVCenter
+                    onClicked: panelWindow.setPinned(!panelWindow.pinned)
+                }
+                ThemedButton {
+                    variant: "ghost"
+                    square: true
+                    text: "✕"
+                    Layout.alignment: Qt.AlignVCenter
+                    onClicked: panelWindow.hidePanel()
                 }
             }
         }
@@ -411,6 +423,27 @@ Rectangle {
                 anchors.leftMargin: Theme.metrics.spacingMd
                 anchors.rightMargin: Theme.metrics.spacingMd
                 spacing: Theme.metrics.spacingXs
+
+                // 窗口移动的**唯一**入口:状态栏左侧把手。
+                // 顶部(图标/标题/搜索/按钮)全部钉死不可拖动,避免误触;
+                // 需要挪动面板时认准这个把手即可。
+                DragGrip {}
+                Text {
+                    text: "拖动移动"
+                    color: Theme.colors.textSecondary
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.metrics.fontMicro
+                    Layout.alignment: Qt.AlignVCenter
+                }
+                Rectangle {
+                    Layout.preferredWidth: Theme.metrics.borderWidth
+                    Layout.preferredHeight: 12
+                    Layout.alignment: Qt.AlignVCenter
+                    Layout.leftMargin: Theme.metrics.spacingXs
+                    Layout.rightMargin: Theme.metrics.spacingXs
+                    color: Theme.colors.border
+                }
+
                 KeyCap { label: "Ctrl" }
                 KeyCap { label: "K" }
                 Text {
@@ -430,12 +463,52 @@ Rectangle {
                 }
                 Item { Layout.fillWidth: true }
                 Text {
-                    text: Entries.loading ? "加载中…" : "Nextboard"
-                    color: Theme.colors.textSecondary
+                    text: "拖动窗口边缘可调整大小"
+                    color: Theme.colors.textTertiary
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.metrics.fontMicro
+                    Layout.rightMargin: Theme.metrics.spacingSm
+                }
+                Text {
+                    text: panelWindow.pinned ? "已固定 · 不自动隐藏"
+                          : Entries.loading ? "加载中…" : "Nextboard"
+                    color: panelWindow.pinned ? Theme.colors.accent : Theme.colors.textSecondary
                     font.family: Theme.fontFamily
                     font.pixelSize: Theme.metrics.fontMicro
                 }
             }
+        }
+    }
+
+    // ---- 窗口拖动把手(状态栏专用) ----
+    // 六个小圆点 = 通用"抓手"符号。只有它能移动窗口,顶部控件一律不可拖动。
+    component DragGrip: Item {
+        id: grip
+        // 命中区比图形略大,方便点中(状态栏高 30px,20px 的手柄仍有余量)
+        implicitWidth: 20
+        implicitHeight: 20
+        Layout.alignment: Qt.AlignVCenter
+        readonly property color dotColor: gripHover.hovered ? Theme.colors.accent
+                                                            : Theme.colors.textTertiary
+        Grid {
+            anchors.centerIn: parent
+            columns: 2
+            rowSpacing: 3
+            columnSpacing: 3
+            Repeater {
+                model: 6
+                delegate: Rectangle {
+                    width: 3
+                    height: 3
+                    radius: 1.5
+                    color: grip.dotColor
+                }
+            }
+        }
+        // 悬停给出"可拖动"的光标与配色反馈
+        HoverHandler { id: gripHover; cursorShape: Qt.SizeAllCursor }
+        DragHandler {
+            onActiveChanged: if (active) panelWindow.startSystemMove()
         }
     }
 

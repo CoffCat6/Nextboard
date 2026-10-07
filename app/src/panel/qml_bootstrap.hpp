@@ -9,6 +9,8 @@
 #pragma once
 
 class QObject;
+class QQuickWidget;
+class QBoxLayout;
 
 namespace nb {
 
@@ -19,5 +21,13 @@ void setupQmlEnvironment();
 
 /// 面板创建后接线:nbcore 通知 → CoreFacade 信号(线程安全,直连同线程)。
 void qmlAttachPanel(PanelWindow* panel);
+
+/// QML 加载失败时的兜底:用原生 QLabel 顶替内容区,把第一条错误直接显示出来。
+///
+/// 为什么需要:本项目"主面板整片空白"已反复出现多次(根因各不相同:模块未部署、
+/// FINAL 属性覆盖、单例失效……),而空白窗口对用户零信息量、只能靠翻日志。
+/// 这里至少把错误摆在界面上(完整信息仍在 nextboard.log)。
+/// @return 是否处于加载失败状态
+bool handleQmlLoadFailure(QQuickWidget* quick, QBoxLayout* layout);
 
 } // namespace nb

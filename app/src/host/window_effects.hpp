@@ -11,6 +11,7 @@
 
 #include <windows.h>
 #include <dwmapi.h>
+#include <windowsx.h>   // GET_X_LPARAM / GET_Y_LPARAM
 
 namespace nb {
 
@@ -24,6 +25,48 @@ inline void applyRoundedCorners(QWidget* widget) {
     // 老版本 SDK 头文件没有该枚举,直接传字面量避免依赖 SDK 版本。
     const DWORD preference = 2;
     ::DwmSetWindowAttribute(hwnd, 33, &preference, sizeof(preference));
+}
+
+/// 无边框窗口的边缘缩放命中测试。
+///
+/// 无边框(FramelessWindowHint)窗口没有非客户区,系统不会自行提供缩放边框。
+/// 在 `nativeEvent` 里拦 WM_NCHITTEST 并返回 HTLEFT / HTBOTTOMRIGHT 等命中码,
+/// 剩下的拖动、Aero Snap、双击最大化全部交回系统完成 —— 比在 QML 里自己算
+/// 鼠标位移要平滑得多,也不会有跟手抖动。
+///
+/// @return HT* 命中码;返回 -1 表示不是缩放热区,交由 Qt 默认处理。
+/// @note 只用 GetWindowRect / ScreenToClient 取物理像素,与 WM_* 消息坐标系一致,
+///       因此不受高 DPI 缩放影响。调用方必须传入已缓存的 HWND —— 在 nativeEvent
+///       里调 winId() 会递归触发窗口创建。
+inline int framelessResizeHitTest(QWidget* widget, HWND hwnd, LPARAM lParam,
+                                  int borderLogicalPx = 6) {
+    if (!widget || !hwnd) return -1;
+    // 最大化 / 全屏时不提供边缘缩放,避免把窗口从最大化状态拖出来
+    if (widget->isMaximized() || widget->isFullScreen()) return -1;
+
+    const qreal dpr = widget->devicePixelRatioF();
+    const int border = qMax(4, qRound(borderLogicalPx * dpr));
+
+    RECT rc{};
+    if (!::GetWindowRect(hwnd, &rc)) return -1;
+    const long x = GET_X_LPARAM(lParam);
+    const long y = GET_Y_LPARAM(lParam);
+    if (x < rc.left || x >= rc.right || y < rc.top || y >= rc.bottom) return -1;
+
+    const bool left = x < rc.left + border;
+    const bool right = x >= rc.right - border;
+    const bool top = y < rc.top + border;
+    const bool bottom = y >= rc.bottom - border;
+
+    if (top && left) return HTTOPLEFT;
+    if (top && right) return HTTOPRIGHT;
+    if (bottom && left) return HTBOTTOMLEFT;
+    if (bottom && right) return HTBOTTOMRIGHT;
+    if (left) return HTLEFT;
+    if (right) return HTRIGHT;
+    if (top) return HTTOP;
+    if (bottom) return HTBOTTOM;
+    return -1;
 }
 
 } // namespace nb

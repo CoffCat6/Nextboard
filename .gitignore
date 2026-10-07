@@ -2,5 +2,6 @@
 app/build
 build
 core/target
-.workbuddy-ai
+/.workbuddy-ai
 /data
+/.workbuddy

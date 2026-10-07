@@ -112,9 +112,11 @@ Rectangle {
             }
 
             DragHandler {
-                // §42:拖动交给系统(startSystemMove),不做逐帧 setPosition 跟手
+                // §42:拖动交给系统(startSystemMove),不做逐帧 setPosition 跟手。
+                // 带拖动阈值,不会因为"点一下"就把窗口挪走。
                 onActiveChanged: if (active) translateWindow.startSystemMove()
             }
+            HoverHandler { cursorShape: Qt.SizeAllCursor }
 
             RowLayout {
                 anchors.fill: parent

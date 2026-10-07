@@ -2,6 +2,11 @@ cmake_minimum_required(VERSION 3.21)
 
 project(Nextboard VERSION 0.2.0 LANGUAGES CXX)
 
+# RC:把应用图标编进 exe 的 PE 资源(资源管理器/任务栏显示的那个图标)
+if(WIN32)
+    enable_language(RC)
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -54,6 +59,8 @@ qt_add_qml_module(nextboard
         panel/qml/Main.qml
         panel/qml/EntryCard.qml
         panel/qml/KeyCap.qml
+        panel/qml/AppMark.qml
+        panel/qml/HeaderIcon.qml
         panel/qml/ReadableComboBox.qml
         panel/qml/ThemedButton.qml
         panel/qml/AppDrawer.qml
@@ -65,6 +72,27 @@ qt_add_qml_module(nextboard
 target_include_directories(nextboard PRIVATE
     src
 )
+
+# ---- 应用图标 ----------------------------------------------------------
+# 设计稿来自 app/panel/qml/AppMark.qml(圆角板 + 三条横线),由 tools/make_icon.py
+# 生成多尺寸 ico(16/20/24/32/40/48/64/128/256);改设计后重跑该脚本即可。
+#
+# 两处用途,缺一不可:
+#  1) 运行期窗口/托盘图标 → 打进 Qt 资源,按路径 ":/resources/nextboard.ico" 加载;
+#  2) 资源管理器/任务栏显示的 exe 图标 → 只能由 rc.exe 编入 PE 资源。
+set(NB_ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/nextboard.ico")
+# ⚠️ FILES 必须用相对路径:qt_add_resources 拒绝绝对路径(要求另设 QT_RESOURCE_ALIAS),
+# 相对路径生成的资源地址即 ":/resources/nextboard.ico"(与 main.cpp 里一致)。
+qt_add_resources(nextboard "app_icon"
+    PREFIX "/"
+    FILES "resources/nextboard.ico"
+)
+if(WIN32)
+    # 路径用正斜杠即可,rc.exe 接受;写成构建目录避免污染源码树
+    set(NB_ICON_RC "${CMAKE_CURRENT_BINARY_DIR}/nextboard_app_icon.rc")
+    file(WRITE "${NB_ICON_RC}" "IDI_ICON1 ICON \"${NB_ICON}\"\n")
+    target_sources(nextboard PRIVATE "${NB_ICON_RC}")
+endif()
 
 target_link_libraries(nextboard PRIVATE
     Qt6::Widgets

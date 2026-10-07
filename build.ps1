@@ -82,12 +82,15 @@ Ok 'nextboard.exe 构建完成'
 # ---- 第 3 步:Qt 运行库部署 ----
 # 判定"部署完整"的标准:
 #  - platforms\qwindows.dll:缺它 exe 启动即弹 "could not find the Qt platform plugin" 或静默无窗口;
-#  - Qt6Quick.dll / qml\ 插件目录:QML 面板(v0.2 起)的运行库,缺它面板空白。
+#  - Qt6Quick.dll / qml\ 插件目录:QML 面板(v0.2 起)的运行库,缺它面板空白;
+#  - imageformats\qico.dll:应用图标/托盘图标用的是 .ico,QIcon 读它依赖该图片格式插件,
+#    缺了不会崩,但窗口与托盘图标会静默变成空白。
 $needDeploy = $Deploy -or
     -not (Test-Path (Join-Path $BuildDir 'Qt6Widgets.dll')) -or
     -not (Test-Path (Join-Path $BuildDir 'platforms\qwindows.dll')) -or
     -not (Test-Path (Join-Path $BuildDir 'Qt6Quick.dll')) -or
-    -not (Test-Path (Join-Path $BuildDir 'qml'))
+    -not (Test-Path (Join-Path $BuildDir 'qml')) -or
+    -not (Test-Path (Join-Path $BuildDir 'imageformats\qico.dll'))
 if ($needDeploy) {
     Step '部署 Qt 运行库 (windeployqt)'
     & (Join-Path $QtBin 'windeployqt.exe') --no-translations --no-system-d3d-compiler `
@@ -99,7 +102,10 @@ if ($needDeploy) {
     if (-not (Test-Path (Join-Path $BuildDir 'Qt6Quick.dll'))) {
         Die 'windeployqt 后仍缺 Qt6Quick.dll:QML 面板无法启动,检查 Qt Quick 组件是否已安装'
     }
-    Ok 'Qt DLL + 平台插件 + Quick/QML 运行库已部署'
+    if (-not (Test-Path (Join-Path $BuildDir 'imageformats\qico.dll'))) {
+        Die 'windeployqt 后仍缺 imageformats\qico.dll:窗口/托盘图标会变空白,检查 Qt imageformats 插件'
+    }
+    Ok 'Qt DLL + 平台插件 + Quick/QML 运行库 + ico 图片插件已部署'
 } else {
     Write-Host '  Qt 运行库已部署,跳过(强制重跑用 -Deploy)'
 }

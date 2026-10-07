@@ -7,6 +7,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QIcon>
 #include <QMessageBox>
 #include <QTimer>
 #include <QDebug>
@@ -86,6 +87,10 @@ int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
     QApplication::setApplicationName("Nextboard");
     QApplication::setOrganizationName("Nextboard");
+    // 应用图标:主面板标记(AppMark)的 ico 版,已打进 Qt 资源(不依赖工作目录)。
+    // 设为全局窗口图标 → 任务栏 / 窗口左上角 / QMessageBox 都用它;
+    // 托盘图标也取这里的值(见 tray.cpp),保证同源。
+    QApplication::setWindowIcon(QIcon(QStringLiteral(":/resources/nextboard.ico")));
     // 常驻托盘(第一代语义):关闭/隐藏最后一个窗口不退出,退出仅走托盘菜单
     QApplication::setQuitOnLastWindowClosed(false);
     qInstallMessageHandler(fileMessageHandler);

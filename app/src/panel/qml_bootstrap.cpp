@@ -5,13 +5,16 @@
 #include "panel_window.hpp"
 
 #include <QApplication>
+#include <QBoxLayout>
 #include <QCoreApplication>
 #include <QEvent>
 #include <QFont>
 #include <QGuiApplication>
 #include <QJSEngine>
+#include <QLabel>
 #include <QQmlEngine>
 #include <QQuickStyle>
+#include <QQuickWidget>
 #include <QStyleHints>
 #include <QVariant>
 
@@ -72,6 +75,30 @@ void setupQmlEnvironment() {
                      &facade, &CoreFacade::reapplyTheme);
 }
 
+bool handleQmlLoadFailure(QQuickWidget* quick, QBoxLayout* layout) {
+    if (!quick || quick->status() != QQuickWidget::Error) return false;
+
+    // 日志留全量(便于定位),界面只显示第一条 —— 第一条通常就是根因。
+    qWarning() << "QML load errors:" << quick->errors();
+    if (!layout) return true;
+
+    quick->hide();
+    auto* label = new QLabel;
+    label->setWordWrap(true);
+    label->setMargin(20);
+    label->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    const QString first = quick->errors().isEmpty()
+                              ? QStringLiteral("未知错误")
+                              : quick->errors().first().toString();
+    label->setText(QStringLiteral(
+                       "<b>界面加载失败</b><br><br>%1<br><br>"
+                       "<span style='color:#888'>完整信息见 app/build/nextboard.log</span>")
+                       .arg(first.toHtmlEscaped()));
+    layout->addWidget(label, 1);
+    return true;
+}
+
 namespace {
 class ShowRefresher : public QObject {
 public:
@@ -85,8 +112,7 @@ public:
 };
 } // namespace
 
-void qmlAttachPanel(PanelWindow* panel) {
-    if (!panel) return;
+void qmlAttachPanel(PanelWindow* panel) {    if (!panel) return;
     // nbcore WM_APP 通知 → 模型刷新(信号中转,去抖在模型内);s_entries 是
     // 静态存储,lambda 内直接按名访问,不做简单捕获
     ClipEntryModel* model = s_entries;

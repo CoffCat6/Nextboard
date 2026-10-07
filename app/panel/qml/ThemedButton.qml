@@ -6,6 +6,7 @@
 // 项目内所有命令按钮统一走本组件,样式只有一个来源。
 import QtQuick
 import QtQuick.Controls.Basic
+import QtQuick.Layouts
 import Nextboard.panel
 
 Button {
@@ -17,6 +18,12 @@ Button {
     property string size: "normal"
     /// 图标/纯符号按钮:正方形(宽 = 高)
     property bool square: false
+    /// 可选图标(项目图标词汇,见 HeaderIcon.qml):"" / "translate" / "settings" / "pin"
+    /// ⚠️ 不能叫 `icon` —— Basic 的 Button(AbstractButton)已有 `icon`(QQuickIcon),
+    /// 且被声明为 FINAL,QML 里重新声明会直接让整个组件加载失败
+    /// ("Cannot override FINAL property"),连带所有使用方一起失效(曾导致主面板空白)。
+    property string iconName: ""
+    readonly property bool hasIcon: iconName !== ""
 
     readonly property bool _dense: size === "sm"
     readonly property bool _large: size === "lg"
@@ -77,14 +84,30 @@ Button {
         NumberAnimation { duration: Theme.animation.fast; easing.type: Easing.OutCubic }
     }
 
-    contentItem: Text {
-        text: control.text
-        font: control.font
-        color: control._textColor
-        horizontalAlignment: Text.AlignHCenter
-        verticalAlignment: Text.AlignVCenter
-        elide: Text.ElideRight
-        Behavior on color { ColorAnimation { duration: Theme.animation.fast } }
+    // 指针反馈:命令按钮统一手型光标(Basic 默认是箭头,点按钮没有"可点"的暗示)
+    HoverHandler { cursorShape: control.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor }
+
+    contentItem: RowLayout {
+        // 无图标时 HeaderIcon 不可见,布局会自动忽略它(也不占 spacing)
+        spacing: control.hasIcon ? 6 : 0
+
+        HeaderIcon {
+            Layout.alignment: Qt.AlignVCenter
+            visible: control.hasIcon
+            kind: control.iconName
+            color: control._textColor
+        }
+        Text {
+            Layout.alignment: Qt.AlignVCenter
+            // 按钮被压窄时由 Text 承担压缩并省略号截断(正常宽度下没有多余空间,不起作用)
+            Layout.fillWidth: true
+            text: control.text
+            font: control.font
+            color: control._textColor
+            verticalAlignment: Text.AlignVCenter
+            elide: Text.ElideRight
+            Behavior on color { ColorAnimation { duration: Theme.animation.fast } }
+        }
     }
 
     background: Rectangle {

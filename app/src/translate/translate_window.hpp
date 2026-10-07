@@ -32,6 +32,7 @@ public:
 
 protected:
     void showEvent(QShowEvent* e) override;
+    bool nativeEvent(const QByteArray& eventType, void* message, qint64* result) override;
 
 private:
     void setupUi();
@@ -39,6 +40,8 @@ private:
     QQuickWidget* m_quick = nullptr;
     /// 是否已定位过(只定位一次,不覆盖用户拖动后的位置)。
     bool m_placed = false;
+    /// nativeEvent 用的 HWND 缓存(该回调内禁止 winId(),会递归创建窗口)。
+    HWND m_cachedHwnd = nullptr;
 };
 
 } // namespace nb

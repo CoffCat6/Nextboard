@@ -1,6 +1,7 @@
 #include "panel_window.hpp"
 
 #include "host/window_effects.hpp"
+#include "panel/qml_bootstrap.hpp"
 
 #include <QCursor>
 #include <QDebug>
@@ -30,6 +31,9 @@ PanelWindow::PanelWindow(CoreBridge& core, QWidget* parent)
     : QWidget(parent, Qt::FramelessWindowHint | Qt::Tool), m_core(core) {
     setWindowTitle("Nextboard");
     resize(PANEL_W, PANEL_H);
+    // 无边框窗口的缩放下限:低于此尺寸头部(标题 + 搜索框 + 四个带图标的动作按钮)
+    // 会挤变形;620 是"搜索框仍可用"的实测下限估算
+    setMinimumSize(620, 380);
     setupUi();
 
     // 失焦自动隐藏(延迟复查,第一代 lib.rs 同参数)。
@@ -39,6 +43,7 @@ PanelWindow::PanelWindow(CoreBridge& core, QWidget* parent)
     m_blurTimer->setSingleShot(true);
     m_blurTimer->setInterval(BLUR_HIDE_DELAY_MS);
     connect(m_blurTimer, &QTimer::timeout, this, [this] {
+        if (m_pinned) return;   // 固定:点其他地方也不隐藏
         if (m_everFocused && !isActiveWindow()) hide();
     });
 }
@@ -58,18 +63,21 @@ void PanelWindow::setupUi() {
     // QML 源经 qt_add_qml_module 打进 qrc(QML_FILES 以 panel/qml/ 相对路径引用,
     // 别名拼接后实际地址多一层 panel/qml,无运行期文件依赖)。
     m_quick->setSource(QUrl("qrc:/qt/qml/Nextboard/panel/panel/qml/Main.qml"));
-    if (m_quick->status() == QQuickWidget::Error)
-        qWarning() << "QML load errors:" << m_quick->errors();
     layout->addWidget(m_quick);
+    // 加载失败时用原生标签顶替内容:空白窗口对用户零信息量(本项目已多次踩到)
+    handleQmlLoadFailure(m_quick, layout);
 }
 
 void PanelWindow::showAtCursor() {
-    const QPoint cursor = QCursor::pos();
-    QScreen* screen = QGuiApplication::screenAt(cursor);
-    if (!screen) screen = QGuiApplication::primaryScreen();
-    if (screen) {
-        const QRect avail = screen->availableGeometry();
-        move(avail.center() - rect().center());
+    // 用户手动拖动过之后就不再自动居中 —— 否则刚拖到顺手的位置,一收一开又跳回屏幕中央
+    if (!m_userMoved) {
+        const QPoint cursor = QCursor::pos();
+        QScreen* screen = QGuiApplication::screenAt(cursor);
+        if (!screen) screen = QGuiApplication::primaryScreen();
+        if (screen) {
+            const QRect avail = screen->availableGeometry();
+            move(avail.center() - rect().center());
+        }
     }
     show();
     raise();
@@ -81,7 +89,32 @@ HWND PanelWindow::nativeHandle() const {
 }
 
 void PanelWindow::startSystemMove() {
-    if (QWindow* handle = windowHandle()) handle->startSystemMove();
+    m_userMoved = true;   // 之后不再自动居中(见 showAtCursor)
+    if (QWindow* handle = windowHandle()) {
+        if (handle->startSystemMove()) return;
+    }
+    // 兜底:合成长按标题栏。无边框窗口走 WS_POPUP,部分环境下 Qt 的
+    // startSystemMove 会被平台拒绝(false),此时用 Win32 的老办法照样能进入
+    // 系统的模态移动循环(ReleaseCapture 必须先做,否则系统不会接管)。
+    const HWND hwnd = m_cachedHwnd ? m_cachedHwnd : reinterpret_cast<HWND>(winId());
+    if (hwnd) {
+        ::ReleaseCapture();
+        ::SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+    }
+}
+
+void PanelWindow::setPinned(bool pinned) {
+    if (m_pinned == pinned) return;
+    m_pinned = pinned;
+    if (pinned) m_blurTimer->stop();   // 正在计时的隐藏请求作废
+    // 置顶与否:固定后面板不再自动隐藏,而本窗口是 Qt::Tool(不占任务栏),
+    // 一旦被其它窗口盖住就没有入口找回,所以固定期间同步置顶。
+    const HWND hwnd = m_cachedHwnd ? m_cachedHwnd : reinterpret_cast<HWND>(winId());
+    if (hwnd) {
+        ::SetWindowPos(hwnd, pinned ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+                       SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+    emit pinnedChanged();
 }
 
 void PanelWindow::applySearchText(const QString& text) {
@@ -109,6 +142,14 @@ bool PanelWindow::nativeEvent(const QByteArray& eventType, void* message, qint64
         // CreateWindowEx → 创建失败(Qt 报 "CreateWindowEx failed")。用缓存 HWND。
         if (msg->hwnd != m_cachedHwnd)
             return QWidget::nativeEvent(eventType, message, result);
+        // 无边框窗口的边缘缩放:命中边框返回 HT*,其余交给系统(拖动/Aero Snap/双击最大化)
+        if (msg->message == WM_NCHITTEST) {
+            const int hit = framelessResizeHitTest(this, m_cachedHwnd, msg->lParam);
+            if (hit != -1) {
+                if (result) *result = hit;
+                return true;
+            }
+        }
         // nbcore 通知:剪贴板/设置变化 → 模型刷新
         if (msg->message == nb::WM_APP_CLIP_CHANGED) {
             emit clipChanged();

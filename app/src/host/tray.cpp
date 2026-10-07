@@ -10,7 +10,13 @@ namespace nb {
 
 Tray::Tray(PanelWindow& panel, CoreBridge& core, QObject* parent)
     : QSystemTrayIcon(parent), m_panel(panel), m_core(core) {
-    setIcon(QApplication::style()->standardIcon(QStyle::SP_ComputerIcon));
+    // 托盘图标与应用图标同源(main.cpp 已 setWindowIcon)。
+    // ico 自带 16/20/24/32… 多尺寸,QIcon 会按通知区域实际大小挑最合适的一档,
+    // 不需要在这里再缩放。取不到时退回系统图标,保证托盘不会变成空白占位。
+    QIcon appIcon = QApplication::windowIcon();
+    if (appIcon.isNull())
+        appIcon = QApplication::style()->standardIcon(QStyle::SP_ComputerIcon);
+    setIcon(appIcon);
     setToolTip("Nextboard");
     buildMenu();
     setContextMenu(m_menu);
