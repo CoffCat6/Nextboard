@@ -13,15 +13,15 @@ Drawer {
     closePolicy: Popup.CloseOnEscape
 
     background: Rectangle {
-        color: Theme.surface
-        border.color: Theme.border
-        border.width: 1
+        color: Theme.colors.surface
+        border.color: Theme.colors.border
+        border.width: Theme.metrics.borderWidth
     }
 
     enter: Transition {
-        NumberAnimation { property: "position"; to: 1.0; duration: 180; easing.type: Easing.OutCubic }
+        NumberAnimation { property: "position"; to: 1.0; duration: Theme.animation.normal; easing.type: Easing.OutCubic }
     }
     exit: Transition {
-        NumberAnimation { property: "position"; to: 0.0; duration: 140; easing.type: Easing.InCubic }
+        NumberAnimation { property: "position"; to: 0.0; duration: Theme.animation.fast; easing.type: Easing.InCubic }
     }
 }

@@ -55,7 +55,10 @@ AppDrawer {
 
         RowLayout {
             Layout.fillWidth: true
-            Label { text: "翻译"; font.pixelSize: 15; font.bold: true; color: Theme.text }
+            Label {
+                text: "翻译"; font.pixelSize: Theme.metrics.fontPageTitle
+                font.weight: Font.DemiBold; color: Theme.colors.textPrimary
+            }
             Item { Layout.fillWidth: true }
             ToolButton { text: "✕"; onClicked: root.close() }
         }
@@ -77,7 +80,7 @@ AppDrawer {
 
         RowLayout {
             Layout.fillWidth: true
-            Label { text: "目标语言"; color: Theme.muted; font.pixelSize: 12 }
+            Label { text: "目标语言"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
             ComboBox {
                 id: targetLang
                 Layout.preferredWidth: 140
@@ -98,8 +101,8 @@ AppDrawer {
             id: statusLabel
             property bool isError: false
             Layout.fillWidth: true
-            color: isError ? Theme.danger : Theme.muted
-            font.pixelSize: 12
+            color: isError ? Theme.colors.error : Theme.colors.textSecondary
+            font.pixelSize: Theme.metrics.fontCaption
             wrapMode: Text.WrapAnywhere
         }
 
@@ -107,10 +110,10 @@ AppDrawer {
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.minimumHeight: 60
-            color: Theme.bg
-            border.color: Theme.border
-            border.width: 1
-            radius: 6
+            color: Theme.colors.surfaceSecondary
+            border.color: Theme.colors.border
+            border.width: Theme.metrics.borderWidth
+            radius: Theme.metrics.radiusCard
 
             ScrollView {
                 anchors.fill: parent
@@ -119,7 +122,7 @@ AppDrawer {
                     id: output
                     readOnly: true
                     wrapMode: TextArea.WrapAnywhere
-                    color: Theme.text
+                    color: Theme.colors.textPrimary
                     text: ""
                 }
             }

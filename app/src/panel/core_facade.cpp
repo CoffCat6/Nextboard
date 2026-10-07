@@ -69,35 +69,37 @@ bool resolveDark(const QString& mode) {
 QPalette buildPalette(bool dark) {
     QPalette p;
     if (dark) {
-        p.setColor(QPalette::Window, QColor(0x1E, 0x1F, 0x24));
-        p.setColor(QPalette::WindowText, QColor(0xDF, 0xE1, 0xE8));
-        p.setColor(QPalette::Base, QColor(0x26, 0x27, 0x2E));
-        p.setColor(QPalette::AlternateBase, QColor(0x2D, 0x2E, 0x37));
-        p.setColor(QPalette::Button, QColor(0x2D, 0x2E, 0x37));
-        p.setColor(QPalette::ButtonText, QColor(0xDF, 0xE1, 0xE8));
-        p.setColor(QPalette::Text, QColor(0xDF, 0xE1, 0xE8));
-        p.setColor(QPalette::PlaceholderText, QColor(0x9A, 0xA0, 0xAB));
-        p.setColor(QPalette::Highlight, QColor(0x4F, 0x8C, 0xFF));
+        // 与 Theme.qml colors 对齐(theme.md §8)
+        p.setColor(QPalette::Window, QColor(0x0E, 0x12, 0x17));
+        p.setColor(QPalette::WindowText, QColor(0xF1, 0xF4, 0xF7));
+        p.setColor(QPalette::Base, QColor(0x15, 0x1A, 0x21));
+        p.setColor(QPalette::AlternateBase, QColor(0x1A, 0x20, 0x28));
+        p.setColor(QPalette::Button, QColor(0x1A, 0x20, 0x28));
+        p.setColor(QPalette::ButtonText, QColor(0xF1, 0xF4, 0xF7));
+        p.setColor(QPalette::Text, QColor(0xF1, 0xF4, 0xF7));
+        p.setColor(QPalette::PlaceholderText, QColor(0x73, 0x7E, 0x8A));
+        p.setColor(QPalette::Highlight, QColor(0x4C, 0x9A, 0xFF));
         p.setColor(QPalette::HighlightedText, QColor(0xFF, 0xFF, 0xFF));
-        p.setColor(QPalette::ToolTipBase, QColor(0x2D, 0x2E, 0x37));
-        p.setColor(QPalette::ToolTipText, QColor(0xDF, 0xE1, 0xE8));
+        p.setColor(QPalette::ToolTipBase, QColor(0x1A, 0x20, 0x28));
+        p.setColor(QPalette::ToolTipText, QColor(0xF1, 0xF4, 0xF7));
         p.setColor(QPalette::BrightText, QColor(0xFF, 0xFF, 0xFF));
-        p.setColor(QPalette::Link, QColor(0x4F, 0x8C, 0xFF));
+        p.setColor(QPalette::Link, QColor(0x4C, 0x9A, 0xFF));
     } else {
-        p.setColor(QPalette::Window, QColor(0xF4, 0xF5, 0xF7));
-        p.setColor(QPalette::WindowText, QColor(0x1F, 0x23, 0x29));
+        // 与 Theme.qml colors 对齐(theme.md §7)
+        p.setColor(QPalette::Window, QColor(0xF4, 0xF6, 0xF8));
+        p.setColor(QPalette::WindowText, QColor(0x17, 0x20, 0x2A));
         p.setColor(QPalette::Base, QColor(0xFF, 0xFF, 0xFF));
-        p.setColor(QPalette::AlternateBase, QColor(0xEA, 0xEC, 0xEF));
-        p.setColor(QPalette::Button, QColor(0xEA, 0xEC, 0xEF));
-        p.setColor(QPalette::ButtonText, QColor(0x1F, 0x23, 0x29));
-        p.setColor(QPalette::Text, QColor(0x1F, 0x23, 0x29));
-        p.setColor(QPalette::PlaceholderText, QColor(0x8B, 0x91, 0x99));
-        p.setColor(QPalette::Highlight, QColor(0x2F, 0x6F, 0xE4));
+        p.setColor(QPalette::AlternateBase, QColor(0xF8, 0xFA, 0xFC));
+        p.setColor(QPalette::Button, QColor(0xF8, 0xFA, 0xFC));
+        p.setColor(QPalette::ButtonText, QColor(0x17, 0x20, 0x2A));
+        p.setColor(QPalette::Text, QColor(0x17, 0x20, 0x2A));
+        p.setColor(QPalette::PlaceholderText, QColor(0x89, 0x94, 0xA1));
+        p.setColor(QPalette::Highlight, QColor(0x3B, 0x82, 0xF6));
         p.setColor(QPalette::HighlightedText, QColor(0xFF, 0xFF, 0xFF));
         p.setColor(QPalette::ToolTipBase, QColor(0xFF, 0xFF, 0xFF));
-        p.setColor(QPalette::ToolTipText, QColor(0x1F, 0x23, 0x29));
+        p.setColor(QPalette::ToolTipText, QColor(0x17, 0x20, 0x2A));
         p.setColor(QPalette::BrightText, QColor(0x00, 0x00, 0x00));
-        p.setColor(QPalette::Link, QColor(0x2F, 0x6F, 0xE4));
+        p.setColor(QPalette::Link, QColor(0x3B, 0x82, 0xF6));
     }
     return p;
 }

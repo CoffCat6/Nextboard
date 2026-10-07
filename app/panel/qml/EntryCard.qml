@@ -24,21 +24,22 @@ Rectangle {
     /// 请求翻译本条内容(翻译抽屉位于 Main.qml 作用域,跨组件经信号上抛)。
     signal translateRequested(string text)
 
-    /// 卡片右下角的快捷按钮:小胶囊 + 悬停高亮。
+    /// 卡片元信息行的操作按钮:小胶囊 + 悬停换底(§34,100~140ms)。
     component CardAction: Rectangle {
         id: action
         property string label: ""
         signal triggered()
         implicitWidth: actionLabel.implicitWidth + 14
-        implicitHeight: 20
-        radius: 4
-        color: actionHover.containsMouse ? Theme.accent : Theme.surface2
+        radius: Theme.metrics.radiusBadge
+        implicitHeight: 22
+        color: actionHover.containsMouse ? Theme.colors.accentSoft : Theme.colors.surfaceSecondary
+        Behavior on color { ColorAnimation { duration: Theme.animation.fast } }
         Text {
             id: actionLabel
             anchors.centerIn: parent
             text: action.label
-            font.pixelSize: 11
-            color: actionHover.containsMouse ? Theme.accentText : Theme.muted
+            font.pixelSize: Theme.metrics.fontCaption
+            color: actionHover.containsMouse ? Theme.colors.accent : Theme.colors.textSecondary
         }
         MouseArea {
             id: actionHover
@@ -64,10 +65,18 @@ Rectangle {
     /// 图片卡片高度上限:截图多为 16:9,不封顶会把列表撑成"一屏一条"。
     readonly property int maxImageCardHeight: 300
 
-    radius: 8
-    color: ma.containsMouse || menu.opened ? Theme.surface2 : Theme.surface
-    border.color: ma.containsMouse || menu.opened ? Theme.accent : Theme.border
-    border.width: 1
+    // §18/28:Surface + 1px Border,hover 换 SurfaceHover(强调色不铺满列表);
+    // 菜单打开时用 AccentSoft + Accent 边框表"当前操作对象"(§18 Selected)。
+    radius: Theme.metrics.radiusCard
+    color: menu.opened ? Theme.colors.surfaceSelected
+         : ma.containsMouse ? Theme.colors.surfaceHover
+         : Theme.colors.surface
+    border.width: Theme.metrics.borderWidth
+    border.color: menu.opened ? Theme.colors.accent
+                : ma.containsMouse ? Theme.colors.borderStrong
+                : Theme.colors.border
+    Behavior on color { ColorAnimation { duration: Theme.animation.fast } }
+    Behavior on border.color { ColorAnimation { duration: Theme.animation.fast } }
     implicitHeight: cardLayout.implicitHeight + 20
 
     // 条目操作菜单(顺序与第一代 App.tsx ctx-menu 对齐)
@@ -196,26 +205,30 @@ Rectangle {
         RowLayout {
             Layout.fillWidth: true
             spacing: 10
-            Label { text: root.timeText; color: Theme.muted; font.pixelSize: 11 }
-            Label { text: root.sizeText; color: Theme.muted; font.pixelSize: 11 }
+            // 元数据弱化(§40:12px / TextSecondary)
+            Label { text: root.timeText; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
+            Label { text: root.sizeText; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
             Label {
                 visible: root.pinned
-                text: "固定"; font.pixelSize: 10
+                text: "固定"; font.pixelSize: Theme.metrics.fontMicro
                 padding: 3; leftPadding: 6; rightPadding: 6
-                color: Theme.pinText; background: Rectangle { color: Theme.pin; radius: 4 }
+                color: Theme.colors.onWarning
+                background: Rectangle { color: Theme.colors.warning; radius: Theme.metrics.radiusBadge }
             }
             Label {
                 visible: root.source !== "" && root.source !== "clipboard"
-                text: root.source; font.pixelSize: 10
+                text: root.source; font.pixelSize: Theme.metrics.fontMicro
                 padding: 3; leftPadding: 6; rightPadding: 6
-                color: root.source === "capture" ? Theme.sourceCapture
-                     : root.source === "translate" ? Theme.sourceTranslate : Theme.muted
-                background: Rectangle { color: Theme.surface2; radius: 4 }
+                color: root.source === "capture" ? Theme.colors.sourceCapture
+                     : root.source === "translate" ? Theme.colors.sourceTranslate
+                     : Theme.colors.textSecondary
+                background: Rectangle { color: Theme.colors.surfaceSecondary; radius: Theme.metrics.radiusBadge }
             }
             Label {
-                text: root.kind; font.pixelSize: 10
+                text: root.kind; font.pixelSize: Theme.metrics.fontMicro
                 padding: 3; leftPadding: 6; rightPadding: 6
-                color: Theme.muted; background: Rectangle { color: Theme.surface2; radius: 4 }
+                color: Theme.colors.textTertiary
+                background: Rectangle { color: Theme.colors.surfaceSecondary; radius: Theme.metrics.radiusBadge }
             }
             Item { Layout.fillWidth: true }
 
@@ -274,8 +287,8 @@ Rectangle {
                 visible: !root.textExpanded
                 width: parent.width
                 text: root.text || root.preview || ""
-                color: Theme.text
-                font.pixelSize: 13
+                color: Theme.colors.textPrimary
+                font.pixelSize: Theme.metrics.fontBody
                 wrapMode: Text.WrapAnywhere
                 maximumLineCount: 4
                 elide: Text.ElideRight
@@ -301,11 +314,11 @@ Rectangle {
                     text: root.text || ""
                     readOnly: true
                     wrapMode: TextEdit.WrapAnywhere
-                    color: Theme.text
-                    font.pixelSize: 13
+                    color: Theme.colors.textPrimary
+                    font.pixelSize: Theme.metrics.fontBody
                     selectByMouse: true
-                    selectionColor: Theme.accent
-                    selectedTextColor: Theme.accentText
+                    selectionColor: Theme.colors.accentSoft
+                    selectedTextColor: Theme.colors.textPrimary
                 }
             }
         }

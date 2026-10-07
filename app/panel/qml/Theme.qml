@@ -1,9 +1,9 @@
-// 全局主题:亮/暗两套配色,由 Core.darkTheme 驱动。
+// 全局主题(docs/theme.md §44-46):colors / metrics / animation 三组令牌,
+// 由 Core.darkTheme 驱动亮/暗即时切换。
 //
 // settings.theme("system"/"light"/"dark")由 C++ 侧解析(含系统配色探测)并写入
-// Core.darkTheme,切换后所有引用 Theme 的地方自动刷新——QML 侧不感知 system 细节。
-// 注意:Basic 风格控件的配色走 QPalette,由 CoreFacade::applyTheme 一并注入,
-// 只改这里是不够的。
+// Core.darkTheme;Basic 风格控件的配色走 QPalette,由 CoreFacade::applyTheme
+// 注入(值与 colors 对齐),只改这里是不够的。
 pragma Singleton
 import QtQuick
 import Nextboard.Core 1.0
@@ -11,32 +11,96 @@ import Nextboard.Core 1.0
 QtObject {
     readonly property bool dark: Core.darkTheme
 
-    readonly property color bg:        dark ? "#1e1f24" : "#f4f5f7"
-    readonly property color surface:   dark ? "#26272e" : "#ffffff"
-    readonly property color surface2:  dark ? "#2d2e37" : "#eaecef"
-    readonly property color border:    dark ? "#33353d" : "#d5d8de"
-    readonly property color text:      dark ? "#dfe1e8" : "#1f2329"
-    readonly property color muted:     dark ? "#9aa0ab" : "#6b7280"
-    readonly property color accent:    dark ? "#4f8cff" : "#2f6fe4"
-    readonly property color accentDim: dark ? "#3a6fd8" : "#2559b8"
-    readonly property color danger:    dark ? "#e5534b" : "#d9382f"
-    readonly property color pin:       dark ? "#e8b339" : "#e0a800"
+    // ---- 色板(theme.md §7/§8) ----
+    readonly property QtObject colors: QtObject {
+        readonly property color background:       dark ? "#0E1217" : "#F4F6F8"
+        readonly property color surface:          dark ? "#151A21" : "#FFFFFF"
+        readonly property color surfaceSecondary: dark ? "#1A2028" : "#F8FAFC"
+        readonly property color surfaceHover:     dark ? "#202731" : "#EEF2F6"
+        readonly property color surfaceSelected:  dark ? "#192E4B" : "#E8F1FF"
 
-    /// 强调色/固定色**之上**的文字色(标签选中态、toast、徽标)。
-    ///
-    /// ⚠️ 命名禁区:QML 把 `on` + 大写字母开头的标识符当作**信号处理器**语法,
-    /// 因此这里**不能**叫 `onAccent` / `onPin` —— 会报
-    /// "Cannot assign a value to a signal" 并让整个 Theme 单例加载失败,
-    /// 连带 EntryCard/Main 全部不可用(面板一片空白)。同理禁止 `on*` 命名。
-    readonly property color accentText: "#ffffff"
-    readonly property color pinText:    "#222222"
+        readonly property color border:       dark ? "#29323C" : "#D9E0E7"
+        readonly property color borderStrong: dark ? "#37424E" : "#C7D0DA"
 
-    /// 来源徽标配色(capture / translate);亮色下需加深,否则浅底上看不清。
-    readonly property color sourceCapture:   dark ? "#7ec2ff" : "#1a6fc4"
-    readonly property color sourceTranslate: dark ? "#c9a7ff" : "#6f42c1"
+        readonly property color textPrimary:   dark ? "#F1F4F7" : "#17202A"
+        readonly property color textSecondary: dark ? "#AAB4BF" : "#5E6A78"
+        readonly property color textTertiary:  dark ? "#737E8A" : "#8994A1"
+        readonly property color textDisabled:  dark ? "#4D5762" : "#B6BEC8"
+
+        readonly property color accent:        dark ? "#4C9AFF" : "#3B82F6"
+        readonly property color accentHover:   dark ? "#6AA8FF" : "#2563EB"
+        readonly property color accentPressed: dark ? "#3478D4" : "#1D4ED8"
+        readonly property color accentSoft:    dark ? "#172B46" : "#E8F1FF"
+        /// 强调色之上的文字(按钮/选中徽标)。
+        readonly property color accentText:    "#FFFFFF"
+
+        readonly property color success: dark ? "#4ADE80" : "#16A34A"
+        readonly property color warning: dark ? "#FBBF24" : "#D97706"
+        readonly property color error:   dark ? "#F87171" : "#DC2626"
+        /// 警告色之上的文字(暗色琥珀配深字,浅色琥珀配白字)。
+        readonly property color onWarning: dark ? "#1A1405" : "#FFFFFF"
+
+        /// 来源徽标(capture / translate);浅底需加深保证对比度。
+        readonly property color sourceCapture:   dark ? "#7EC2FF" : "#1A6FC4"
+        readonly property color sourceTranslate: dark ? "#C9A7FF" : "#6F42C1"
+    }
+
+    // ---- 尺度(theme.md §11/14/16/24/26/39) ----
+    readonly property QtObject metrics: QtObject {
+        readonly property int radiusWindow: 12
+        readonly property int radiusPanel:  8
+        readonly property int radiusCard:   8
+        readonly property int radiusInput:  6
+        readonly property int radiusButton: 6
+        readonly property int radiusPopup:  8
+        readonly property int radiusBadge:  4
+
+        readonly property int spacingXs: 4
+        readonly property int spacingSm: 8
+        readonly property int spacingMd: 12
+        readonly property int spacingLg: 16
+
+        readonly property int headerHeight:  48
+        readonly property int searchHeight:  34
+        readonly property int navItemHeight: 30
+        readonly property int controlHeightSm: 28
+        readonly property int controlHeight:   32
+        readonly property int controlHeightLg: 36
+        readonly property int borderWidth: 1
+
+        readonly property int fontPageTitle: 16
+        readonly property int fontSection:   14
+        readonly property int fontBody:      13
+        readonly property int fontCaption:   12
+        readonly property int fontMicro:     10
+    }
+
+    // ---- 动画(theme.md §30/31):fast 反馈,normal 状态/面板,slow 大过渡 ----
+    readonly property QtObject animation: QtObject {
+        readonly property int fast:   120
+        readonly property int normal: 180
+        readonly property int slow:   240
+    }
+
+    // ---- 兼容别名:存量 QML(尤其 SettingsDrawer)仍引用旧扁平名,迁移完成后移除 ----
+    readonly property color bg:      colors.background
+    readonly property color surface: colors.surface
+    // 存量把"次级面 / 悬停面"混用 surface2,统一映射到悬停面(卡片/按钮悬停一致)
+    readonly property color surface2: colors.surfaceHover
+    readonly property color border:  colors.border
+    readonly property color text:    colors.textPrimary
+    readonly property color muted:   colors.textSecondary
+    readonly property color accent:    colors.accent
+    readonly property color accentDim: colors.accentPressed
+    readonly property color danger:  colors.error
+    readonly property color pin:     colors.warning
+    readonly property color accentText: colors.accentText
+    readonly property color pinText:    colors.onWarning
+    readonly property color sourceCapture:   colors.sourceCapture
+    readonly property color sourceTranslate: colors.sourceTranslate
 
     readonly property font baseFont: Qt.font({
         family: "Segoe UI, Microsoft YaHei",
-        pixelSize: 13
+        pixelSize: metrics.fontBody
     })
 }
