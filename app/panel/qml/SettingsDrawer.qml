@@ -69,39 +69,6 @@ AppDrawer {
         }
     }
 
-    component ReadableComboBox: ComboBox {
-        contentItem: Text {
-            text: parent.displayText
-            font: parent.font
-            color: Theme.colors.textPrimary
-            verticalAlignment: Text.AlignVCenter
-            leftPadding: 10
-            rightPadding: parent.indicator ? parent.indicator.width + parent.spacing : 0
-            elide: Text.ElideRight
-        }
-        delegate: ItemDelegate {
-            width: parent.width
-            contentItem: Text {
-                text: parent.modelData !== undefined ? parent.modelData : parent.text
-                font: parent.font
-                color: Theme.colors.textPrimary
-                verticalAlignment: Text.AlignVCenter
-                elide: Text.ElideRight
-            }
-            highlighted: parent.highlighted
-            background: Rectangle {
-                color: parent.hovered || parent.highlighted
-                       ? Theme.colors.surfaceHover : Theme.colors.surface
-            }
-        }
-        background: Rectangle {
-            color: Theme.colors.surface
-            border.color: parent.activeFocus ? Theme.colors.accent : Theme.colors.border
-            border.width: Theme.metrics.borderWidth
-            radius: Theme.metrics.radiusInput
-        }
-    }
-
     component ReadableSpinBox: SpinBox {
         contentItem: TextInput {
             text: parent.textFromValue(parent.value, parent.locale)

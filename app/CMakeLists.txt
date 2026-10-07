@@ -53,6 +53,7 @@ qt_add_qml_module(nextboard
         panel/qml/Main.qml
         panel/qml/EntryCard.qml
         panel/qml/KeyCap.qml
+        panel/qml/ReadableComboBox.qml
         panel/qml/AppDrawer.qml
         panel/qml/SettingsDrawer.qml
         panel/qml/TranslateDrawer.qml

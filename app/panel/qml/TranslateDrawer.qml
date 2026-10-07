@@ -127,7 +127,7 @@ AppDrawer {
                 font.pixelSize: Theme.metrics.fontBody
                 Layout.alignment: Qt.AlignVCenter
             }
-            ComboBox {
+            ReadableComboBox {
                 id: targetLang
                 Layout.preferredWidth: 130
                 Layout.preferredHeight: Theme.metrics.controlHeight
