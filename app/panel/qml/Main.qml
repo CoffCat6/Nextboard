@@ -75,9 +75,19 @@ Rectangle {
                 color: Theme.colors.surface
                 border.width: Theme.metrics.borderWidth
                 border.color: searchInput.activeFocus ? Theme.colors.accent
-                            : searchMa.containsMouse ? Theme.colors.borderStrong
+                            : searchBoxMa.containsMouse ? Theme.colors.borderStrong
                             : Theme.colors.border
                 Behavior on border.color { ColorAnimation { duration: Theme.animation.fast } }
+
+                // 整框 hover 态与"点空白处聚焦"(放在 RowLayout 之后声明以覆盖空白区,
+                // 但 searchInput 与清空按钮在其上层,输入与清除不受影响)
+                MouseArea {
+                    id: searchBoxMa
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.IBeamCursor
+                    onClicked: searchInput.forceActiveFocus()
+                }
 
                 RowLayout {
                     anchors.fill: parent
@@ -349,20 +359,22 @@ Rectangle {
                 KeyCap { label: "Ctrl" }
                 KeyCap { label: "K" }
                 Text {
-                    text: "搜索"; color: Theme.colors.textTertiary
+                    text: "搜索"
+                    color: Theme.colors.textSecondary
                     font.pixelSize: Theme.metrics.fontMicro
                     Layout.rightMargin: Theme.metrics.spacingSm
                 }
                 KeyCap { label: "Ctrl" }
                 KeyCap { label: "1-9" }
                 Text {
-                    text: "复制条目"; color: Theme.colors.textTertiary
+                    text: "复制条目"
+                    color: Theme.colors.textSecondary
                     font.pixelSize: Theme.metrics.fontMicro
                 }
                 Item { Layout.fillWidth: true }
                 Text {
                     text: Entries.loading ? "加载中…" : "Nextboard"
-                    color: Theme.colors.textTertiary
+                    color: Theme.colors.textSecondary
                     font.pixelSize: Theme.metrics.fontMicro
                 }
             }
