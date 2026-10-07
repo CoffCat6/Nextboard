@@ -37,6 +37,106 @@ AppDrawer {
         onTriggered: root.save()
     }
 
+    // ---- Basic 控件深色可读性覆盖(截图确认:勾选框文字/下拉框底板过暗) ----
+    // Basic 的 CheckBox 文字与 ComboBox 下拉底板在深色下取调色板混合值,
+    // 对比度不足。统一换成 Readable* 变体,contentItem/背景全部走 Theme 令牌。
+    component ReadableCheckBox: CheckBox {
+        contentItem: Text {
+            text: parent.text
+            font: parent.font
+            color: Theme.colors.textPrimary
+            verticalAlignment: Text.AlignVCenter
+            leftPadding: parent.indicator ? parent.indicator.width + parent.spacing : 0
+        }
+        indicator: Rectangle {
+            implicitWidth: 18
+            implicitHeight: 18
+            x: parent.leftPadding
+            y: parent.height / 2 - height / 2
+            radius: Theme.metrics.radiusBadge
+            color: parent.checked ? Theme.colors.accent : Theme.colors.surfaceSecondary
+            border.width: Theme.metrics.borderWidth
+            border.color: parent.checked ? Theme.colors.accent : Theme.colors.borderStrong
+            Behavior on color { ColorAnimation { duration: Theme.animation.fast } }
+            Text {
+                visible: parent.parent.checked
+                anchors.centerIn: parent
+                text: "✓"
+                color: Theme.colors.accentText
+                font.pixelSize: 12
+                font.bold: true
+            }
+        }
+    }
+
+    component ReadableComboBox: ComboBox {
+        contentItem: Text {
+            text: parent.displayText
+            font: parent.font
+            color: Theme.colors.textPrimary
+            verticalAlignment: Text.AlignVCenter
+            leftPadding: 10
+            rightPadding: parent.indicator ? parent.indicator.width + parent.spacing : 0
+            elide: Text.ElideRight
+        }
+        delegate: ItemDelegate {
+            width: parent.width
+            contentItem: Text {
+                text: parent.modelData !== undefined ? parent.modelData : parent.text
+                font: parent.font
+                color: Theme.colors.textPrimary
+                verticalAlignment: Text.AlignVCenter
+                elide: Text.ElideRight
+            }
+            highlighted: parent.highlighted
+            background: Rectangle {
+                color: parent.hovered || parent.highlighted
+                       ? Theme.colors.surfaceHover : Theme.colors.surface
+            }
+        }
+        background: Rectangle {
+            color: Theme.colors.surface
+            border.color: parent.activeFocus ? Theme.colors.accent : Theme.colors.border
+            border.width: Theme.metrics.borderWidth
+            radius: Theme.metrics.radiusInput
+        }
+    }
+
+    component ReadableSpinBox: SpinBox {
+        contentItem: TextInput {
+            text: parent.textFromValue(parent.value, parent.locale)
+            validator: parent.validator
+            font: parent.font
+            color: Theme.colors.textPrimary
+            selectionColor: Theme.colors.accent
+            selectedTextColor: Theme.colors.accentText
+            horizontalAlignment: Qt.AlignHCenter
+            verticalAlignment: TextInput.AlignVCenter
+            readOnly: !parent.editable
+            selectByMouse: true
+            onEditingFinished: parent.value = parent.valueFromText(text, parent.locale)
+        }
+        background: Rectangle {
+            color: Theme.colors.surface
+            border.color: parent.activeFocus ? Theme.colors.accent : Theme.colors.border
+            border.width: Theme.metrics.borderWidth
+            radius: Theme.metrics.radiusInput
+        }
+    }
+
+    component ReadableTextField: TextField {
+        color: Theme.colors.textPrimary
+        placeholderTextColor: Theme.colors.textTertiary
+        selectionColor: Theme.colors.accent
+        selectedTextColor: Theme.colors.accentText
+        background: Rectangle {
+            color: Theme.colors.surface
+            border.color: parent.activeFocus ? Theme.colors.accent : Theme.colors.border
+            border.width: Theme.metrics.borderWidth
+            radius: Theme.metrics.radiusInput
+        }
+    }
+
     function scheduleSave() {
         autoSave.restart()
     }
@@ -381,7 +481,7 @@ AppDrawer {
             }
 
             Label { text: "历史上限(条)"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
-            SpinBox {
+            ReadableSpinBox {
                 id: historyLimit
                 Layout.fillWidth: true
                 from: 100; to: 100000; stepSize: 500
@@ -390,7 +490,7 @@ AppDrawer {
             }
 
             Label { text: "单张图片上限(MB)"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
-            SpinBox {
+            ReadableSpinBox {
                 id: maxImage
                 Layout.fillWidth: true
                 from: 1; to: 200
@@ -398,36 +498,36 @@ AppDrawer {
                 onValueModified: root.scheduleSave()
             }
 
-            CheckBox {
+            ReadableCheckBox {
                 id: monitorCheck
                 text: "剪贴板监听"
                 onClicked: root.scheduleSave()
             }
-            CheckBox {
+            ReadableCheckBox {
                 id: ocrCheck
                 text: "OCR 自动识别(截图文字可搜索)"
                 onClicked: root.scheduleSave()
             }
             // 取消勾选后,框选截图会先进编辑器标注,「完成」才入库 + 写剪贴板
-            CheckBox {
+            ReadableCheckBox {
                 id: skipEditorCheck
                 text: "截图后直接入库(跳过编辑器)"
                 onClicked: root.scheduleSave()
             }
             // 取消勾选后,选区保留并可拖 8 向手柄微调,Enter 或双击才确认
-            CheckBox {
+            ReadableCheckBox {
                 id: autoConfirmCheck
                 text: "框选后松开鼠标即确认"
                 onClicked: root.scheduleSave()
             }
-            CheckBox {
+            ReadableCheckBox {
                 id: rightClickCancelCheck
                 text: "框选时鼠标右键取消截图"
                 onClicked: root.scheduleSave()
             }
 
             Label { text: "主题"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
-            ComboBox {
+            ReadableComboBox {
                 id: themeCombo
                 Layout.fillWidth: true
                 model: ["跟随系统", "浅色", "深色"]
@@ -466,7 +566,7 @@ AppDrawer {
 
             SectionDivider {}
             SectionTitle { text: "数据" }
-            CheckBox {
+            ReadableCheckBox {
                 id: autoStartCheck
                 text: "开机自启(写入当前用户注册表 Run 键)"
                 checked: Core.autoStartEnabled()
@@ -482,7 +582,7 @@ AppDrawer {
             HintLabel {
                 text: "自定义数据目录(留空 = 默认位置)。变更后重启应用生效:数据库与图片自动迁移到新目录,原目录数据保留。"
             }
-            TextField {
+            ReadableTextField {
                 id: dataDirInput
                 Layout.fillWidth: true
                 placeholderText: "D:\\Data\\Nextboard"
@@ -497,14 +597,14 @@ AppDrawer {
             SectionTitle { text: "贴图" }
 
             FieldLabel { text: "默认不透明度(%)" }
-            SpinBox {
+            ReadableSpinBox {
                 id: pinOpacity
                 Layout.fillWidth: true
                 from: 30; to: 100; stepSize: 5
                 editable: true
                 onValueModified: root.scheduleSave()
             }
-            CheckBox {
+            ReadableCheckBox {
                 id: pinDoubleClick
                 text: "双击关闭贴图窗口"
                 onClicked: root.scheduleSave()
@@ -525,7 +625,7 @@ AppDrawer {
                         onClicked: root.paletteTarget = root.paletteTarget === "bg" ? "" : "bg"
                     }
                 }
-                TextField {
+                ReadableTextField {
                     id: pinTextBg
                     Layout.fillWidth: true
                     placeholderText: "#26272e"
@@ -558,7 +658,7 @@ AppDrawer {
                         onClicked: root.paletteTarget = root.paletteTarget === "color" ? "" : "color"
                     }
                 }
-                TextField {
+                ReadableTextField {
                     id: pinTextColor
                     Layout.fillWidth: true
                     placeholderText: "#dfe1e8"
@@ -576,7 +676,7 @@ AppDrawer {
                 }
             }
             FieldLabel { text: "文本贴图 · 背景不透明度(%)" }
-            SpinBox {
+            ReadableSpinBox {
                 id: pinTextBgOpacity
                 Layout.fillWidth: true
                 from: 0; to: 100; stepSize: 5
@@ -584,7 +684,7 @@ AppDrawer {
                 onValueModified: root.scheduleSave()
             }
             FieldLabel { text: "文本贴图 · 字号(像素)" }
-            SpinBox {
+            ReadableSpinBox {
                 id: pinTextFontSize
                 Layout.fillWidth: true
                 from: 8; to: 96
@@ -592,7 +692,7 @@ AppDrawer {
                 onValueModified: root.scheduleSave()
             }
             FieldLabel { text: "文本贴图 · 最大宽度(像素)" }
-            SpinBox {
+            ReadableSpinBox {
                 id: pinTextMaxWidth
                 Layout.fillWidth: true
                 from: 120; to: 2000; stepSize: 40
@@ -664,7 +764,7 @@ AppDrawer {
             // ---- 翻译服务 ----
             SectionDivider {}
             SectionTitle { text: "翻译服务" }
-            ComboBox {
+            ReadableComboBox {
                 id: providerCombo
                 Layout.fillWidth: true
                 model: ["OpenAI 兼容接口", "微软翻译", "自定义 HTTP"]
@@ -673,7 +773,7 @@ AppDrawer {
 
             // OpenAI 兼容(含国内兼容端点)
             FieldLabel { text: "接口地址"; visible: root.provider === "openai" }
-            TextField {
+            ReadableTextField {
                 id: oaBaseUrl
                 onTextEdited: root.scheduleSave()
                 visible: root.provider === "openai"
@@ -681,7 +781,7 @@ AppDrawer {
                 placeholderText: "https://api.openai.com/v1"
             }
             FieldLabel { text: "API Key"; visible: root.provider === "openai" }
-            TextField {
+            ReadableTextField {
                 id: oaApiKey
                 onTextEdited: root.scheduleSave()
                 visible: root.provider === "openai"
@@ -690,7 +790,7 @@ AppDrawer {
                 placeholderText: "sk-…"
             }
             FieldLabel { text: "模型"; visible: root.provider === "openai" }
-            TextField {
+            ReadableTextField {
                 id: oaModel
                 onTextEdited: root.scheduleSave()
                 visible: root.provider === "openai"
@@ -700,7 +800,7 @@ AppDrawer {
 
             // 微软翻译
             FieldLabel { text: "接口地址"; visible: root.provider === "microsoft" }
-            TextField {
+            ReadableTextField {
                 id: msEndpoint
                 onTextEdited: root.scheduleSave()
                 visible: root.provider === "microsoft"
@@ -708,7 +808,7 @@ AppDrawer {
                 placeholderText: "https://api.translator.azure.cn"
             }
             FieldLabel { text: "API Key"; visible: root.provider === "microsoft" }
-            TextField {
+            ReadableTextField {
                 id: msApiKey
                 onTextEdited: root.scheduleSave()
                 visible: root.provider === "microsoft"
@@ -716,7 +816,7 @@ AppDrawer {
                 echoMode: TextInput.Password
             }
             FieldLabel { text: "区域(可选)"; visible: root.provider === "microsoft" }
-            TextField {
+            ReadableTextField {
                 id: msRegion
                 onTextEdited: root.scheduleSave()
                 visible: root.provider === "microsoft"
@@ -726,7 +826,7 @@ AppDrawer {
 
             // 自定义 HTTP
             FieldLabel { text: "请求地址"; visible: root.provider === "custom" }
-            TextField {
+            ReadableTextField {
                 id: cuUrl
                 onTextEdited: root.scheduleSave()
                 visible: root.provider === "custom"
@@ -734,7 +834,7 @@ AppDrawer {
                 placeholderText: "https://…"
             }
             FieldLabel { text: "请求方法"; visible: root.provider === "custom" }
-            ComboBox {
+            ReadableComboBox {
                 id: cuMethod
                 visible: root.provider === "custom"
                 Layout.fillWidth: true
@@ -742,7 +842,7 @@ AppDrawer {
                 onActivated: root.scheduleSave()
             }
             FieldLabel { text: "API Key(可选)"; visible: root.provider === "custom" }
-            TextField {
+            ReadableTextField {
                 id: cuApiKey
                 onTextEdited: root.scheduleSave()
                 visible: root.provider === "custom"
@@ -750,7 +850,7 @@ AppDrawer {
                 echoMode: TextInput.Password
             }
             FieldLabel { text: "模型(可选)"; visible: root.provider === "custom" }
-            TextField {
+            ReadableTextField {
                 id: cuModel
                 onTextEdited: root.scheduleSave()
                 visible: root.provider === "custom"
@@ -765,6 +865,10 @@ AppDrawer {
                 Layout.preferredHeight: 54
                 wrapMode: TextArea.WrapAnywhere
                 placeholderText: "Content-Type: application/json"
+                color: Theme.colors.textPrimary
+                placeholderTextColor: Theme.colors.textTertiary
+                selectionColor: Theme.colors.accent
+                selectedTextColor: Theme.colors.accentText
             }
             FieldLabel { text: "请求体模板"; visible: root.provider === "custom" }
             TextArea {
@@ -775,9 +879,13 @@ AppDrawer {
                 Layout.preferredHeight: 66
                 wrapMode: TextArea.WrapAnywhere
                 placeholderText: "可用 ${text} ${from} ${to} ${apiKey} ${model}"
+                color: Theme.colors.textPrimary
+                placeholderTextColor: Theme.colors.textTertiary
+                selectionColor: Theme.colors.accent
+                selectedTextColor: Theme.colors.accentText
             }
             FieldLabel { text: "响应取值路径"; visible: root.provider === "custom" }
-            TextField {
+            ReadableTextField {
                 id: cuPath
                 onTextEdited: root.scheduleSave()
                 visible: root.provider === "custom"
@@ -786,7 +894,7 @@ AppDrawer {
             }
 
             FieldLabel { text: "超时(秒)" }
-            SpinBox {
+            ReadableSpinBox {
                 id: timeoutSpin
                 Layout.fillWidth: true
                 from: 5; to: 120
@@ -815,14 +923,14 @@ AppDrawer {
             SectionDivider {}
             SectionTitle { text: "网络与代理" }
             FieldLabel { text: "代理模式(作用于翻译等网络请求)" }
-            ComboBox {
+            ReadableComboBox {
                 id: proxyModeCombo
                 Layout.fillWidth: true
                 model: ["跟随系统", "直连(不使用代理)", "手动配置"]
                 onActivated: root.scheduleSave()
             }
             FieldLabel { text: "协议类型"; visible: root.isProxyManual }
-            ComboBox {
+            ReadableComboBox {
                 id: proxyKindCombo
                 visible: root.isProxyManual
                 Layout.fillWidth: true
@@ -830,7 +938,7 @@ AppDrawer {
                 onActivated: root.scheduleSave()
             }
             FieldLabel { text: "服务器地址"; visible: root.isProxyManual }
-            TextField {
+            ReadableTextField {
                 id: proxyHost
                 visible: root.isProxyManual
                 Layout.fillWidth: true
@@ -838,7 +946,7 @@ AppDrawer {
                 onTextEdited: root.scheduleSave()
             }
             FieldLabel { text: "端口"; visible: root.isProxyManual }
-            SpinBox {
+            ReadableSpinBox {
                 id: proxyPort
                 visible: root.isProxyManual
                 Layout.fillWidth: true
@@ -847,14 +955,14 @@ AppDrawer {
                 onValueModified: root.scheduleSave()
             }
             FieldLabel { text: "用户名(可选)"; visible: root.isProxyManual }
-            TextField {
+            ReadableTextField {
                 id: proxyUser
                 visible: root.isProxyManual
                 Layout.fillWidth: true
                 onTextEdited: root.scheduleSave()
             }
             FieldLabel { text: "密码(可选)"; visible: root.isProxyManual }
-            TextField {
+            ReadableTextField {
                 id: proxyPassword
                 visible: root.isProxyManual
                 Layout.fillWidth: true
@@ -863,7 +971,7 @@ AppDrawer {
             }
             // SOCKS5 路径(ureq)不支持绕过列表,仅 HTTP 显示该字段(与 core 注释一致)
             FieldLabel { text: "绕过列表(仅 HTTP,分号分隔)"; visible: root.isProxyManual && proxyKindCombo.currentIndex === 0 }
-            TextField {
+            ReadableTextField {
                 id: proxyBypass
                 visible: root.isProxyManual && proxyKindCombo.currentIndex === 0
                 Layout.fillWidth: true
