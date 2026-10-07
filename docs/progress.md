@@ -1024,3 +1024,42 @@ done
 `build.ps1 -Run` 能执行完成并 `Start-Process` 成功,但进程不留下(日志无新记录);
 Bash 里直接启动被拦。且 `reg.exe` 仍在黑名单,`vcvars64` 仍受限。
 **因此 GUI 改动依旧只能由用户在真机验证。**
+
+---
+
+## 2026-10-07(三)自定义数据目录落地(设置 UI + FFI 迁移挂接 + 宿主 blobs 定位修正)
+
+### 起点
+
+盘点确认 `dataDir` 设置字段、绝对路径校验、`effective_data_dir` 与待迁移标记机制
+(`write_pending_move` / `take_pending_move`,启动时自动搬迁 db + blobs,源目录保留)
+在 nbcore 侧**早已存在**,但三处断点使其完全不可用:
+
+1. FFI `save_settings` 没有挂迁移标记 —— 改了 `dataDir` 没人写
+   `data-move-pending.txt`,重启不会搬迁;
+2. C++ `CoreBridge::blobsDirAbs()` 写死默认目录 —— 迁移后图片全部 404;
+3. 设置界面没有数据目录入口。
+
+### 实现
+
+| 层 | 改动 |
+| --- | --- |
+| nbcore `core.rs` | `Core` 增加 `effective_dir` 字段(当前生效目录,init 时随 `data_dir` 一起记录) |
+| nbcore `ffi.rs` | 新增 `data_dir` 方法返回生效目录;`save_settings` 检测 `dataDir` 变更(与现值 trim 后比较)即以**变更前**的生效目录为源写迁移标记。标记写入失败则保存失败,防"改了配置却迁不动数据" |
+| app `core_bridge` | nb_init 成功后调 `data_dir` 查询生效目录(失败回退默认目录并落日志);`blobsDirAbs()` 改基于生效目录 |
+| QML `SettingsDrawer` | 新增「数据」区:目录输入框(留空 = 默认位置)+ 变更提示。走既有的 400ms 去抖自动保存;`dataDirDirty` 标记使保存成功后提示"下次启动生效(含数据迁移)",避免静默改目录用户无感知 |
+
+语义沿用第一代 phase4:**重启生效**(运行中直接切库有数据一致性风险);迁移是**复制**
+而非移动,源目录保留可回退;目标已有数据库时不覆盖(防回迁时用旧数据盖新数据)。
+
+### 验证与限制
+
+- core `cargo check`(含 tests)通过;`cargo build --release` 通过,新 nbcore.dll 已部署到 app/build;
+- 新增 settings 单测 3 项:effective_data_dir 的空/空白/带空白自定义值口径、
+  迁移标记全链路(建库建 blobs → 写标记 → 搬迁 → 标记清除 → 源保留 → 目标已有数据不覆盖)、
+  相对路径拒绝;
+- ⚠️ cargo test 测试进程在本工具会话以 `STATUS_DLL_INIT_FAILED` 失败(见上一轮分析,
+  会话级环境限制),新增单测由用户真机 `cargo test` 确认;
+- qmllint 0 error;app 编译链接通过(`[11/11] Linking`)、无编译警告;
+- ⚠️ 需真实桌面确认:设置 → 数据 → 填入新目录 → 自动保存后重启 —— db + blobs 应出现在新目录
+  且历史条目(含图片缩略图)完整;改回默认(清空)重启后数据应迁回;原目录数据始终保留。

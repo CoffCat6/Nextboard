@@ -74,6 +74,8 @@ private:
     NbCaptureCrop m_captureCrop = nullptr;
     bool m_initialized = false;
     QString m_dataDir;
+    /// 生效数据目录(设置里启用自定义目录时与 m_dataDir 不同;blobs 定位用)。
+    QString m_effectiveDataDir;
 };
 
 } // namespace nb

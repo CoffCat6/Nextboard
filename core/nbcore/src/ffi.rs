@@ -427,11 +427,24 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
             let core = crate::core::Core::get()?;
             Ok(serde_json::to_value(core.settings()?)?)
         }
+        // 当前生效的数据目录(默认目录或设置的自定义目录)。宿主启动时取一次,
+        // 用于定位 blobs 目录与面板的 file:// 图片 URL。
+        "data_dir" => {
+            let core = crate::core::Core::get()?;
+            Ok(serde_json::json!({ "path": &core.effective_dir }))
+        }
         "save_settings" => {
             let core = crate::core::Core::get()?;
             let settings: crate::settings::Settings = serde_json::from_value(req.clone())
                 .map_err(|err| AppError::InvalidInput(format!("设置字段非法: {err}")))?;
             settings.validate()?;
+            // 自定义数据目录变更:写待迁移标记,下次启动搬迁 db + blobs 到新目录
+            // (settings.rs::take_pending_move;源目录保留,删除旧数据由用户手动做)。
+            let current = core.settings()?;
+            if settings.data_dir.trim() != current.data_dir.trim() {
+                let source = crate::settings::effective_data_dir(&current, &core.default_dir);
+                crate::settings::write_pending_move(&core.default_dir, &source)?;
+            }
             core.set_settings(settings)?;
             Ok(serde_json::Value::Null)
         }

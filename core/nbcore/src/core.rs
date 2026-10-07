@@ -67,6 +67,8 @@ pub struct Core {
     pub db: Db,
     /// 图片文件目录(`<数据目录>/blobs`)。
     pub blobs_dir: PathBuf,
+    /// 当前生效的数据目录(设置里启用自定义目录时与 default_dir 不同)。
+    pub effective_dir: PathBuf,
     /// 默认数据目录(迁移标记所在处)。
     pub default_dir: PathBuf,
     settings: RwLock<Settings>,
@@ -96,6 +98,7 @@ impl Core {
         CORE.set(Core {
             db: Db(Mutex::new(db)),
             blobs_dir,
+            effective_dir: data_dir,
             default_dir: config.data_dir,
             settings: RwLock::new(loaded),
         })

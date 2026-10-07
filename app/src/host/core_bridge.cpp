@@ -63,6 +63,18 @@ bool CoreBridge::init(bool /*startHidden*/, QString* error) {
         return false;
     }
     m_initialized = true;
+
+    // 生效数据目录:设置里可能启用了自定义目录(与默认目录不同)。
+    // blobs 绝对路径、面板 file:// URL 都以它为准;查询失败回退默认目录。
+    m_effectiveDataDir = dataDir;
+    if (m_callFn) {
+    const QJsonObject resp = call("data_dir");
+    const QString path = resp.value("data").toObject().value("path").toString();
+    if (resp.value("ok").toBool() && !path.isEmpty()) {
+        m_effectiveDataDir = path;
+        qInfo() << "bridge: effective data dir =" << m_effectiveDataDir;
+    }
+    }
     return true;
 }
 
@@ -113,7 +125,8 @@ void CoreBridge::setNotifyHwnd(HWND hwnd) {
 }
 
 QString CoreBridge::blobsDirAbs() {
-    return instance().m_dataDir + "/blobs";
+    // 生效目录:自定义数据目录启用后,默认目录下没有 blobs
+    return instance().m_effectiveDataDir + "/blobs";
 }
 
 QImage CoreBridge::captureMonitor(unsigned index) {

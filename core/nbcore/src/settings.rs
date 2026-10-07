@@ -1447,4 +1447,84 @@ mod tests {
         assert!(with("POST", "a[0").validate().is_err());
         assert!(with("POST", "").validate().is_err());
     }
+
+    #[test]
+    fn effective_data_dir_prefers_custom_and_falls_back_to_default() {
+        let default_dir = PathBuf::from("C:/default");
+        let mut settings = Settings::default();
+        assert_eq!(
+            effective_data_dir(&settings, &default_dir),
+            default_dir,
+            "未设置自定义目录时应使用默认目录"
+        );
+        // 空白串等价于未设置(与 validate 的 trim 口径一致)
+        settings.data_dir = "   ".into();
+        assert_eq!(effective_data_dir(&settings, &default_dir), default_dir);
+        settings.data_dir = " D:/custom ".into();
+        assert_eq!(
+            effective_data_dir(&settings, &default_dir),
+            PathBuf::from("D:/custom"),
+            "自定义目录应去首尾空白后生效"
+        );
+    }
+
+    #[test]
+    fn pending_move_copies_db_and_blobs_to_target_then_clears_marker() {
+        let root = std::env::temp_dir().join(format!(
+            "nb_settings_test_{}_{}",
+            std::process::id(),
+            crate::now_ms()
+        ));
+        let default_dir = root.join("default");
+        let source = root.join("source");
+        let target = root.join("target");
+        for dir in [&default_dir, &source] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(source.join("clipboard.db"), b"db-bytes").unwrap();
+        std::fs::create_dir_all(source.join("blobs/sub")).unwrap();
+        std::fs::write(source.join("blobs/a.png"), b"png").unwrap();
+        std::fs::write(source.join("blobs/sub/b.png"), b"png2").unwrap();
+
+        write_pending_move(&default_dir, &source).unwrap();
+        assert!(default_dir.join(DATA_MOVE_MARKER).exists());
+
+        take_pending_move(&default_dir, &target);
+        assert_eq!(
+            std::fs::read(target.join("clipboard.db")).unwrap(),
+            b"db-bytes",
+            "数据库文件应被搬迁"
+        );
+        assert_eq!(
+            std::fs::read(target.join("blobs/sub/b.png")).unwrap(),
+            b"png2",
+            "blobs 子目录应递归搬迁"
+        );
+        assert!(!default_dir.join(DATA_MOVE_MARKER).exists(), "标记应清除");
+        // 源目录保留(迁移不删数据,回退靠它)
+        assert!(source.join("clipboard.db").exists());
+
+        // 目标已有数据时不覆盖:再写标记,新 target 内容应保持不变
+        std::fs::write(default_dir.join(DATA_MOVE_MARKER), source.to_string_lossy().as_bytes())
+            .unwrap();
+        std::fs::write(target.join("clipboard.db"), b"newer").unwrap();
+        take_pending_move(&default_dir, &target);
+        assert_eq!(
+            std::fs::read(target.join("clipboard.db")).unwrap(),
+            b"newer",
+            "目标已有数据库时不得覆盖"
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_relative_data_dir() {
+        let mut settings = Settings::default();
+        assert!(settings.validate().is_ok(), "空 = 默认目录,合法");
+        settings.data_dir = "relative/path".into();
+        assert!(settings.validate().is_err(), "相对路径应被拒绝");
+        settings.data_dir = "D:/absolute".into();
+        assert!(settings.validate().is_ok());
+    }
 }

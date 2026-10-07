@@ -3,3 +3,4 @@ app/build
 build
 core/target
 .workbuddy-ai
+/data

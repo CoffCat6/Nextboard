@@ -22,6 +22,9 @@ AppDrawer {
     /// 当前取色目标("" / "bg" / "color")——两个颜色字段共用一个色板弹层。
     property string paletteTarget: ""
 
+    /// 数据目录是否被改过(改动需重启生效,保存后要显式提示,不能混入静默自动保存)。
+    property bool dataDirDirty: false
+
     /// 改动去抖后自动落盘(不再有底部「保存」按钮)。
     /// 各控件只接**用户操作**信号(valueModified / clicked / textEdited / activated),
     /// 因此加载时回填值不会误触发保存,也就不需要 loading 守卫。
@@ -187,6 +190,8 @@ AppDrawer {
         autoConfirmCheck.checked = s.regionAutoConfirm === true
         rightClickCancelCheck.checked = s.regionRightClickCancel === true
         themeCombo.currentIndex = s.theme === "light" ? 1 : s.theme === "dark" ? 2 : 0
+        dataDirInput.text = s.dataDir || ""
+        root.dataDirDirty = false
 
         pinOpacity.value = s.pinDefaultOpacity > 0 ? s.pinDefaultOpacity : 100
         pinDoubleClick.checked = s.pinDoubleclickClose === true
@@ -247,6 +252,7 @@ AppDrawer {
         s.regionAutoConfirm = autoConfirmCheck.checked
         s.regionRightClickCancel = rightClickCancelCheck.checked
         s.theme = ["system", "light", "dark"][themeCombo.currentIndex]
+        s.dataDir = dataDirInput.text.trim()
 
         s.pinDefaultOpacity = pinOpacity.value
         s.pinDoubleclickClose = pinDoubleClick.checked
@@ -294,6 +300,11 @@ AppDrawer {
         statusLabel.text = resp.ok ? "已保存" : "保存失败:" + errText(resp)
         statusLabel.isError = !resp.ok
         if (resp.ok) {
+            if (root.dataDirDirty) {
+                statusLabel.text = "已保存。数据目录将在下次启动时生效(数据库与图片自动迁移)"
+                statusLabel.isError = false
+                root.dataDirDirty = false
+            }
             Core.applyTheme(s.theme)   // 幂等:主题没变时不会重刷
             // 只有快捷键真的改过才重新注册 —— 每次自动保存都注销/重注册一遍会留下
             // 短暂的空窗,期间按热键会丢。
@@ -385,6 +396,31 @@ AppDrawer {
                 // 切换即生效(不必等保存),给用户即时反馈
                 onActivated: {
                     Core.applyTheme(["system", "light", "dark"][currentIndex])
+                    root.scheduleSave()
+                }
+            }
+
+            // ---- 数据 ----
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.topMargin: 10
+                implicitHeight: 1
+                color: Theme.border
+            }
+            Label { text: "数据"; font.pixelSize: 14; font.bold: true; color: Theme.text }
+            Label {
+                Layout.fillWidth: true
+                text: "自定义数据目录(留空 = 默认位置)。变更后重启应用生效:数据库与图片自动迁移到新目录,原目录数据保留。"
+                color: Theme.muted
+                font.pixelSize: 11
+                wrapMode: Text.WrapAnywhere
+            }
+            TextField {
+                id: dataDirInput
+                Layout.fillWidth: true
+                placeholderText: "D:\\Data\\Nextboard"
+                onTextEdited: {
+                    root.dataDirDirty = true
                     root.scheduleSave()
                 }
             }
