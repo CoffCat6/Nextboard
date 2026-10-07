@@ -16,6 +16,9 @@ AppDrawer {
     readonly property var providers: ["openai", "microsoft", "custom"]
     readonly property string provider: providers[Math.max(0, providerCombo.currentIndex)]
 
+    /// 代理是否处于手动配置模式(控制 manual 字段组的可见性)。
+    readonly property bool isProxyManual: proxyModeCombo.currentIndex === 2
+
     /// 快捷键是否被改过 —— 只有改过才重新注册,避免每次自动保存都注销/重注册一遍。
     property bool hotkeysDirty: false
 
@@ -232,7 +235,17 @@ AppDrawer {
         cuPath.text = cu.responsePath || ""
 
         timeoutSpin.value = s.translateTimeoutSecs > 0 ? s.translateTimeoutSecs : 30
+        const proxyMode = (s.proxy && s.proxy.mode) || "system"
+        proxyModeCombo.currentIndex = proxyMode === "none" ? 1 : proxyMode === "manual" ? 2 : 0
+        const pm = (s.proxy && s.proxy.manual) || {}
+        proxyKindCombo.currentIndex = pm.kind === "socks5" ? 1 : 0
+        proxyHost.text = pm.host || ""
+        proxyPort.value = pm.port > 0 ? pm.port : 0
+        proxyUser.text = pm.username || ""
+        proxyPassword.text = pm.password || ""
+        proxyBypass.text = pm.bypass || ""
         probeLabel.text = ""
+        proxyProbeLabel.text = ""
         statusLabel.text = ""
     }
 
@@ -296,6 +309,18 @@ AppDrawer {
 
         s.translateTimeoutSecs = timeoutSpin.value
 
+        s.proxy = {
+            mode: ["system", "none", "manual"][proxyModeCombo.currentIndex],
+            manual: {
+                kind: proxyKindCombo.currentIndex === 1 ? "socks5" : "http",
+                host: proxyHost.text.trim(),
+                port: proxyPort.value,
+                username: proxyUser.text,
+                password: proxyPassword.text,
+                bypass: proxyBypass.text
+            }
+        }
+
         const resp = Core.call("save_settings", s)
         statusLabel.text = resp.ok ? "已保存" : "保存失败:" + errText(resp)
         statusLabel.isError = !resp.ok
@@ -314,6 +339,14 @@ AppDrawer {
             }
             Entries.refreshNow()
         }
+    }
+
+    function probeProxy() {
+        // 先保存再探测:proxy_probe 读的是已保存配置,不保存则刚填的代理不参与
+        root.save()
+        proxyProbeLabel.text = "测试中…"
+        proxyProbeLabel.isError = false
+        Core.probeProxy()
     }
 
     function probe() {
@@ -408,6 +441,19 @@ AppDrawer {
                 color: Theme.border
             }
             Label { text: "数据"; font.pixelSize: 14; font.bold: true; color: Theme.text }
+            CheckBox {
+                id: autoStartCheck
+                text: "开机自启(写入当前用户注册表 Run 键)"
+                checked: Core.autoStartEnabled()
+                onClicked: {
+                    // 注册表操作立即生效并回读实际结果,失败时还原勾选态
+                    if (Core.setAutoStart(checked)) {
+                        checked = Core.autoStartEnabled()
+                    } else {
+                        checked = !checked
+                    }
+                }
+            }
             Label {
                 Layout.fillWidth: true
                 text: "自定义数据目录(留空 = 默认位置)。变更后重启应用生效:数据库与图片自动迁移到新目录,原目录数据保留。"
@@ -761,6 +807,87 @@ AppDrawer {
                 wrapMode: Text.WrapAnywhere
             }
 
+            // ---- 网络与代理 ----
+            // core 的 proxy 校验/分派/proxy_probe 早已就绪,这里只补 UI 入口。
+            // manual 字段始终提交,与 core 一致:仅 mode=manual 时才参与校验与生效。
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.topMargin: 10
+                implicitHeight: 1
+                color: Theme.border
+            }
+            Label { text: "网络与代理"; font.pixelSize: 14; font.bold: true; color: Theme.text }
+            Label { text: "代理模式(作用于翻译等网络请求)"; color: Theme.muted; font.pixelSize: 12 }
+            ComboBox {
+                id: proxyModeCombo
+                Layout.fillWidth: true
+                model: ["跟随系统", "直连(不使用代理)", "手动配置"]
+                onActivated: root.scheduleSave()
+            }
+            Label { text: "协议类型"; visible: root.isProxyManual; color: Theme.muted; font.pixelSize: 12 }
+            ComboBox {
+                id: proxyKindCombo
+                visible: root.isProxyManual
+                Layout.fillWidth: true
+                model: ["HTTP", "SOCKS5"]
+                onActivated: root.scheduleSave()
+            }
+            Label { text: "服务器地址"; visible: root.isProxyManual; color: Theme.muted; font.pixelSize: 12 }
+            TextField {
+                id: proxyHost
+                visible: root.isProxyManual
+                Layout.fillWidth: true
+                placeholderText: "127.0.0.1"
+                onTextEdited: root.scheduleSave()
+            }
+            Label { text: "端口"; visible: root.isProxyManual; color: Theme.muted; font.pixelSize: 12 }
+            SpinBox {
+                id: proxyPort
+                visible: root.isProxyManual
+                Layout.fillWidth: true
+                from: 0; to: 65535
+                editable: true
+                onValueModified: root.scheduleSave()
+            }
+            Label { text: "用户名(可选)"; visible: root.isProxyManual; color: Theme.muted; font.pixelSize: 12 }
+            TextField {
+                id: proxyUser
+                visible: root.isProxyManual
+                Layout.fillWidth: true
+                onTextEdited: root.scheduleSave()
+            }
+            Label { text: "密码(可选)"; visible: root.isProxyManual; color: Theme.muted; font.pixelSize: 12 }
+            TextField {
+                id: proxyPassword
+                visible: root.isProxyManual
+                Layout.fillWidth: true
+                echoMode: TextInput.Password
+                onTextEdited: root.scheduleSave()
+            }
+            // SOCKS5 路径(ureq)不支持绕过列表,仅 HTTP 显示该字段(与 core 注释一致)
+            Label { text: "绕过列表(仅 HTTP,分号分隔)"; visible: root.isProxyManual && proxyKindCombo.currentIndex === 0; color: Theme.muted; font.pixelSize: 12 }
+            TextField {
+                id: proxyBypass
+                visible: root.isProxyManual && proxyKindCombo.currentIndex === 0
+                Layout.fillWidth: true
+                placeholderText: "localhost;127.0.0.1;*.internal"
+                onTextEdited: root.scheduleSave()
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                Button { text: "测试代理链路"; onClicked: root.probeProxy() }
+                Item { Layout.fillWidth: true }
+            }
+            Label {
+                id: proxyProbeLabel
+                property bool isError: false
+                Layout.fillWidth: true
+                color: isError ? Theme.danger : Theme.muted
+                font.pixelSize: 12
+                wrapMode: Text.WrapAnywhere
+            }
+
             // 改动即时保存(去抖 400ms),故不再有「保存 / 关闭」按钮 ——
             // 关闭抽屉走标题栏的 ✕。状态行只用于反馈结果(尤其是校验失败)。
             Label {
@@ -787,6 +914,18 @@ AppDrawer {
             const d = resp.data || {}
             probeLabel.text = (d.available ? "✓ " : "✗ ") + (d.message || "")
             probeLabel.isError = !d.available
+        }
+        function onProxyProbeFinished(resp) {
+            if (!resp.ok) {
+                proxyProbeLabel.text = "测试失败:" + root.errText(resp)
+                proxyProbeLabel.isError = true
+                return
+            }
+            const d = resp.data || {}
+            const head = d.detail ? d.detail + " · " : ""
+            proxyProbeLabel.text = (d.ok ? "✓ " : "✗ ") + head
+                    + (d.ok ? d.elapsedMs + " ms" : (d.error || "链路不可用"))
+            proxyProbeLabel.isError = !d.ok
         }
     }
 }

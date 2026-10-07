@@ -27,6 +27,7 @@ qt_policy(SET QTP0004 NEW)
 add_executable(nextboard WIN32
     src/main.cpp
     src/host/single_instance.cpp
+    src/host/auto_start.cpp
     src/host/tray.cpp
     src/host/hotkeys.cpp
     src/host/core_bridge.cpp

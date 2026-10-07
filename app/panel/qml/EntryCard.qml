@@ -18,6 +18,9 @@ Rectangle {
     required property bool pinned
     required property string source
 
+    /// 文本条目是否展开显示全文(长文本默认折叠 4 行)。
+    property bool textExpanded: false
+
     /// 请求翻译本条内容(翻译抽屉位于 Main.qml 作用域,跨组件经信号上抛)。
     signal translateRequested(string text)
 
@@ -91,6 +94,21 @@ Rectangle {
             }
         }
         MenuItem {
+            text: "打开"
+            visible: root.kind === "file"
+            onTriggered: Core.openEntry(root.entryId)
+        }
+        MenuItem {
+            text: "复制路径"
+            visible: root.kind === "file"
+            onTriggered: {
+                // 显式复制路径文本:与「复制文件」(CF_HDROP)区分开
+                const resp = Core.call("copy_text_to_clipboard", { text: root.text })
+                if (resp.ok) panelWindow.hidePanel()
+                else Core.showToast("复制失败:" + (resp.error ? resp.error.message : ""))
+            }
+        }
+        MenuItem {
             text: "翻译"
             visible: root.kind !== "file"
             onTriggered: root.requestTranslate()
@@ -104,6 +122,11 @@ Rectangle {
             text: root.pinned ? "取消固定" : "固定"
             onTriggered: Entries.togglePin(root.entryId, !root.pinned)
         }
+        MenuItem {
+            text: "定位文件"
+            visible: root.kind === "file"
+            onTriggered: Core.revealEntry(root.entryId)
+        }
         MenuSeparator {}
         MenuItem {
             text: "删除"
@@ -112,6 +135,18 @@ Rectangle {
                 if (resp.ok) Core.showToast("已删除")
                 else Core.showToast("删除失败:" + (resp.error ? resp.error.message : ""))
             }
+        }
+    }
+
+    // 文件条目单击复制的延迟器:双击的第一击同样会触发 onClicked,若不延迟一拍,
+    // 双击会先执行一次复制(还隐藏面板)。300ms 内来了第二击则取消复制、改为打开。
+    Timer {
+        id: fileCopyTimer
+        interval: 300
+        onTriggered: {
+            const resp = Entries.copyEntry(root.entryId)
+            if (resp.ok) panelWindow.hidePanel()
+            else Core.showToast("复制失败:" + (resp.error ? resp.error.message : ""))
         }
     }
 
@@ -124,9 +159,19 @@ Rectangle {
         // (Sciter 时代需宿主手动转发滚轮进引擎;QML 化后由场景图直接派发,
         //  此处仅固定语义、防后续给卡片加 onWheel 时误吞滚动。)
         onWheel: function(wheel) { wheel.accepted = false }
+        onDoubleClicked: function(mouse) {
+            // 双击文件 = 用系统默认程序打开;取消挂起的单击复制
+            if (mouse.button === Qt.LeftButton && root.kind === "file") {
+                fileCopyTimer.stop()
+                Core.openEntry(root.entryId)
+            }
+        }
         onClicked: function(mouse) {
             if (mouse.button === Qt.RightButton) {
                 menu.popup()
+            } else if (root.kind === "file") {
+                // 单击 = 复制(经 fileCopyTimer 延迟一拍);双击 = 打开文件
+                fileCopyTimer.restart()
             } else {
                 const resp = Entries.copyEntry(root.entryId)
                 // 复制成功即收起面板,便于直接粘贴到目标应用(第一代 use-entries.copy 语义)
@@ -174,6 +219,16 @@ Rectangle {
             }
             Item { Layout.fillWidth: true }
 
+            // 展开/收起:仅文本被 4 行截断时显示(截断与否由 textBody 内部判定)
+            CardAction {
+                Layout.alignment: Qt.AlignVCenter
+                visible: root.kind === "text"
+                         && bodyLoader.item !== null
+                         && bodyLoader.item.truncated === true
+                label: root.textExpanded ? "收起" : "展开"
+                onTriggered: root.textExpanded = !root.textExpanded
+            }
+
             // ---- 右下角快捷按钮 ----
             // 贴图:图片直贴;文本渲染成位图后贴(文件条目无可贴内容,故隐藏)
             CardAction {
@@ -205,14 +260,54 @@ Rectangle {
 
     Component {
         id: textBody
-        Text {
+        Column {
+            id: textWrap
             width: parent ? parent.width : 0
-            text: root.text || root.preview || ""
-            color: Theme.text
-            font.pixelSize: 13
-            wrapMode: Text.WrapAnywhere
-            maximumLineCount: 4
-            elide: Text.ElideRight
+
+            /// 折叠态是否被省略号截断(决定"展开"按钮是否显示;
+            /// Text 的布局在不可见时也会计算,truncated 不会失效)
+            readonly property bool truncated: collapsedText.truncated
+
+            // 折叠态:最多 4 行,超出省略号
+            Text {
+                id: collapsedText
+                visible: !root.textExpanded
+                width: parent.width
+                text: root.text || root.preview || ""
+                color: Theme.text
+                font.pixelSize: 13
+                wrapMode: Text.WrapAnywhere
+                maximumLineCount: 4
+                elide: Text.ElideRight
+            }
+
+            // 展开态:完整文本;超过 320px 高度改为内部滚动。
+            // 用只读 TextEdit 而非 Text:支持选中部分文字手动复制
+            // (TextEdit 是交互项,点击它不会落到卡片的复制 MouseArea 上)
+            Flickable {
+                visible: root.textExpanded
+                width: parent.width
+                height: Math.min(fullEdit.contentHeight + 12, 320)
+                clip: true
+                contentWidth: width
+                contentHeight: fullEdit.contentHeight + 12
+                boundsBehavior: Flickable.StopAtBounds
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                TextEdit {
+                    id: fullEdit
+                    x: 6
+                    width: textWrap.width - 12
+                    text: root.text || ""
+                    readOnly: true
+                    wrapMode: TextEdit.WrapAnywhere
+                    color: Theme.text
+                    font.pixelSize: 13
+                    selectByMouse: true
+                    selectionColor: Theme.accent
+                    selectedTextColor: Theme.accentText
+                }
+            }
         }
     }
 

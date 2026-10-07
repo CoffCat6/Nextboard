@@ -2,6 +2,7 @@
 
 #include "capture/capture_session.hpp"
 #include "editor/editor_window.hpp"
+#include "host/auto_start.hpp"
 #include "host/core_bridge.hpp"
 #include "pin/pin_window.hpp"
 
@@ -10,6 +11,11 @@
 #include <QJsonArray>
 #include <QJsonValue>
 #include <QColor>
+#include <QDir>
+#include <QDesktopServices>
+#include <QFileInfo>
+#include <QUrl>
+#include <QProcess>
 #include <QGuiApplication>
 #include <QPalette>
 #include <QStyleHints>
@@ -202,6 +208,29 @@ void CoreFacade::probeTranslate(const QString& provider) {
     QThreadPool::globalInstance()->start(job);
 }
 
+void CoreFacade::probeProxy() {
+    auto* job = new AsyncCall;
+    job->method = "proxy_probe";
+    job->setAutoDelete(true);
+    job->onDone = [this](const QJsonObject& resp) {
+        emit proxyProbeFinished(jsonToVariant(resp).toMap());
+    };
+    QThreadPool::globalInstance()->start(job);
+}
+
+bool CoreFacade::autoStartEnabled() {
+    return auto_start::enabled();
+}
+
+bool CoreFacade::setAutoStart(bool enable) {
+    if (!auto_start::setEnabled(enable)) {
+        emit toastMessage(enable ? QStringLiteral("设置开机自启失败(注册表写入被拒绝)")
+                                 : QStringLiteral("关闭开机自启失败(注册表删除被拒绝)"));
+        return false;
+    }
+    return true;
+}
+
 void CoreFacade::processCapture(const QString& id, const QString& mode) {
     auto* job = new AsyncCall;
     job->method = "ocr_entry";
@@ -368,6 +397,61 @@ void CoreFacade::editEntry(const QString& id) {
     editor->show();
     editor->raise();
     editor->activateWindow();
+}
+
+void CoreFacade::revealEntry(const QString& id) {
+    const QVariantMap resp = call("get_entry", {{"id", id}});
+    if (!resp.value("ok").toBool()) {
+        emit toastMessage(QStringLiteral("读取条目失败"));
+        return;
+    }
+    const QVariantMap entry = resp.value("data").toMap();
+    if (entry.value("kind").toString() != QLatin1String("file")) {
+        emit toastMessage(QStringLiteral("只有文件条目可以定位文件"));
+        return;
+    }
+    const QVariantList paths = entry.value("filePaths").toList();
+    if (paths.isEmpty()) {
+        emit toastMessage(QStringLiteral("该条目没有文件路径"));
+        return;
+    }
+    // /select, 后必须接未加引号的路径(资源管理器的怪癖),含空格路径整体仍可工作
+    const QString dir = QFileInfo(paths.first().toString()).absolutePath();
+    const QString file = QDir::toNativeSeparators(paths.first().toString());
+    if (QProcess::startDetached(QStringLiteral("explorer.exe"),
+                                {QStringLiteral("/select,"), file})) {
+        emit toastMessage(QStringLiteral("已在资源管理器中显示"));
+    } else {
+        // 兜底:仅打开所在文件夹
+        QProcess::startDetached(QStringLiteral("explorer.exe"),
+                                {QDir::toNativeSeparators(dir)});
+    }
+}
+
+void CoreFacade::openEntry(const QString& id) {
+    const QVariantMap resp = call("get_entry", {{"id", id}});
+    if (!resp.value("ok").toBool()) {
+        emit toastMessage(QStringLiteral("读取条目失败"));
+        return;
+    }
+    const QVariantMap entry = resp.value("data").toMap();
+    if (entry.value("kind").toString() != QLatin1String("file")) {
+        emit toastMessage(QStringLiteral("只有文件条目可以打开"));
+        return;
+    }
+    const QVariantList paths = entry.value("filePaths").toList();
+    if (paths.isEmpty()) {
+        emit toastMessage(QStringLiteral("该条目没有文件路径"));
+        return;
+    }
+    // 打开全部路径(一次复制多个文件时逐个打开);单个打开失败仅提示该文件
+    for (const QVariant& p : paths) {
+        const QUrl url = QUrl::fromLocalFile(p.toString());
+        if (!QDesktopServices::openUrl(url)) {
+            emit toastMessage(QStringLiteral("打开失败:%1").arg(p.toString()));
+        }
+    }
+    emit toastMessage(QStringLiteral("已用系统默认程序打开"));
 }
 
 } // namespace nb

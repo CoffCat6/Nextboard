@@ -834,9 +834,13 @@ pub fn read_text_from_clipboard() -> AppResult<Option<String>> {
 
 /// 把文件路径列表写入系统剪贴板(CF_HDROP,带打开重试)。
 /// 注:clipboard-win 5.4 的高层 `set(formats::FileList, …)` 泛型推导有缺陷
-/// (Setter<[T]> unsized),直接用 raw::set_file_list —— 打开重试由 Clipboard guard 承担。
+/// (Setter<[T]> unsized),直接用 raw::set_file_list —— 打开重试由 Clipboard guard 承担;
+/// set_file_list 自身不清剪贴板(NoClear),写入前必须 raw::empty(),
+/// 否则旧 CF_UNICODETEXT(如路径文本)残留,粘贴目标按优先级取到文本,
+/// 表现为"复制文件,粘出来的是路径"。文本/图片走的高层 set 是 DoClear,无此问题。
 pub fn write_files_to_clipboard(paths: &[String]) -> AppResult<()> {
     let _clip = clipboard_win::Clipboard::new_attempts(10)?;
+    clipboard_win::raw::empty()?;
     clipboard_win::raw::set_file_list(paths)?;
     Ok(())
 }

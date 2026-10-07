@@ -65,6 +65,14 @@ public:
     /// 必须异步 —— 探测会真发一次请求,同步调用会把界面冻住整个超时时长。
     Q_INVOKABLE void probeTranslate(const QString& provider);
 
+    /// 测试代理链路(网络,异步:线程池执行,完成发 proxyProbeFinished)。
+    Q_INVOKABLE void probeProxy();
+
+    /// 开机自启当前状态(注册表 Run 键)。
+    Q_INVOKABLE bool autoStartEnabled();
+    /// 启用/停用开机自启。返回是否成功;失败时 toast 提示。
+    Q_INVOKABLE bool setAutoStart(bool enable);
+
     /// OCR(慢):线程池执行,完成发 ocrFinished。等价于 processCapture(id, "ocr")。
     Q_INVOKABLE void ocrEntry(const QString& id);
 
@@ -83,6 +91,10 @@ public:
     Q_INVOKABLE void pinEntry(const QString& id);
     /// 编辑图片条目:用编辑器打开,「完成」后入库 + 写剪贴板(对齐第一代 edit_entry)。
     Q_INVOKABLE void editEntry(const QString& id);
+    /// 定位文件:在资源管理器中打开所在文件夹并选中(仅文件条目有实际语义)。
+    Q_INVOKABLE void revealEntry(const QString& id);
+    /// 用系统默认程序打开文件条目(左键点击文件的默认行为,对齐第一代 open)。
+    Q_INVOKABLE void openEntry(const QString& id);
 
     /// 请求打开翻译抽屉(空文本 = 手动输入)。QML 订阅 translatePrefill 打开抽屉,
     /// 因此它同时服务「热键打开翻译」与「截图翻译完成后回填」两条链路。
@@ -99,6 +111,7 @@ signals:
     void translateFinished(QVariantMap resp);
     /// 翻译服务探测结果(provider/available/message)。
     void translateProbeFinished(QVariantMap resp);
+    void proxyProbeFinished(QVariantMap resp);
     void ocrFinished(QVariantMap resp);
     void toastMessage(const QString& message);
     void countsChanged();
