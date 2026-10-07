@@ -1,4 +1,5 @@
-// 翻译抽屉:原文 / 目标语言 / 译文,走 Core.translateText(线程池异步,不卡 UI)。
+// 翻译抽屉(§22):原文(Source)→ 译文(Target)两块 Panel,中置语言与动作行;
+// 走 Core.translateText(线程池异步,不卡 UI),结果经 translateFinished 回投。
 import QtQuick
 import QtQuick.Controls.Basic
 import QtQuick.Layouts
@@ -47,11 +48,16 @@ AppDrawer {
         if (!text) return
         statusLabel.text = "翻译中…"
         statusLabel.isError = false
+        root.translating = true
         Core.translateText(text, "", targetLang.currentValue)
     }
 
+    /// 翻译进行中:结果区显示细进度条(§35,不用大 Spinner)。
+    /// 声明在函数之后无碍——QML 属性初始化先于任何函数调用。
+    property bool translating: false
+
     contentItem: ColumnLayout {
-        spacing: 4
+        spacing: Theme.metrics.spacingXs
 
         RowLayout {
             Layout.fillWidth: true
@@ -63,27 +69,56 @@ AppDrawer {
             ToolButton { text: "✕"; onClicked: root.close() }
         }
 
-        TextArea {
-            id: input
+        // ---- 原文 Panel(§22:Surface + Border + 8px 圆角) ----
+        Rectangle {
             Layout.fillWidth: true
-            Layout.preferredHeight: 84
-            placeholderText: "输入或粘贴要翻译的文本…"
-            wrapMode: TextArea.WrapAnywhere
-            Keys.onPressed: function(event) {
-                if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
-                        && (event.modifiers & Qt.ControlModifier)) {
-                    root.doTranslate()
-                    event.accepted = true
+            Layout.preferredHeight: 96
+            radius: Theme.metrics.radiusCard
+            color: Theme.colors.surface
+            border.color: input.activeFocus ? Theme.colors.accent : Theme.colors.border
+            border.width: Theme.metrics.borderWidth
+            Behavior on border.color { ColorAnimation { duration: Theme.animation.fast } }
+
+            TextArea {
+                id: input
+                anchors.fill: parent
+                anchors.margins: Theme.metrics.spacingSm
+                background: null
+                placeholderText: "输入或粘贴要翻译的文本…"
+                placeholderTextColor: Theme.colors.textTertiary
+                color: Theme.colors.textPrimary
+                wrapMode: TextArea.WrapAnywhere
+                Keys.onPressed: function(event) {
+                    if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+                            && (event.modifiers & Qt.ControlModifier)) {
+                        root.doTranslate()
+                        event.accepted = true
+                    }
                 }
             }
         }
 
         RowLayout {
-            Layout.fillWidth: true
-            Label { text: "目标语言"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
+            Layout.alignment: Qt.AlignHCenter
+            spacing: Theme.metrics.spacingSm
+
+            Text {
+                text: "自动检测"
+                color: Theme.colors.textTertiary
+                font.pixelSize: Theme.metrics.fontCaption
+                Layout.alignment: Qt.AlignVCenter
+            }
+            // 流向提示(§22 的 Source → Target;源语言固定 auto,不做交换)
+            Text {
+                text: "→"
+                color: Theme.colors.textTertiary
+                font.pixelSize: Theme.metrics.fontBody
+                Layout.alignment: Qt.AlignVCenter
+            }
             ComboBox {
                 id: targetLang
-                Layout.preferredWidth: 140
+                Layout.preferredWidth: 130
+                Layout.preferredHeight: Theme.metrics.controlHeight
                 textRole: "label"
                 valueRole: "code"
                 model: [
@@ -94,45 +129,72 @@ AppDrawer {
                 ]
                 onActivated: root.saveTargetLang(currentValue)
             }
-            Button { text: "翻译"; highlighted: true; onClicked: root.doTranslate() }
+            Button {
+                text: "翻译"
+                highlighted: true
+                Layout.preferredHeight: Theme.metrics.controlHeight
+                onClicked: root.doTranslate()
+            }
         }
 
         Label {
             id: statusLabel
             property bool isError: false
             Layout.fillWidth: true
-            color: isError ? Theme.colors.error : Theme.colors.textSecondary
+            color: isError ? Theme.colors.error : Theme.colors.textTertiary
             font.pixelSize: Theme.metrics.fontCaption
             wrapMode: Text.WrapAnywhere
         }
 
+        // ---- 译文 Panel(§23:结果区独立更新) ----
         Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.minimumHeight: 60
-            color: Theme.colors.surfaceSecondary
+            color: Theme.colors.surface
             border.color: Theme.colors.border
             border.width: Theme.metrics.borderWidth
             radius: Theme.metrics.radiusCard
 
             ScrollView {
                 anchors.fill: parent
-                anchors.margins: 8
+                anchors.margins: Theme.metrics.spacingSm
                 TextArea {
                     id: output
                     readOnly: true
                     wrapMode: TextArea.WrapAnywhere
                     color: Theme.colors.textPrimary
+                    background: null
                     text: ""
+                }
+            }
+
+            // 空结果占位(§41:小字提示,非插画)
+            Column {
+                anchors.centerIn: parent
+                visible: output.text === "" && !root.translating
+                spacing: Theme.metrics.spacingXs
+                Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: "译文"
+                    color: Theme.colors.textTertiary
+                    font.pixelSize: Theme.metrics.fontCaption
+                }
+                Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: "输入原文后点击翻译,或使用截图取字"
+                    color: Theme.colors.textDisabled
+                    font.pixelSize: Theme.metrics.fontMicro + 1
                 }
             }
         }
 
         RowLayout {
-            spacing: 8
+            spacing: Theme.metrics.spacingSm
             // 截图取字(F25 的取字分支):收起面板 → 框选 → OCR → 文本进剪贴板
             Button {
                 text: "截图取字"
+                Layout.preferredHeight: Theme.metrics.controlHeight
                 onClicked: {
                     root.close()
                     panelWindow.hidePanel()
@@ -141,6 +203,7 @@ AppDrawer {
             }
             Button {
                 text: "复制译文"
+                Layout.preferredHeight: Theme.metrics.controlHeight
                 enabled: output.text.length > 0
                 onClicked: {
                     const resp = Core.call("copy_text_to_clipboard", { text: output.text })
@@ -157,6 +220,7 @@ AppDrawer {
     Connections {
         target: Core
         function onTranslateFinished(resp) {
+            root.translating = false
             if (resp.ok) {
                 const data = resp.data
                 output.text = data && data.text ? data.text : ""

@@ -50,7 +50,7 @@ AppDrawer {
         property bool recording: false
         /// 录制完成、值真的变了才发(用于触发自动保存与热键重注册)。
         signal valueModified()
-        implicitHeight: 30
+        implicitHeight: Theme.metrics.controlHeight
 
         function keyName(key) {
             if (key >= Qt.Key_A && key <= Qt.Key_Z) return String.fromCharCode(key)
@@ -61,19 +61,20 @@ AppDrawer {
 
         Rectangle {
             anchors.fill: parent
-            radius: 6
-            color: Theme.surface2
-            border.width: 1
-            border.color: hk.recording ? Theme.accent : Theme.border
+            radius: Theme.metrics.radiusInput
+            color: Theme.colors.surfaceSecondary
+            border.width: Theme.metrics.borderWidth
+            border.color: hk.recording ? Theme.colors.accent : Theme.colors.border
+            Behavior on border.color { ColorAnimation { duration: Theme.animation.fast } }
             Text {
                 anchors.fill: parent
                 anchors.leftMargin: 8
                 anchors.rightMargin: 8
                 verticalAlignment: Text.AlignVCenter
                 elide: Text.ElideRight
-                font.pixelSize: 12
-                color: hk.recording ? Theme.accent
-                     : hk.value === "" ? Theme.muted : Theme.text
+                font.pixelSize: Theme.metrics.fontCaption
+                color: hk.recording ? Theme.colors.accent
+                     : hk.value === "" ? Theme.colors.textTertiary : Theme.colors.textPrimary
                 text: hk.recording ? "按下组合键…(Esc 取消)" : (hk.value || "未设置")
             }
         }
@@ -145,8 +146,8 @@ AppDrawer {
         ]
 
         columns: 6
-        rowSpacing: 4
-        columnSpacing: 4
+        rowSpacing: Theme.metrics.spacingXs
+        columnSpacing: Theme.metrics.spacingXs
         Repeater {
             model: grid.swatches
             delegate: Rectangle {
@@ -154,10 +155,11 @@ AppDrawer {
                     String(modelData).toLowerCase() === grid.current.toLowerCase()
                 implicitWidth: 24
                 implicitHeight: 24
-                radius: 3
+                radius: Theme.metrics.radiusBadge
                 color: modelData
-                border.width: isCurrent ? 2 : 1
-                border.color: isCurrent ? Theme.accent : Theme.border
+                border.width: isCurrent ? 2 : Theme.metrics.borderWidth
+                border.color: isCurrent ? Theme.colors.accent : Theme.colors.borderStrong
+                Behavior on border.color { ColorAnimation { duration: Theme.animation.fast } }
                 MouseArea {
                     anchors.fill: parent
                     cursorShape: Qt.PointingHandCursor
@@ -366,16 +368,19 @@ AppDrawer {
         ColumnLayout {
             id: form
             width: flick.width
-            spacing: 4
+            spacing: Theme.metrics.spacingXs
 
             RowLayout {
                 Layout.fillWidth: true
-                Label { text: "设置"; font.pixelSize: 15; font.bold: true; color: Theme.text }
+                Label {
+                    text: "设置"; font.pixelSize: Theme.metrics.fontPageTitle
+                    font.weight: Font.DemiBold; color: Theme.colors.textPrimary
+                }
                 Item { Layout.fillWidth: true }
                 ToolButton { text: "✕"; onClicked: root.close() }
             }
 
-            Label { text: "历史上限(条)"; color: Theme.muted; font.pixelSize: 12 }
+            Label { text: "历史上限(条)"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
             SpinBox {
                 id: historyLimit
                 Layout.fillWidth: true
@@ -384,7 +389,7 @@ AppDrawer {
                 onValueModified: root.scheduleSave()
             }
 
-            Label { text: "单张图片上限(MB)"; color: Theme.muted; font.pixelSize: 12 }
+            Label { text: "单张图片上限(MB)"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
             SpinBox {
                 id: maxImage
                 Layout.fillWidth: true
@@ -421,7 +426,7 @@ AppDrawer {
                 onClicked: root.scheduleSave()
             }
 
-            Label { text: "主题"; color: Theme.muted; font.pixelSize: 12 }
+            Label { text: "主题"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
             ComboBox {
                 id: themeCombo
                 Layout.fillWidth: true
@@ -433,14 +438,32 @@ AppDrawer {
                 }
             }
 
-            // ---- 数据 ----
-            Rectangle {
+            // ---- 分组:数据(§10 分组标题 + Border Subtle 分隔线) ----
+            component SectionDivider: Rectangle {
                 Layout.fillWidth: true
-                Layout.topMargin: 10
-                implicitHeight: 1
-                color: Theme.border
+                Layout.topMargin: Theme.metrics.spacingMd
+                implicitHeight: Theme.metrics.borderWidth
+                color: Theme.colors.border
             }
-            Label { text: "数据"; font.pixelSize: 14; font.bold: true; color: Theme.text }
+            component SectionTitle: Label {
+                font.pixelSize: Theme.metrics.fontSection
+                font.weight: Font.DemiBold
+                color: Theme.colors.textPrimary
+                Layout.topMargin: Theme.metrics.spacingXs
+            }
+            component FieldLabel: Label {
+                color: Theme.colors.textSecondary
+                font.pixelSize: Theme.metrics.fontCaption
+            }
+            component HintLabel: Label {
+                Layout.fillWidth: true
+                color: Theme.colors.textTertiary
+                font.pixelSize: Theme.metrics.fontMicro + 1
+                wrapMode: Text.WrapAnywhere
+            }
+
+            SectionDivider {}
+            SectionTitle { text: "数据" }
             CheckBox {
                 id: autoStartCheck
                 text: "开机自启(写入当前用户注册表 Run 键)"
@@ -454,12 +477,8 @@ AppDrawer {
                     }
                 }
             }
-            Label {
-                Layout.fillWidth: true
+            HintLabel {
                 text: "自定义数据目录(留空 = 默认位置)。变更后重启应用生效:数据库与图片自动迁移到新目录,原目录数据保留。"
-                color: Theme.muted
-                font.pixelSize: 11
-                wrapMode: Text.WrapAnywhere
             }
             TextField {
                 id: dataDirInput
@@ -472,15 +491,10 @@ AppDrawer {
             }
 
             // ---- 贴图 ----
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.topMargin: 10
-                implicitHeight: 1
-                color: Theme.border
-            }
-            Label { text: "贴图"; font.pixelSize: 14; font.bold: true; color: Theme.text }
+            SectionDivider {}
+            SectionTitle { text: "贴图" }
 
-            Label { text: "默认不透明度(%)"; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "默认不透明度(%)" }
             SpinBox {
                 id: pinOpacity
                 Layout.fillWidth: true
@@ -494,15 +508,15 @@ AppDrawer {
                 onClicked: root.scheduleSave()
             }
 
-            Label { text: "文本贴图 · 背景色(点色块展开色板)"; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "文本贴图 · 背景色(点色块展开色板)" }
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 6
                 Rectangle {
-                    implicitWidth: 34; implicitHeight: 22; radius: 4
-                    color: root.isHexColor(pinTextBg.text) ? pinTextBg.text : Theme.surface2
-                    border.color: root.paletteTarget === "bg" ? Theme.accent : Theme.border
-                    border.width: root.paletteTarget === "bg" ? 2 : 1
+                    implicitWidth: 34; implicitHeight: 22; radius: Theme.metrics.radiusBadge
+                    color: root.isHexColor(pinTextBg.text) ? pinTextBg.text : Theme.colors.surfaceSecondary
+                    border.color: root.paletteTarget === "bg" ? Theme.colors.accent : Theme.colors.border
+                    border.width: root.paletteTarget === "bg" ? 2 : Theme.metrics.borderWidth
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
@@ -527,15 +541,15 @@ AppDrawer {
                     root.scheduleSave()
                 }
             }
-            Label { text: "文本贴图 · 文字色(点色块展开色板)"; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "文本贴图 · 文字色(点色块展开色板)" }
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 6
                 Rectangle {
-                    implicitWidth: 34; implicitHeight: 22; radius: 4
-                    color: root.isHexColor(pinTextColor.text) ? pinTextColor.text : Theme.surface2
-                    border.color: root.paletteTarget === "color" ? Theme.accent : Theme.border
-                    border.width: root.paletteTarget === "color" ? 2 : 1
+                    implicitWidth: 34; implicitHeight: 22; radius: Theme.metrics.radiusBadge
+                    color: root.isHexColor(pinTextColor.text) ? pinTextColor.text : Theme.colors.surfaceSecondary
+                    border.color: root.paletteTarget === "color" ? Theme.colors.accent : Theme.colors.border
+                    border.width: root.paletteTarget === "color" ? 2 : Theme.metrics.borderWidth
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
@@ -559,7 +573,7 @@ AppDrawer {
                     root.scheduleSave()
                 }
             }
-            Label { text: "文本贴图 · 背景不透明度(%)"; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "文本贴图 · 背景不透明度(%)" }
             SpinBox {
                 id: pinTextBgOpacity
                 Layout.fillWidth: true
@@ -567,7 +581,7 @@ AppDrawer {
                 editable: true
                 onValueModified: root.scheduleSave()
             }
-            Label { text: "文本贴图 · 字号(像素)"; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "文本贴图 · 字号(像素)" }
             SpinBox {
                 id: pinTextFontSize
                 Layout.fillWidth: true
@@ -575,7 +589,7 @@ AppDrawer {
                 editable: true
                 onValueModified: root.scheduleSave()
             }
-            Label { text: "文本贴图 · 最大宽度(像素)"; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "文本贴图 · 最大宽度(像素)" }
             SpinBox {
                 id: pinTextMaxWidth
                 Layout.fillWidth: true
@@ -585,21 +599,12 @@ AppDrawer {
             }
 
             // ---- 快捷键 ----
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.topMargin: 10
-                implicitHeight: 1
-                color: Theme.border
-            }
-            Label { text: "快捷键"; font.pixelSize: 14; font.bold: true; color: Theme.text }
-            Label {
-                Layout.fillWidth: true
+            SectionDivider {}
+            SectionTitle { text: "快捷键" }
+            HintLabel {
                 text: "点击后按下组合键即可录制。需含至少一个修饰键(Ctrl/Alt/Shift/Win),单按 F1–F24 也可;保存后立即生效。"
-                color: Theme.muted
-                font.pixelSize: 11
-                wrapMode: Text.WrapAnywhere
             }
-            Label { text: "呼出/隐藏面板"; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "呼出/隐藏面板" }
             HotkeyField {
                 id: hkToggleMain
                 Layout.fillWidth: true
@@ -608,7 +613,7 @@ AppDrawer {
                     root.scheduleSave()
                 }
             }
-            Label { text: "矩形截图"; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "矩形截图" }
             HotkeyField {
                 id: hkCaptureRegion
                 Layout.fillWidth: true
@@ -617,7 +622,7 @@ AppDrawer {
                     root.scheduleSave()
                 }
             }
-            Label { text: "全屏截图"; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "全屏截图" }
             HotkeyField {
                 id: hkCaptureFullscreen
                 Layout.fillWidth: true
@@ -626,7 +631,7 @@ AppDrawer {
                     root.scheduleSave()
                 }
             }
-            Label { text: "一键贴图"; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "一键贴图" }
             HotkeyField {
                 id: hkPinLatest
                 Layout.fillWidth: true
@@ -635,7 +640,7 @@ AppDrawer {
                     root.scheduleSave()
                 }
             }
-            Label { text: "打开翻译"; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "打开翻译" }
             HotkeyField {
                 id: hkOpenTranslate
                 Layout.fillWidth: true
@@ -644,7 +649,7 @@ AppDrawer {
                     root.scheduleSave()
                 }
             }
-            Label { text: "截图翻译"; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "截图翻译" }
             HotkeyField {
                 id: hkCaptureTranslate
                 Layout.fillWidth: true
@@ -655,13 +660,8 @@ AppDrawer {
             }
 
             // ---- 翻译服务 ----
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.topMargin: 10
-                implicitHeight: 1
-                color: Theme.border
-            }
-            Label { text: "翻译服务"; font.pixelSize: 14; font.bold: true; color: Theme.text }
+            SectionDivider {}
+            SectionTitle { text: "翻译服务" }
             ComboBox {
                 id: providerCombo
                 Layout.fillWidth: true
@@ -670,7 +670,7 @@ AppDrawer {
             }
 
             // OpenAI 兼容(含国内兼容端点)
-            Label { text: "接口地址"; visible: root.provider === "openai"; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "接口地址"; visible: root.provider === "openai" }
             TextField {
                 id: oaBaseUrl
                 onTextEdited: root.scheduleSave()
@@ -678,7 +678,7 @@ AppDrawer {
                 Layout.fillWidth: true
                 placeholderText: "https://api.openai.com/v1"
             }
-            Label { text: "API Key"; visible: root.provider === "openai"; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "API Key"; visible: root.provider === "openai" }
             TextField {
                 id: oaApiKey
                 onTextEdited: root.scheduleSave()
@@ -687,7 +687,7 @@ AppDrawer {
                 echoMode: TextInput.Password
                 placeholderText: "sk-…"
             }
-            Label { text: "模型"; visible: root.provider === "openai"; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "模型"; visible: root.provider === "openai" }
             TextField {
                 id: oaModel
                 onTextEdited: root.scheduleSave()
@@ -697,7 +697,7 @@ AppDrawer {
             }
 
             // 微软翻译
-            Label { text: "接口地址"; visible: root.provider === "microsoft"; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "接口地址"; visible: root.provider === "microsoft" }
             TextField {
                 id: msEndpoint
                 onTextEdited: root.scheduleSave()
@@ -705,7 +705,7 @@ AppDrawer {
                 Layout.fillWidth: true
                 placeholderText: "https://api.translator.azure.cn"
             }
-            Label { text: "API Key"; visible: root.provider === "microsoft"; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "API Key"; visible: root.provider === "microsoft" }
             TextField {
                 id: msApiKey
                 onTextEdited: root.scheduleSave()
@@ -713,7 +713,7 @@ AppDrawer {
                 Layout.fillWidth: true
                 echoMode: TextInput.Password
             }
-            Label { text: "区域(可选)"; visible: root.provider === "microsoft"; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "区域(可选)"; visible: root.provider === "microsoft" }
             TextField {
                 id: msRegion
                 onTextEdited: root.scheduleSave()
@@ -723,7 +723,7 @@ AppDrawer {
             }
 
             // 自定义 HTTP
-            Label { text: "请求地址"; visible: root.provider === "custom"; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "请求地址"; visible: root.provider === "custom" }
             TextField {
                 id: cuUrl
                 onTextEdited: root.scheduleSave()
@@ -731,7 +731,7 @@ AppDrawer {
                 Layout.fillWidth: true
                 placeholderText: "https://…"
             }
-            Label { text: "请求方法"; visible: root.provider === "custom"; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "请求方法"; visible: root.provider === "custom" }
             ComboBox {
                 id: cuMethod
                 visible: root.provider === "custom"
@@ -739,7 +739,7 @@ AppDrawer {
                 model: ["POST", "GET"]
                 onActivated: root.scheduleSave()
             }
-            Label { text: "API Key(可选)"; visible: root.provider === "custom"; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "API Key(可选)"; visible: root.provider === "custom" }
             TextField {
                 id: cuApiKey
                 onTextEdited: root.scheduleSave()
@@ -747,14 +747,14 @@ AppDrawer {
                 Layout.fillWidth: true
                 echoMode: TextInput.Password
             }
-            Label { text: "模型(可选)"; visible: root.provider === "custom"; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "模型(可选)"; visible: root.provider === "custom" }
             TextField {
                 id: cuModel
                 onTextEdited: root.scheduleSave()
                 visible: root.provider === "custom"
                 Layout.fillWidth: true
             }
-            Label { text: "请求头(每行一条 Name: Value)"; visible: root.provider === "custom"; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "请求头(每行一条 Name: Value)"; visible: root.provider === "custom" }
             TextArea {
                 id: cuHeaders
                 onTextEdited: root.scheduleSave()
@@ -764,7 +764,7 @@ AppDrawer {
                 wrapMode: TextArea.WrapAnywhere
                 placeholderText: "Content-Type: application/json"
             }
-            Label { text: "请求体模板"; visible: root.provider === "custom"; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "请求体模板"; visible: root.provider === "custom" }
             TextArea {
                 id: cuBody
                 onTextEdited: root.scheduleSave()
@@ -774,7 +774,7 @@ AppDrawer {
                 wrapMode: TextArea.WrapAnywhere
                 placeholderText: "可用 ${text} ${from} ${to} ${apiKey} ${model}"
             }
-            Label { text: "响应取值路径"; visible: root.provider === "custom"; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "响应取值路径"; visible: root.provider === "custom" }
             TextField {
                 id: cuPath
                 onTextEdited: root.scheduleSave()
@@ -783,7 +783,7 @@ AppDrawer {
                 placeholderText: "如 data.translations[0].text"
             }
 
-            Label { text: "超时(秒)"; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "超时(秒)" }
             SpinBox {
                 id: timeoutSpin
                 Layout.fillWidth: true
@@ -794,7 +794,7 @@ AppDrawer {
 
             RowLayout {
                 Layout.fillWidth: true
-                spacing: 8
+                spacing: Theme.metrics.spacingSm
                 Button { text: "测试连接"; onClicked: root.probe() }
                 Item { Layout.fillWidth: true }
             }
@@ -802,29 +802,24 @@ AppDrawer {
                 id: probeLabel
                 property bool isError: false
                 Layout.fillWidth: true
-                color: isError ? Theme.danger : Theme.muted
-                font.pixelSize: 12
+                color: isError ? Theme.colors.error : Theme.colors.textSecondary
+                font.pixelSize: Theme.metrics.fontCaption
                 wrapMode: Text.WrapAnywhere
             }
 
             // ---- 网络与代理 ----
             // core 的 proxy 校验/分派/proxy_probe 早已就绪,这里只补 UI 入口。
             // manual 字段始终提交,与 core 一致:仅 mode=manual 时才参与校验与生效。
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.topMargin: 10
-                implicitHeight: 1
-                color: Theme.border
-            }
-            Label { text: "网络与代理"; font.pixelSize: 14; font.bold: true; color: Theme.text }
-            Label { text: "代理模式(作用于翻译等网络请求)"; color: Theme.muted; font.pixelSize: 12 }
+            SectionDivider {}
+            SectionTitle { text: "网络与代理" }
+            FieldLabel { text: "代理模式(作用于翻译等网络请求)" }
             ComboBox {
                 id: proxyModeCombo
                 Layout.fillWidth: true
                 model: ["跟随系统", "直连(不使用代理)", "手动配置"]
                 onActivated: root.scheduleSave()
             }
-            Label { text: "协议类型"; visible: root.isProxyManual; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "协议类型"; visible: root.isProxyManual }
             ComboBox {
                 id: proxyKindCombo
                 visible: root.isProxyManual
@@ -832,7 +827,7 @@ AppDrawer {
                 model: ["HTTP", "SOCKS5"]
                 onActivated: root.scheduleSave()
             }
-            Label { text: "服务器地址"; visible: root.isProxyManual; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "服务器地址"; visible: root.isProxyManual }
             TextField {
                 id: proxyHost
                 visible: root.isProxyManual
@@ -840,7 +835,7 @@ AppDrawer {
                 placeholderText: "127.0.0.1"
                 onTextEdited: root.scheduleSave()
             }
-            Label { text: "端口"; visible: root.isProxyManual; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "端口"; visible: root.isProxyManual }
             SpinBox {
                 id: proxyPort
                 visible: root.isProxyManual
@@ -849,14 +844,14 @@ AppDrawer {
                 editable: true
                 onValueModified: root.scheduleSave()
             }
-            Label { text: "用户名(可选)"; visible: root.isProxyManual; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "用户名(可选)"; visible: root.isProxyManual }
             TextField {
                 id: proxyUser
                 visible: root.isProxyManual
                 Layout.fillWidth: true
                 onTextEdited: root.scheduleSave()
             }
-            Label { text: "密码(可选)"; visible: root.isProxyManual; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "密码(可选)"; visible: root.isProxyManual }
             TextField {
                 id: proxyPassword
                 visible: root.isProxyManual
@@ -865,7 +860,7 @@ AppDrawer {
                 onTextEdited: root.scheduleSave()
             }
             // SOCKS5 路径(ureq)不支持绕过列表,仅 HTTP 显示该字段(与 core 注释一致)
-            Label { text: "绕过列表(仅 HTTP,分号分隔)"; visible: root.isProxyManual && proxyKindCombo.currentIndex === 0; color: Theme.muted; font.pixelSize: 12 }
+            FieldLabel { text: "绕过列表(仅 HTTP,分号分隔)"; visible: root.isProxyManual && proxyKindCombo.currentIndex === 0 }
             TextField {
                 id: proxyBypass
                 visible: root.isProxyManual && proxyKindCombo.currentIndex === 0
@@ -875,7 +870,7 @@ AppDrawer {
             }
             RowLayout {
                 Layout.fillWidth: true
-                spacing: 8
+                spacing: Theme.metrics.spacingSm
                 Button { text: "测试代理链路"; onClicked: root.probeProxy() }
                 Item { Layout.fillWidth: true }
             }
@@ -883,8 +878,8 @@ AppDrawer {
                 id: proxyProbeLabel
                 property bool isError: false
                 Layout.fillWidth: true
-                color: isError ? Theme.danger : Theme.muted
-                font.pixelSize: 12
+                color: isError ? Theme.colors.error : Theme.colors.textSecondary
+                font.pixelSize: Theme.metrics.fontCaption
                 wrapMode: Text.WrapAnywhere
             }
 
@@ -894,9 +889,9 @@ AppDrawer {
                 id: statusLabel
                 property bool isError: false
                 Layout.fillWidth: true
-                Layout.topMargin: 12
-                color: isError ? Theme.danger : Theme.muted
-                font.pixelSize: 12
+                Layout.topMargin: Theme.metrics.spacingMd
+                color: isError ? Theme.colors.error : Theme.colors.textSecondary
+                font.pixelSize: Theme.metrics.fontCaption
                 wrapMode: Text.WrapAnywhere
             }
         }
