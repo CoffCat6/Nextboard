@@ -79,72 +79,82 @@ Rectangle {
     Behavior on border.color { ColorAnimation { duration: Theme.animation.fast } }
     implicitHeight: cardLayout.implicitHeight + 24
 
-    // 条目操作菜单(顺序与第一代 App.tsx ctx-menu 对齐)
-    Menu {
+    // ---- 公共操作(右键菜单 / 快捷按钮 / 点击手势共用) ----
+
+    /// 复制条目内容;成功即收起面板,便于直接粘贴到目标应用(第一代 use-entries.copy 语义)。
+    function copyEntryAndHide() {
+        const resp = Entries.copyEntry(root.entryId)
+        if (resp.ok) panelWindow.hidePanel()
+        else Core.showToast("复制失败:" + (resp.error ? resp.error.message : ""))
+    }
+
+    /// 文件条目:显式复制路径文本(与「复制文件」CF_HDROP 区分开)。
+    function copyPathAndHide() {
+        const resp = Core.call("copy_text_to_clipboard", { text: root.text })
+        if (resp.ok) panelWindow.hidePanel()
+        else Core.showToast("复制失败:" + (resp.error ? resp.error.message : ""))
+    }
+
+    /// 图片条目:编辑器会遮住面板,先收起再打开(第一代同语义)。
+    function editEntryAfterHide() {
+        panelWindow.hidePanel()
+        Core.editEntry(root.entryId)
+    }
+
+    function deleteEntryWithToast() {
+        const resp = Entries.deleteEntry(root.entryId)
+        if (resp.ok) Core.showToast("已删除")
+        else Core.showToast("删除失败:" + (resp.error ? resp.error.message : ""))
+    }
+
+    // 条目操作菜单:按类型(text / image / file)分组构建,顺序为
+    // 「类型专属操作 | 通用操作(复制/贴图) | 固定 | 删除(危险项置底)」。
+    // 动态构建而非 visible 开关:Menu 底层是 ListView,visible:false 的
+    // 委托仍占高度,会在菜单里留出空白间隙。
+    ThemedMenu {
         id: menu
-        MenuItem {
-            text: "贴到屏幕"
-            onTriggered: Core.pinEntry(root.entryId)
-        }
-        MenuItem {
-            text: "编辑"
-            visible: root.kind === "image"
-            onTriggered: {
-                panelWindow.hidePanel()   // 编辑器会遮住面板,先收起(第一代同语义)
-                Core.editEntry(root.entryId)
+
+        Component { id: menuItemComp; ThemedMenuItem {} }
+        Component { id: menuSepComp; ThemedMenuSeparator {} }
+
+        function rebuild() {
+            while (count > 0) takeItem(0).destroy()
+
+            function addAction(label, fn, danger) {
+                const it = menuItemComp.createObject(menu, { text: label, danger: danger === true })
+                it.triggered.connect(fn)
+                addItem(it)
             }
-        }
-        MenuItem {
-            text: "复制"
-            onTriggered: {
-                const resp = Entries.copyEntry(root.entryId)
-                if (resp.ok) panelWindow.hidePanel()   // 复制即收起,便于粘贴
-                else Core.showToast("复制失败:" + (resp.error ? resp.error.message : ""))
+            function addSep() { addItem(menuSepComp.createObject(menu)) }
+
+            // 组 1:类型专属操作
+            if (root.kind === "file") {
+                addAction("打开", function() { Core.openEntry(root.entryId) })
+                addAction("定位文件", function() { Core.revealEntry(root.entryId) })
+            } else if (root.kind === "image") {
+                addAction("编辑", root.editEntryAfterHide)
+                addAction("识别文字", function() { Core.ocrEntry(root.entryId) })
+                addAction("翻译", root.requestTranslate)
+            } else {
+                addAction("翻译", root.requestTranslate)
             }
+            addSep()
+
+            // 组 2:通用操作(复制 / 贴图)
+            addAction("复制", root.copyEntryAndHide)
+            if (root.kind === "file") addAction("复制路径", root.copyPathAndHide)
+            else addAction("贴到屏幕", function() { Core.pinEntry(root.entryId) })
+            addSep()
+
+            // 组 3:固定;组 4:删除(危险项置底)
+            addAction(root.pinned ? "取消固定" : "固定",
+                      function() { Entries.togglePin(root.entryId, !root.pinned) })
+            addSep()
+            addAction("删除", root.deleteEntryWithToast, true)
         }
-        MenuItem {
-            text: "打开"
-            visible: root.kind === "file"
-            onTriggered: Core.openEntry(root.entryId)
-        }
-        MenuItem {
-            text: "复制路径"
-            visible: root.kind === "file"
-            onTriggered: {
-                // 显式复制路径文本:与「复制文件」(CF_HDROP)区分开
-                const resp = Core.call("copy_text_to_clipboard", { text: root.text })
-                if (resp.ok) panelWindow.hidePanel()
-                else Core.showToast("复制失败:" + (resp.error ? resp.error.message : ""))
-            }
-        }
-        MenuItem {
-            text: "翻译"
-            visible: root.kind !== "file"
-            onTriggered: root.requestTranslate()
-        }
-        MenuItem {
-            text: "识别文字"
-            visible: root.kind === "image"
-            onTriggered: Core.ocrEntry(root.entryId)
-        }
-        MenuItem {
-            text: root.pinned ? "取消固定" : "固定"
-            onTriggered: Entries.togglePin(root.entryId, !root.pinned)
-        }
-        MenuItem {
-            text: "定位文件"
-            visible: root.kind === "file"
-            onTriggered: Core.revealEntry(root.entryId)
-        }
-        MenuSeparator {}
-        MenuItem {
-            text: "删除"
-            onTriggered: {
-                const resp = Entries.deleteEntry(root.entryId)
-                if (resp.ok) Core.showToast("已删除")
-                else Core.showToast("删除失败:" + (resp.error ? resp.error.message : ""))
-            }
-        }
+
+        // 每次弹出前重建,保证「固定/取消固定」文案与当前状态一致
+        onAboutToShow: rebuild()
     }
 
     // 文件条目单击复制的延迟器:双击的第一击同样会触发 onClicked,若不延迟一拍,
@@ -152,11 +162,7 @@ Rectangle {
     Timer {
         id: fileCopyTimer
         interval: 300
-        onTriggered: {
-            const resp = Entries.copyEntry(root.entryId)
-            if (resp.ok) panelWindow.hidePanel()
-            else Core.showToast("复制失败:" + (resp.error ? resp.error.message : ""))
-        }
+        onTriggered: root.copyEntryAndHide()
     }
 
     MouseArea {
@@ -182,10 +188,7 @@ Rectangle {
                 // 单击 = 复制(经 fileCopyTimer 延迟一拍);双击 = 打开文件
                 fileCopyTimer.restart()
             } else {
-                const resp = Entries.copyEntry(root.entryId)
-                // 复制成功即收起面板,便于直接粘贴到目标应用(第一代 use-entries.copy 语义)
-                if (resp.ok) panelWindow.hidePanel()
-                else Core.showToast("复制失败:" + (resp.error ? resp.error.message : ""))
+                root.copyEntryAndHide()
             }
         }
     }
@@ -254,19 +257,12 @@ Rectangle {
                 Layout.alignment: Qt.AlignVCenter
                 visible: root.kind === "image"
                 label: "编辑"
-                onTriggered: {
-                    panelWindow.hidePanel()   // 编辑器会遮住面板,先收起
-                    Core.editEntry(root.entryId)
-                }
+                onTriggered: root.editEntryAfterHide()
             }
             CardAction {
                 Layout.alignment: Qt.AlignVCenter
                 label: "删除"
-                onTriggered: {
-                    const resp = Entries.deleteEntry(root.entryId)
-                    if (resp.ok) Core.showToast("已删除")
-                    else Core.showToast("删除失败:" + (resp.error ? resp.error.message : ""))
-                }
+                onTriggered: root.deleteEntryWithToast()
             }
         }
     }

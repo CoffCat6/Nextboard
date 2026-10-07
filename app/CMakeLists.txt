@@ -63,6 +63,9 @@ qt_add_qml_module(nextboard
         panel/qml/HeaderIcon.qml
         panel/qml/ReadableComboBox.qml
         panel/qml/ThemedButton.qml
+        panel/qml/ThemedMenu.qml
+        panel/qml/ThemedMenuItem.qml
+        panel/qml/ThemedMenuSeparator.qml
         panel/qml/AppDrawer.qml
         panel/qml/SettingsDrawer.qml
         panel/qml/TranslateWindow.qml
