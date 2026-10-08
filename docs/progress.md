@@ -1095,3 +1095,43 @@ Bash 里直接启动被拦。且 `reg.exe` 仍在黑名单,`vcvars64` 仍受限�
 - ⚠️ 真机确认清单:复制文件 → 在聊天窗口粘贴应出现文件;复制文件 → 记事本粘贴应为
   路径(仅当右键选了「复制路径」);左键文件条目应以默认程序打开;连续
   「复制文本 → 复制文件 → 粘贴」不应再出现文本残留。
+
+---
+
+## 2026-10-08(四)修复一键贴图:贴出"最近复制的内容"而非"最新图片"
+
+### 现象
+
+通过全局快捷键 `Ctrl+Shift+P`(一键贴图)触发时,刚复制的**文字**贴不出来,
+反而贴出更早的**图片**条目。
+
+### 根因(`store::entry::latest_pinnable` 的"图片优先"口径)
+
+`latest_pinnable` 此前按 `for kind in ["image", "text"]` 逐类查询、命中即返回:
+只要历史里存在**任意**图片,就永远返回最近图片,`text` 分支根本不会执行 ——
+`last_used_at`(最近复制时间)被完全忽略。于是"复制文本 → 按热键"贴出的仍是旧图。
+
+第一代 clipboard-plus 沿用同一口径(design.md F17「图片优先,无图片时回退文本」),
+本项目的场景需求与之不同:热键应贴出用户**最近复制的内容**,文本/图片平等。
+
+### 修复
+
+| 层 | 改动 |
+| --- | --- |
+| nbcore `store/entry.rs` | `latest_pinnable` 改为接收 `prefer_image: bool`：**默认(false)走单条 recency 查询** `WHERE kind IN ('text','image') ORDER BY last_used_at DESC, created_at DESC LIMIT 1`，文本与图片平等参与排序，谁最近复制/入库就贴谁；**true 时保留第一代"图片优先、无图回退文本"** 逐类查询。文件条目仍排除（不可贴图）；`pinned` 不影响排序 |
+| nbcore `settings.rs` | 新增设置 `pinPreferImage`（默认 **false**），作为"图片优先"开关 |
+| nbcore `ffi.rs` / app `core_facade.hpp` | `latest_pinnable` FFI 读取 `pinPreferImage` 后传入；同步修正 `pinLatest()` 文档注释 |
+| QML `SettingsDrawer` | 「贴图」区新增勾选「一键贴图 · 图片优先(否则贴最近复制的内容)」+ 说明;接入 `openAndLoad` / `save` 的自动保存链路 |
+| 单测 | 拆为两条:`latest_pinnable_default_is_recency_across_text_and_image`(默认口径:文本最新→贴文本;touch 旧图→贴旧图;仅文件→None)与 `latest_pinnable_prefer_image_keeps_first_gen_semantics`(图片优先:文本更晚仍贴图片;无图回退文本);另加 `pin_prefer_image_roundtrips_as_camel_case` |
+
+### 验证与限制
+
+- core `cargo test`:**172 项**通过(167 passed / 5 ignored,含新增用例);
+- core `cargo build --release` 通过,新 nbcore.dll(3.7MB)经 build.ps1 部署到 app/build;
+- app 编译链接通过、无编译警告;`qmllint` 无新增告警;
+- ⚠️ 真机确认清单:
+  1. **默认(开关关)**:复制一段文字 → 按 `Ctrl+Shift+P` 应贴出**该文字**;再复制一张图片 →
+     按热键应贴出该图片;不复制新内容时连按热键应始终贴同一(最近)条目;
+  2. **开启「图片优先」后**:先复制图片、再复制文字 → 按热键应贴**图片**(旧口径);
+     删掉全部图片条目后 → 按热键应回退贴最近文字;
+  3. 设置里切换开关后无需重启即生效(下次按热键按新口径取数)。

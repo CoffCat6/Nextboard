@@ -85,7 +85,8 @@ public:
     Q_INVOKABLE void captureOcr();
 
     // ---- 条目操作(主面板右键菜单) ----
-    /// 一键贴图(热键):取最近可贴条目(图片优先,无图回退最近文本)并贴出。
+    /// 一键贴图(热键):取可贴条目并贴出。口径由设置 `pinPreferImage` 决定——
+    /// 默认"最近复制优先"(文本/图片按最近使用时间竞争,谁最新贴谁);开启则"图片优先、无图回退文本"。
     Q_INVOKABLE void pinLatest();
     /// 把指定条目贴到屏幕(图片直贴;文本渲染成位图)。
     Q_INVOKABLE void pinEntry(const QString& id);

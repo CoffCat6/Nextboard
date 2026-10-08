@@ -50,6 +50,12 @@ pub struct Settings {
     pub pin_text_max_width: i64,
     /// 文本贴图背景的不透明度（%，0 ~ 100）。
     pub pin_text_bg_opacity: i64,
+    /// 一键贴图是否「图片优先」（默认**关闭**）。
+    ///
+    /// - 关闭（默认）：贴出**最近复制**的内容——文本与图片按最近使用时间竞争，谁最新贴谁；
+    /// - 开启：只要历史里存在图片就贴最近的图片，没有图片时才回退最近文本
+    ///   （第一代 clipboard-plus F17 的口径，供"一键贴图 = 贴图"习惯的用户选用）。
+    pub pin_prefer_image: bool,
     /// 框选截图是否松开鼠标即自动确认（Phase 5 增强）：关闭时保留手柄微调 + Enter/双击确认。
     pub region_auto_confirm: bool,
     /// 框选时鼠标右键是否取消本次截图(默认开启;第一代无此项,按用户习惯补)。
@@ -227,7 +233,7 @@ pub enum HotkeyAction {
     CaptureRegion,
     /// 一键全屏截图。
     CaptureFullscreen,
-    /// 一键贴图：把最近使用的图片条目贴为浮窗。
+    /// 一键贴图：把最近复制的可贴条目贴为浮窗（口径受 `pinPreferImage` 影响）。
     PinLatest,
     /// 打开翻译窗口（Phase 7 F24）。
     OpenTranslate,
@@ -257,7 +263,7 @@ pub struct HotkeyMap {
     pub capture_region: String,
     /// 一键全屏截图。
     pub capture_fullscreen: String,
-    /// 一键贴图（最近使用的图片）。
+    /// 一键贴图（口径受 `pinPreferImage` 影响）。
     pub pin_latest: String,
     /// 打开翻译窗口（Phase 7）。
     pub open_translate: String,
@@ -311,6 +317,8 @@ impl Default for Settings {
             pin_text_font_size: 15,
             pin_text_max_width: 520,
             pin_text_bg_opacity: 92,
+            // 默认"最近复制优先"：复制文字后按热键即贴该文字（关闭第一代的"图片优先"）
+            pin_prefer_image: false,
             region_auto_confirm: true,
             region_right_click_cancel: true,
             // 默认"松手即复制"：截图后立刻可粘贴，不经过编辑器
@@ -1219,6 +1227,10 @@ mod tests {
             settings.pin_doubleclick_close,
             "双击关贴图默认开（既有 Snipaste 习惯，设置只让它可配置）"
         );
+        assert!(
+            !settings.pin_prefer_image,
+            "一键贴图默认贴最近复制的内容（图片优先默认关，作为可选项）"
+        );
         // Phase 7：翻译字段缺失时全部取默认（旧配置升级不阻塞启动）
         assert_eq!(settings.translate_provider, "openai");
         assert_eq!(settings.translate_source_lang, "auto");
@@ -1516,6 +1528,22 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn pin_prefer_image_roundtrips_as_camel_case() {
+        // QML 侧按 `s.pinPreferImage` 读写，落盘/回传的键名必须是 camelCase
+        let settings = Settings {
+            pin_prefer_image: true,
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&settings).unwrap();
+        assert_eq!(
+            value.get("pinPreferImage").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        let back: Settings = serde_json::from_value(value).unwrap();
+        assert!(back.pin_prefer_image);
     }
 
     #[test]

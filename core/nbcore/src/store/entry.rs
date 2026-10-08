@@ -491,30 +491,50 @@ pub fn evict(conn: &Connection, keep: i64) -> AppResult<Vec<String>> {
     Ok(blobs)
 }
 
-/// 最近使用的可贴图条目（一键贴屏用）：**图片优先**，没有图片时回退最近文本。
+/// 最近使用的可贴图条目（一键贴屏用）。两种口径由 `prefer_image` 选择：
 ///
-/// 口径：图片是主要贴图对象；文本作为无图时的兜底（用户要求"无图时也能贴文本内容"）。
+/// - `prefer_image = false`（默认）：**按最近使用时间取最新一条**，文本与图片平等参与排序
+///   ——谁最近复制/入库就贴谁。这是热键「一键贴图」的默认语义：复制文字后按热键即贴该文字。
+/// - `prefer_image = true`：**图片优先**——只要历史里有图片就贴最近的图片，没有图片时才回退
+///   最近文本（第一代 clipboard-plus F17 口径，由设置 `pinPreferImage` 选用）。
+///
 /// 重复复制同一内容会 `touch` 置顶，故取到的就是"刚复制/刚入库的那条"；不受 `pinned`
 /// 排序影响。文件条目不可贴图，排除在外。
 /// 命中索引 `idx_entries_kind (kind, last_used_at DESC)`。
-pub fn latest_pinnable(conn: &Connection) -> AppResult<Option<ClipEntry>> {
-    for kind in ["image", "text"] {
-        let entry = conn
-            .query_row(
-                "SELECT id, kind, text_content, blob_path, file_paths, width, height, hash, byte_size, preview, pinned, created_at, last_used_at, source, tags
-                 FROM clip_entries
-                 WHERE kind = ?1
-                 ORDER BY last_used_at DESC, created_at DESC
-                 LIMIT 1",
-                [kind],
-                ClipEntry::from_row,
-            )
-            .optional()?;
-        if entry.is_some() {
-            return Ok(entry);
+pub fn latest_pinnable(conn: &Connection, prefer_image: bool) -> AppResult<Option<ClipEntry>> {
+    if prefer_image {
+        // 图片优先：逐类查询、命中即返回（无图片时回退最近文本）
+        for kind in ["image", "text"] {
+            let entry = conn
+                .query_row(
+                    "SELECT id, kind, text_content, blob_path, file_paths, width, height, hash, byte_size, preview, pinned, created_at, last_used_at, source, tags
+                     FROM clip_entries
+                     WHERE kind = ?1
+                     ORDER BY last_used_at DESC, created_at DESC
+                     LIMIT 1",
+                    [kind],
+                    ClipEntry::from_row,
+                )
+                .optional()?;
+            if entry.is_some() {
+                return Ok(entry);
+            }
         }
+        return Ok(None);
     }
-    Ok(None)
+    // 默认：文本/图片平等，按最近使用时间取最新
+    let entry = conn
+        .query_row(
+            "SELECT id, kind, text_content, blob_path, file_paths, width, height, hash, byte_size, preview, pinned, created_at, last_used_at, source, tags
+             FROM clip_entries
+             WHERE kind IN ('text', 'image')
+             ORDER BY last_used_at DESC, created_at DESC
+             LIMIT 1",
+            [],
+            ClipEntry::from_row,
+        )
+        .optional()?;
+    Ok(entry)
 }
 
 /// 构造 LIKE 匹配串并转义通配符（`%` `_` `\`），防止用户输入被当作模式。
@@ -840,7 +860,7 @@ mod tests {
     }
 
     #[test]
-    fn latest_pinnable_prefers_image_then_falls_back_to_text() {
+    fn latest_pinnable_default_is_recency_across_text_and_image() {
         let conn = crate::store::memory();
         insert(&conn, &entry("t1", "h-t1", "文本", true, 500)).unwrap();
         insert(
@@ -853,24 +873,61 @@ mod tests {
             &image_entry("i-new", "h-i2", "C:/blobs/new.png", false, 300),
         )
         .unwrap();
-        // 图片优先：即使文本 last_used_at 更晚，也优先贴图片；固定项不影响排序
-        assert_eq!(latest_pinnable(&conn).unwrap().unwrap().id, "i-new");
+        // 默认口径（prefer_image=false）：最近使用优先——文本 last_used_at 最新 → 贴文本
+        assert_eq!(latest_pinnable(&conn, false).unwrap().unwrap().id, "t1");
 
-        // 再次复制旧图 → touch 置顶后应换成它
+        // 再次复制旧图 → touch 置顶后应换成它（图片同样按 recency 参与竞争）
         touch(&conn, "i-old", 900).unwrap();
-        assert_eq!(latest_pinnable(&conn).unwrap().unwrap().id, "i-old");
+        assert_eq!(latest_pinnable(&conn, false).unwrap().unwrap().id, "i-old");
 
-        // 无图片时回退到最近文本（用户要求：没有图也能贴文本内容）
-        let text_only = crate::store::memory();
-        insert(&text_only, &entry("t1", "h-t1", "早", false, 100)).unwrap();
-        insert(&text_only, &entry("t2", "h-t2", "晚", false, 900)).unwrap();
-        let picked = latest_pinnable(&text_only).unwrap().unwrap();
-        assert_eq!(picked.id, "t2");
+        // 再复制文本 → 又回到文本（文本/图片平等，谁最新贴谁）
+        touch(&conn, "t1", 1000).unwrap();
+        let picked = latest_pinnable(&conn, false).unwrap().unwrap();
+        assert_eq!(picked.id, "t1");
         assert_eq!(picked.kind, EntryKind::Text);
+
+        // 文件条目不可贴图：即便它 last_used_at 最新也不参与（无 text/image 时返回 None）
+        let file_only = crate::store::memory();
+        insert(
+            &file_only,
+            &file_entry("f1", "h-f1", &["C:/a/b.txt"], false, 900),
+        )
+        .unwrap();
+        assert!(latest_pinnable(&file_only, false).unwrap().is_none());
 
         // 空库返回 None
         let empty = crate::store::memory();
-        assert!(latest_pinnable(&empty).unwrap().is_none());
+        assert!(latest_pinnable(&empty, false).unwrap().is_none());
+    }
+
+    #[test]
+    fn latest_pinnable_prefer_image_keeps_first_gen_semantics() {
+        let conn = crate::store::memory();
+        // 文本 last_used_at 更晚，但开启"图片优先"后仍应贴图片
+        insert(&conn, &entry("t1", "h-t1", "文本", true, 500)).unwrap();
+        insert(
+            &conn,
+            &image_entry("i-old", "h-i1", "C:/blobs/old.png", false, 100),
+        )
+        .unwrap();
+        insert(
+            &conn,
+            &image_entry("i-new", "h-i2", "C:/blobs/new.png", false, 300),
+        )
+        .unwrap();
+        assert_eq!(latest_pinnable(&conn, true).unwrap().unwrap().id, "i-new");
+
+        // 复制旧图 → 取到它
+        touch(&conn, "i-old", 900).unwrap();
+        assert_eq!(latest_pinnable(&conn, true).unwrap().unwrap().id, "i-old");
+
+        // 无图片时回退最近文本
+        let text_only = crate::store::memory();
+        insert(&text_only, &entry("t1", "h-t1", "早", false, 100)).unwrap();
+        insert(&text_only, &entry("t2", "h-t2", "晚", false, 900)).unwrap();
+        let picked = latest_pinnable(&text_only, true).unwrap().unwrap();
+        assert_eq!(picked.id, "t2");
+        assert_eq!(picked.kind, EntryKind::Text);
     }
 
     #[test]

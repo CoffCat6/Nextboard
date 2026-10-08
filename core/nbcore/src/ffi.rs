@@ -338,11 +338,14 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
                 entry::get(&db, &id)?.ok_or_else(|| AppError::InvalidInput("条目不存在".into()))?,
             )?)
         }
-        // 一键贴图(pinLatest)取数:图片优先、无图回退最近文本;空库返回 null。
+        // 一键贴图(pinLatest)取数:口径由设置 pinPreferImage 决定——
+        // 默认"最近复制优先"(文本/图片按最近使用时间竞争);开启后"图片优先、无图回退文本"。
+        // 空库返回 null。
         "latest_pinnable" => {
             let core = crate::core::Core::get()?;
+            let prefer_image = core.settings()?.pin_prefer_image;
             let db = core.db.lock()?;
-            Ok(match entry::latest_pinnable(&db)? {
+            Ok(match entry::latest_pinnable(&db, prefer_image)? {
                 Some(found) => serde_json::to_value(found)?,
                 None => serde_json::Value::Null,
             })

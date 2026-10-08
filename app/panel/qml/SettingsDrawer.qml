@@ -267,6 +267,7 @@ AppDrawer {
 
         pinOpacity.value = s.pinDefaultOpacity > 0 ? s.pinDefaultOpacity : 100
         pinDoubleClick.checked = s.pinDoubleclickClose === true
+        pinPreferImage.checked = s.pinPreferImage === true
         pinTextBg.text = s.pinTextBg || ""
         pinTextColor.text = s.pinTextColor || ""
         pinTextBgOpacity.value = s.pinTextBgOpacity >= 0 ? s.pinTextBgOpacity : 92
@@ -338,6 +339,7 @@ AppDrawer {
 
         s.pinDefaultOpacity = pinOpacity.value
         s.pinDoubleclickClose = pinDoubleClick.checked
+        s.pinPreferImage = pinPreferImage.checked
         s.pinTextBg = pinTextBg.text
         s.pinTextColor = pinTextColor.text
         s.pinTextBgOpacity = pinTextBgOpacity.value
@@ -584,6 +586,14 @@ AppDrawer {
                 id: pinDoubleClick
                 text: "双击关闭贴图窗口"
                 onClicked: root.scheduleSave()
+            }
+            ReadableCheckBox {
+                id: pinPreferImage
+                text: "一键贴图 · 图片优先(否则贴最近复制的内容)"
+                onClicked: root.scheduleSave()
+            }
+            HintLabel {
+                text: "关闭(默认):按热键贴出最近复制的文本或图片;开启:只要历史里有图片就贴最近图片,无图时才贴最近文本。"
             }
 
             FieldLabel { text: "文本贴图 · 背景色(点色块展开色板)" }
