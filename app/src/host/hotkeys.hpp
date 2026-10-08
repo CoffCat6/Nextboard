@@ -16,7 +16,16 @@ class Hotkeys : public QObject {
     Q_OBJECT
 public:
     /// 动作 id(与设置里的 hotkeys 表一致)。
-    enum class Action { ToggleMain, CaptureRegion, CaptureFullscreen, PinLatest, OpenTranslate, CaptureTranslate };
+    enum class Action {
+        ToggleMain,
+        CaptureRegion,
+        CaptureFullscreen,
+        PinLatest,
+        OpenTranslate,
+        CaptureTranslate,
+        CaptureDelayed,   ///< 延时截图(F16):倒计时后再框选
+        CaptureOcr,       ///< 截图取字入列表:框选 → OCR → 文本存为条目
+    };
 
     Hotkeys(PanelWindow& panel, CoreBridge& core, QObject* parent = nullptr);
     ~Hotkeys() override;

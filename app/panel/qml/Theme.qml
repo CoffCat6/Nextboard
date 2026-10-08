@@ -49,6 +49,7 @@ QtObject {
         /// 来源徽标(capture / translate);浅底需加深保证对比度。
         readonly property color sourceCapture:   dark ? "#7EC2FF" : "#1A6FC4"
         readonly property color sourceTranslate: dark ? "#C9A7FF" : "#6F42C1"
+        readonly property color sourceOcr:       dark ? "#7FD8B4" : "#1B7A55"
     }
 
     // ---- 尺度(theme.md §11/14/16/24/26/39) ----
@@ -108,6 +109,7 @@ QtObject {
     readonly property color pinText:    colors.onWarning
     readonly property color sourceCapture:   colors.sourceCapture
     readonly property color sourceTranslate: colors.sourceTranslate
+    readonly property color sourceOcr:       colors.sourceOcr
 
     readonly property font baseFont: Qt.font({
         family: fontFamily,

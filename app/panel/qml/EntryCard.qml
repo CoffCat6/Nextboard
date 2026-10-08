@@ -181,6 +181,7 @@ Rectangle {
                 padding: 3; leftPadding: 6; rightPadding: 6
                 color: root.source === "capture" ? Theme.colors.sourceCapture
                      : root.source === "translate" ? Theme.colors.sourceTranslate
+                     : root.source === "ocr" ? Theme.colors.sourceOcr
                      : Theme.colors.textSecondary
                 background: Rectangle { color: Theme.colors.surfaceSecondary; radius: Theme.metrics.radiusBadge }
             }

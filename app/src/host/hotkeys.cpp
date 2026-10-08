@@ -106,6 +106,22 @@ Hotkeys::Hotkeys(PanelWindow& panel, CoreBridge& core, QObject* parent)
                                                               QStringLiteral("translate"));
                 }, /*allowEditor=*/false);
                 break;
+            case Action::CaptureDelayed:
+                // 延时截图(F16):等 N 秒再框选(等待秒数取设置,与托盘入口同一取值口径)
+                m_panel.hide();
+                QTimer::singleShot(150, [] {
+                    startDelayedCapture(captureDelaySeconds(), CaptureIntent::Region);
+                });
+                break;
+            case Action::CaptureOcr:
+                // 截图取字入列表:框选 → OCR → 识别文本直接存为条目(source=ocr)
+                hidePanelThenCapture(m_panel, nb::CaptureIntent::Region,
+                                     [](const QString& entryId) {
+                    if (!entryId.isEmpty())
+                        CoreFacade::instance().processCapture(entryId,
+                                                              QStringLiteral("entry"));
+                }, /*allowEditor=*/false);
+                break;
             default:
                 qInfo() << "hotkey action" << static_cast<int>(m_registered.value(id));
                 break;
@@ -133,6 +149,8 @@ void Hotkeys::applyFromSettings() {
         {Action::PinLatest, "pinLatest"},
         {Action::OpenTranslate, "openTranslate"},
         {Action::CaptureTranslate, "captureTranslate"},
+        {Action::CaptureDelayed, "captureDelayed"},
+        {Action::CaptureOcr, "captureOcr"},
     };
     for (auto it = names.constBegin(); it != names.constEnd(); ++it) {
         const QString combo = hotkeys.value(it.value()).toString();

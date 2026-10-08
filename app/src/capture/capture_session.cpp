@@ -287,6 +287,12 @@ void startDelayedCapture(int seconds, CaptureIntent intent, CaptureDone onCaptur
     });
 }
 
+int captureDelaySeconds() {
+    const QJsonObject resp = CoreBridge::instance().call("get_settings");
+    const int secs = resp.value("data").toObject().value("captureDelaySecs").toInt(3);
+    return qBound(1, secs, 10);
+}
+
 namespace {
 /// 手柄命中半径与绘制边长(逻辑像素)
 constexpr int kHandleGrab = 6;

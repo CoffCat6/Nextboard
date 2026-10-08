@@ -37,6 +37,10 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured = {},
 void startDelayedCapture(int seconds, CaptureIntent intent, CaptureDone onCaptured = {},
                          bool allowEditor = true);
 
+/// 读取设置里的延时截图等待秒数(钳制到 1~10;读取失败按 3 秒)。
+/// 托盘入口与快捷键共用,避免两处各写一份。
+int captureDelaySeconds();
+
 /// 入库一张图片并写入系统剪贴板(截图与编辑器「完成」共用同一通道)。
 /// 返回条目 id;未入库(超大小上限)或失败时返回空串。
 ///

@@ -162,6 +162,16 @@ AppDrawer {
                 event.accepted = true
                 return
             }
+            // Delete / Backspace = 清空绑定(允许"不设置快捷键",该动作就不注册)
+            if (event.key === Qt.Key_Delete || event.key === Qt.Key_Backspace) {
+                hk.recording = false
+                if (hk.value !== "") {
+                    hk.value = ""
+                    hk.valueModified()
+                }
+                event.accepted = true
+                return
+            }
             // 只按修饰键时继续等待主键
             if (event.key === Qt.Key_Control || event.key === Qt.Key_Shift
                     || event.key === Qt.Key_Alt || event.key === Qt.Key_Meta) {
@@ -282,6 +292,8 @@ AppDrawer {
         hkPinLatest.value = hk.pinLatest || ""
         hkOpenTranslate.value = hk.openTranslate || ""
         hkCaptureTranslate.value = hk.captureTranslate || ""
+        hkCaptureOcr.value = hk.captureOcr || ""
+        hkCaptureDelayed.value = hk.captureDelayed || ""
 
         const index = providers.indexOf(s.translateProvider)
         providerCombo.currentIndex = index < 0 ? 0 : index
@@ -355,6 +367,8 @@ AppDrawer {
         hk.pinLatest = hkPinLatest.value
         hk.openTranslate = hkOpenTranslate.value
         hk.captureTranslate = hkCaptureTranslate.value
+        hk.captureOcr = hkCaptureOcr.value
+        hk.captureDelayed = hkCaptureDelayed.value
         s.hotkeys = hk
 
         s.translateProvider = provider
@@ -718,7 +732,8 @@ AppDrawer {
             SectionDivider {}
             SectionTitle { text: "快捷键" }
             HintLabel {
-                text: "点击后按下组合键即可录制。需含至少一个修饰键(Ctrl/Alt/Shift/Win),单按 F1–F24 也可;保存后立即生效。"
+                text: "点击后按下组合键即可录制。需含至少一个修饰键(Ctrl/Alt/Shift/Win),单按 F1–F24 也可;"
+                      + "按 Delete 清空 = 不绑定该动作。保存后立即生效。"
             }
             FieldLabel { text: "呼出/隐藏面板" }
             HotkeyField {
@@ -768,6 +783,24 @@ AppDrawer {
             FieldLabel { text: "截图翻译" }
             HotkeyField {
                 id: hkCaptureTranslate
+                Layout.fillWidth: true
+                onValueModified: {
+                    root.hotkeysDirty = true
+                    root.scheduleSave()
+                }
+            }
+            FieldLabel { text: "截图取字（入列表）" }
+            HotkeyField {
+                id: hkCaptureOcr
+                Layout.fillWidth: true
+                onValueModified: {
+                    root.hotkeysDirty = true
+                    root.scheduleSave()
+                }
+            }
+            FieldLabel { text: "延时截图" }
+            HotkeyField {
+                id: hkCaptureDelayed
                 Layout.fillWidth: true
                 onValueModified: {
                     root.hotkeysDirty = true

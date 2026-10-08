@@ -1664,3 +1664,47 @@ F26 曾提到译文另存;已实现过一版(`CoreFacade::saveTextAsFile` + 译�
   2. **倒计时数字不得出现在截出的图里**;
   3. 设置里把等待改为 5 秒 → 再展开托盘菜单,标题应显示「延时截图(5 秒)」;
   4. 倒计时期间按 Esc / 再次触发截图的行为符合预期(会话尚未开始,应无副作用)。
+
+---
+
+## 2026-10-08(四)快捷键:允许留空 + 新增「截图取字入列表」「延时截图」
+
+### 1. 快捷键允许留空(不绑定)
+
+| 层 | 改动 |
+| --- | --- |
+| `settings.rs` | `validate()` 去掉"不能为空"的硬约束:空/纯空白 = **不绑定该动作**;非空项仍校验合法性与两两不重复 |
+| `hotkeys.cpp` | 注册侧本就跳过空串(`if (!combo.isEmpty())`),无需改动 —— 现在"存得下、也注册得上"一致了 |
+| `SettingsDrawer.qml` | `HotkeyField` 支持**按 Delete/Backspace 清空**绑定(原先只能 Esc 取消录制);提示文案补上说明 |
+
+> **默认值取舍**:新增的两个动作**默认留空**;既有 6 个动作保留原默认键
+> (Ctrl+Shift+V/A/Q/P/T/E)—— 它们是应用的主入口,清空会让新装用户无从呼出。
+> 若希望既有项也默认留空,改 `HotkeyMap::default()` 即可。
+
+### 2. 新增快捷键动作
+
+`HotkeyAction` 6 → 8,`Hotkeys::Action` 同步扩两个:
+
+| 动作 | 设置键 | 默认 | 行为 |
+| --- | --- | --- | --- |
+| **截图取字(入列表)** | `captureOcr` | 留空 | 收起面板 → 框选 → 入库 → OCR → 识别文本**直接存为条目**(`source=ocr`);`allowEditor=false` 全程直通 |
+| **延时截图** | `captureDelayed` | 留空 | 收起面板 → 倒计时(取 `captureDelaySecs`)→ 框选 |
+
+- `CoreFacade::processCapture` 新增 `"entry"` 模式:OCR 文本走 `save_text_entry`
+  —— 与翻译「存为条目」**同一条入库路径**,因此天然去重、入库即可被搜索。
+- `captureDelaySeconds()` 提到 `capture_session`(托盘入口与快捷键共用,不再两处各写一份)。
+- 新增来源配色 `Theme.colors.sourceOcr`(绿),条目卡片上 `source=ocr` 显示为绿色徽标。
+
+### 验证与限制
+
+- core `cargo test`:**169 项**通过(新增 `hotkeys_may_be_left_unbound`;
+  原 `validate_rejects_empty_hotkey` 语义反转,改名 `validate_treats_blank_hotkey_as_unbound`;
+  `hotkey_map_get_maps_actions` 改为只对**已绑定**的默认键做去重断言);
+- app 编译链接通过(`[43/43] Linking`)、无编译警告;`qmllint` 无新增告警类别;
+- ⚠️ 需真机确认:
+  1. 设置 → 快捷键:新增两项显示「未设置」;点一下再按 Delete 可把已绑定的项清空,
+     保存后该动作不再响应(其他动作不受影响);
+  2. 给「截图取字(入列表)」绑一个键 → 触发 → 框选一段有文字的截图 →
+     面板列表出现 `ocr` 来源的文本条目,内容可被搜索;不弹编辑器、不弹翻译窗口;
+  3. 给「延时截图」绑键 → 触发 → 出现倒计时 → 归零后进入框选;
+  4. 清空全部快捷键后保存应成功(不再报"快捷键不能为空")。

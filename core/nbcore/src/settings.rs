@@ -242,17 +242,23 @@ pub enum HotkeyAction {
     OpenTranslate,
     /// 截图翻译（Phase 7 T4）：框选 → OCR → 翻译。
     CaptureTranslate,
+    /// 延时截图（F16）：倒计时后再框选，用来截菜单/悬浮提示。
+    CaptureDelayed,
+    /// 截图取字入列表（S5.1 同源）：框选 → OCR → 识别文本**直接存为条目**。
+    CaptureOcr,
 }
 
 impl HotkeyAction {
     /// 全部动作，遍历注册用。
-    pub const ALL: [HotkeyAction; 6] = [
+    pub const ALL: [HotkeyAction; 8] = [
         HotkeyAction::ToggleMain,
         HotkeyAction::CaptureRegion,
         HotkeyAction::CaptureFullscreen,
         HotkeyAction::PinLatest,
         HotkeyAction::OpenTranslate,
         HotkeyAction::CaptureTranslate,
+        HotkeyAction::CaptureDelayed,
+        HotkeyAction::CaptureOcr,
     ];
 }
 
@@ -272,6 +278,10 @@ pub struct HotkeyMap {
     pub open_translate: String,
     /// 截图翻译（Phase 7 T4）：框选 → OCR → 翻译。
     pub capture_translate: String,
+    /// 延时截图（F16）。**默认留空**：这个动作属于"按需绑定"，由用户自己决定组合键。
+    pub capture_delayed: String,
+    /// 截图取字入列表。**默认留空**，同上。
+    pub capture_ocr: String,
 }
 
 impl Default for HotkeyMap {
@@ -284,6 +294,9 @@ impl Default for HotkeyMap {
             open_translate: "Ctrl+Shift+T".into(),
             // 与既有 5 个默认键均不冲突（V/A/Q/P/T）
             capture_translate: "Ctrl+Shift+E".into(),
+            // 新增动作不预置组合键：空串 = 不绑定，用户想用再自己录
+            capture_delayed: String::new(),
+            capture_ocr: String::new(),
         }
     }
 }
@@ -298,6 +311,8 @@ impl HotkeyMap {
             HotkeyAction::PinLatest => &self.pin_latest,
             HotkeyAction::OpenTranslate => &self.open_translate,
             HotkeyAction::CaptureTranslate => &self.capture_translate,
+            HotkeyAction::CaptureDelayed => &self.capture_delayed,
+            HotkeyAction::CaptureOcr => &self.capture_ocr,
         }
     }
 }
@@ -367,12 +382,13 @@ impl Settings {
                 "延时截图等待须在 1 ~ 10 秒之间".into(),
             ));
         }
-        // 快捷键：非空 + 合法组合 + 两两互不相同（相同组合键不能绑定多个动作）
+        // 快捷键：**允许留空**（空 = 不绑定该动作，用户可只绑自己需要的几个）；
+        // 非空项仍需合法，且两两不重复（相同组合键不能绑定多个动作）。
         let mut seen: Vec<&str> = Vec::new();
         for action in HotkeyAction::ALL {
             let hotkey = self.hotkeys.get(action).trim();
             if hotkey.is_empty() {
-                return Err(AppError::InvalidInput("快捷键不能为空".into()));
+                continue;
             }
             if !is_valid_hotkey(hotkey) {
                 return Err(AppError::InvalidInput(format!(
@@ -1130,10 +1146,11 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_empty_hotkey() {
+    fn validate_treats_blank_hotkey_as_unbound() {
+        // 允许留空 = 不绑定该动作（用户可只绑自己需要的几个）；纯空白按未绑定处理
         let mut settings = Settings::default();
         settings.hotkeys.capture_fullscreen = "  ".into();
-        assert!(settings.validate().is_err());
+        assert!(settings.validate().is_ok(), "空白串视为未绑定，不再报错");
     }
 
     #[test]
@@ -1206,11 +1223,18 @@ mod tests {
         assert_eq!(map.get(HotkeyAction::PinLatest), "Ctrl+Shift+P");
         assert_eq!(map.get(HotkeyAction::OpenTranslate), "Ctrl+Shift+T");
         assert_eq!(map.get(HotkeyAction::CaptureTranslate), "Ctrl+Shift+E");
-        // 六个动作的默认键必须两两不同（validate 也会拒绝重复）
-        let mut all: Vec<&str> = HotkeyAction::ALL.iter().map(|a| map.get(*a)).collect();
+        // 新增动作默认不绑定（由用户决定是否录）
+        assert_eq!(map.get(HotkeyAction::CaptureDelayed), "");
+        assert_eq!(map.get(HotkeyAction::CaptureOcr), "");
+        // 已绑定的默认键必须两两不同（未绑定的空串不参与比较）
+        let mut all: Vec<&str> = HotkeyAction::ALL
+            .iter()
+            .map(|a| map.get(*a))
+            .filter(|combo| !combo.is_empty())
+            .collect();
         all.sort_unstable();
         all.dedup();
-        assert_eq!(all.len(), HotkeyAction::ALL.len(), "默认快捷键不得重复");
+        assert_eq!(all.len(), 6, "6 个已绑定的默认快捷键不得重复");
     }
 
     #[test]
@@ -1564,5 +1588,33 @@ mod tests {
         assert!(settings.validate().is_err(), "相对路径应被拒绝");
         settings.data_dir = "D:/absolute".into();
         assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn hotkeys_may_be_left_unbound() {
+        // 新增动作默认不预置组合键（由用户决定）
+        let defaults = Settings::default();
+        assert!(defaults.hotkeys.capture_delayed.is_empty(), "延时截图默认不绑定");
+        assert!(defaults.hotkeys.capture_ocr.is_empty(), "截图取字默认不绑定");
+        assert!(defaults.validate().is_ok(), "含未绑定项也应通过校验");
+
+        // 全部清空 = 一个键都不绑，仍应合法
+        let mut all = Settings::default();
+        all.hotkeys.toggle_main = String::new();
+        all.hotkeys.capture_region = String::new();
+        all.hotkeys.capture_fullscreen = String::new();
+        all.hotkeys.pin_latest = String::new();
+        all.hotkeys.open_translate = String::new();
+        all.hotkeys.capture_translate = String::new();
+        assert!(all.validate().is_ok(), "全部不绑定应合法");
+
+        // 非空项仍须合法、且不得重复
+        let mut invalid = Settings::default();
+        invalid.hotkeys.capture_delayed = "A".into(); // 无修饰键且非 F1~F24
+        assert!(invalid.validate().is_err(), "非法组合仍应被拒");
+
+        let mut duplicated = Settings::default();
+        duplicated.hotkeys.capture_delayed = duplicated.hotkeys.toggle_main.clone();
+        assert!(duplicated.validate().is_err(), "重复组合仍应被拒");
     }
 }

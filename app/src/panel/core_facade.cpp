@@ -270,6 +270,21 @@ void CoreFacade::processCapture(const QString& id, const QString& mode) {
             emit translatePrefill(text);
             return;
         }
+        if (mode == QLatin1String("entry")) {
+            // 截图取字**入列表**:识别文本直接存为条目(source=ocr)。
+            // 走与翻译「存为条目」同一条入库路径 —— 因此天然去重、入库即可被搜索。
+            auto* saveJob = new AsyncCall;
+            saveJob->method = "save_text_entry";
+            saveJob->req = QJsonObject{{"text", text}, {"source", "ocr"}};
+            saveJob->setAutoDelete(true);
+            saveJob->onDone = [this, text](const QJsonObject& r) {
+                emit toastMessage(r.value("ok").toBool()
+                    ? QStringLiteral("已识别 %1 个字符并存入列表").arg(text.size())
+                    : QStringLiteral("识别成功,但存入列表失败"));
+            };
+            QThreadPool::globalInstance()->start(saveJob);
+            return;
+        }
         // 取字:写入剪贴板供直接粘贴(对齐第一代 OCR 语义)。
         // 仍走线程池,与 nb_call 的串行化互斥保持一致。
         auto* copyJob = new AsyncCall;
