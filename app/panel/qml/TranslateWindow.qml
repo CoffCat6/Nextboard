@@ -47,6 +47,7 @@ Rectangle {
         statusLabel.text = ""
         statusLabel.isError = false
         root.translating = false
+        historyOverlay.visible = false
     }
 
     /// C++ TranslateWindow::openWith 调用:预填原文(空 = 手动输入)并按需自动翻译。
@@ -82,7 +83,40 @@ Rectangle {
                       : "复制失败:" + (resp.error ? resp.error.message : ""))
     }
 
-    Keys.onEscapePressed: translateWindow.hideWindow()
+    // ---- 翻译历史(F26) ----
+    /// 最近 50 条翻译记录(core 仅内存保存、不落库,第一代 D15)。
+    property var historyItems: []
+
+    /// 打开历史抽屉:每次拉取最新列表(core 侧为唯一数据源)。
+    function openHistory() {
+        const resp = Core.call("translate_history")
+        historyItems = (resp.ok && resp.data) ? resp.data : []
+        historyOverlay.visible = true
+    }
+
+    function clearHistory() {
+        Core.call("clear_translate_history")
+        historyItems = []
+    }
+
+    /// 回填某条历史:原文/译文**与当时所用的语言**(第一代 D16 —— 否则语言栏
+    /// 会与内容不符)。
+    function applyHistoryItem(item) {
+        if (!item) return
+        input.text = item.sourceText || ""
+        output.text = item.targetText || ""
+        const idx = targetLang.langCodes.indexOf(item.to)
+        if (idx >= 0) targetLang.currentIndex = idx
+        statusLabel.text = "已回填历史条目"
+        statusLabel.isError = false
+        historyOverlay.visible = false
+    }
+
+    Keys.onEscapePressed: {
+        // 历史抽屉优先关闭,再退到关窗
+        if (historyOverlay.visible) historyOverlay.visible = false
+        else translateWindow.hideWindow()
+    }
 
     ColumnLayout {
         anchors.fill: parent
@@ -265,6 +299,13 @@ Rectangle {
                             "한국어", "Français", "Deutsch", "Русский"]
                     onActivated: root.saveTargetLang(langCodes[currentIndex])
                 }
+                ThemedButton {
+                    variant: "ghost"
+                    size: "sm"
+                    text: "历史"
+                    Layout.alignment: Qt.AlignVCenter
+                    onClicked: root.openHistory()
+                }
                 Item { Layout.fillWidth: true }
                 ThemedButton {
                     variant: "primary"
@@ -400,6 +441,152 @@ Rectangle {
                     font.pixelSize: Theme.metrics.fontCaption
                     color: Theme.colors.textTertiary
                     Layout.alignment: Qt.AlignVCenter
+                }
+            }
+        }
+    }
+
+    // ---- 翻译历史抽屉(F26,D16:覆盖式抽屉,不改动五段布局) ----
+    // 点选某条即回填原文/译文与当时语言;空白处点击或 ESC 关闭。
+    Rectangle {
+        id: historyOverlay
+        anchors.fill: parent
+        z: 100
+        visible: false
+        radius: Theme.metrics.radiusWindow
+        color: "#00000066"   // 半透明遮罩
+
+        // 点空白关闭(下层内容不可点,避免误操作)
+        MouseArea {
+            anchors.fill: parent
+            onClicked: historyOverlay.visible = false
+        }
+
+        Rectangle {
+            anchors.fill: parent
+            anchors.margins: Theme.metrics.spacingMd
+            radius: Theme.metrics.radiusCard
+            color: Theme.colors.surface
+            border.width: Theme.metrics.borderWidth
+            border.color: Theme.colors.border
+
+            // 吃掉点击,避免穿透到遮罩把抽屉关掉
+            MouseArea { anchors.fill: parent }
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: Theme.metrics.spacingSm
+                spacing: Theme.metrics.spacingSm
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.metrics.spacingSm
+                    Label {
+                        text: "翻译历史"
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.metrics.fontSection
+                        font.weight: Font.DemiBold
+                        color: Theme.colors.textPrimary
+                    }
+                    Label {
+                        text: root.historyItems.length + " 条"
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.metrics.fontCaption
+                        color: Theme.colors.textTertiary
+                        Layout.alignment: Qt.AlignVCenter
+                    }
+                    Item { Layout.fillWidth: true }
+                    ThemedButton {
+                        variant: "ghost"
+                        size: "sm"
+                        text: "清空"
+                        enabled: root.historyItems.length > 0
+                        onClicked: root.clearHistory()
+                    }
+                    ThemedButton {
+                        variant: "ghost"
+                        square: true
+                        text: "✕"
+                        onClicked: historyOverlay.visible = false
+                    }
+                }
+
+                Item {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+
+                    ListView {
+                        anchors.fill: parent
+                        clip: true
+                        spacing: Theme.metrics.spacingXs
+                        model: root.historyItems
+
+                        delegate: Rectangle {
+                            required property var modelData
+                            width: ListView.view.width
+                            implicitHeight: card.implicitHeight + 2 * Theme.metrics.spacingSm
+                            radius: Theme.metrics.radiusInput
+                            color: cardMouse.containsMouse ? Theme.colors.surfaceHover
+                                                           : Theme.colors.surfaceSecondary
+                            border.width: Theme.metrics.borderWidth
+                            border.color: Theme.colors.border
+                            Behavior on color { ColorAnimation { duration: Theme.animation.fast } }
+
+                            ColumnLayout {
+                                id: card
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.top: parent.top
+                                anchors.leftMargin: Theme.metrics.spacingSm
+                                anchors.rightMargin: Theme.metrics.spacingSm
+                                anchors.topMargin: Theme.metrics.spacingSm
+                                spacing: 2
+
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: modelData.sourceText || ""
+                                    elide: Text.ElideRight
+                                    maximumLineCount: 1
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: Theme.metrics.fontSecondary
+                                    color: Theme.colors.textPrimary
+                                }
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: modelData.targetText || ""
+                                    elide: Text.ElideRight
+                                    maximumLineCount: 1
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: Theme.metrics.fontCaption
+                                    color: Theme.colors.textSecondary
+                                }
+                                Label {
+                                    text: (modelData.from || "auto") + " → " + modelData.to
+                                          + " · " + (modelData.provider || "")
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: Theme.metrics.fontMicro
+                                    color: Theme.colors.textTertiary
+                                }
+                            }
+
+                            MouseArea {
+                                id: cardMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.applyHistoryItem(modelData)
+                            }
+                        }
+                    }
+
+                    Label {
+                        anchors.centerIn: parent
+                        visible: root.historyItems.length === 0
+                        text: "暂无翻译历史"
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.metrics.fontCaption
+                        color: Theme.colors.textTertiary
+                    }
                 }
             }
         }

@@ -23,6 +23,7 @@
 #include <QRunnable>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QPointer>
 #include <QTimer>
 #include <functional>
 #include <QDebug>
@@ -307,21 +308,38 @@ PinTextStyle pinTextStyleFromSettings() {
     return style;
 }
 
-/// 由条目内容得到"可贴的图":图片读 blob;文本按样式渲染成位图(第一代允许贴文本)。
-QImage imageForEntry(const QVariantMap& entry, const PinTextStyle& style) {
+/// 由条目内容得到"可贴内容":图片读 blob;文本按样式渲染成位图,并保留原文
+/// (工具条「复制/另存」按文本处理,而不是把渲染位图当图片存)。
+PinContent contentForEntry(const QVariantMap& entry, const PinTextStyle& style) {
+    PinContent content;
+    content.idPrefix = entry.value("id").toString().left(8);
     const QString kind = entry.value("kind").toString();
-    if (kind == QLatin1String("image"))
-        return CoreBridge::loadEntryImage(entry.value("blobPath").toString());
-    if (kind == QLatin1String("text")) {
+    if (kind == QLatin1String("image")) {
+        content.image = CoreBridge::loadEntryImage(entry.value("blobPath").toString());
+    } else if (kind == QLatin1String("text")) {
         const QString text = entry.value("textContent").toString();
-        if (!text.isEmpty()) return PinWindow::renderText(text, style);
+        if (!text.isEmpty()) {
+            content.text = text;
+            content.image = PinWindow::renderText(text, style);
+        }
     }
-    return {};
+    return content;
 }
 
-/// 把一张图贴成置顶窗口;初始透明度/双击关闭取自设置。
-void showPinWindow(const QImage& image) {
-    if (image.isNull()) return;
+/// 贴图窗口软上限(架构 §3.1:贴图 3–10MB/张,数量软上限 10 张,超限淘汰最旧)。
+constexpr int kPinSoftLimit = 10;
+
+/// 按创建顺序记录存活的贴图窗口 —— 超限时据此淘汰"最旧"的一张。
+/// 用 QPointer:窗口经 WA_DeleteOnClose 销毁后自动置空,无需手工反注册。
+QList<QPointer<PinWindow>>& pinRegistry() {
+    static QList<QPointer<PinWindow>> list;
+    return list;
+}
+
+/// 把内容贴成置顶窗口;初始透明度/双击关闭取自设置。
+/// 超出软上限时关闭最旧的一张,并在新贴图上提示(架构 §3.1 内存预算)。
+void showPinWindow(const PinContent& content) {
+    if (content.image.isNull()) return;
     PinOptions options;
     const QVariantMap resp = CoreFacade::instance().call("get_settings");
     if (resp.value("ok").toBool()) {
@@ -330,9 +348,26 @@ void showPinWindow(const QImage& image) {
         if (opacity > 0) options.opacityPercent = opacity;
         options.doubleClickClose = data.value("pinDoubleclickClose").toBool();
     }
-    auto* pin = new PinWindow(image, options);
+
+    // 先剔除已销毁/已关闭的窗口,再按"最旧"淘汰到上限之内
+    QList<QPointer<PinWindow>>& pins = pinRegistry();
+    pins.removeIf([](const QPointer<PinWindow>& p) { return p.isNull() || !p->isVisible(); });
+    bool evicted = false;
+    while (pins.size() >= kPinSoftLimit) {
+        QPointer<PinWindow> victim = pins.takeFirst();
+        if (victim) {
+            victim->close();
+            evicted = true;
+        }
+    }
+
+    auto* pin = new PinWindow(content, options);
     pin->setAttribute(Qt::WA_DeleteOnClose);
+    pins.append(pin);
     pin->show();
+    if (evicted)
+        pin->showNotice(
+            QStringLiteral("已达贴图上限(%1 张),最旧的一张已关闭").arg(kPinSoftLimit));
 }
 
 } // namespace
@@ -349,12 +384,12 @@ void CoreFacade::pinLatest() {
         emit toastMessage(QStringLiteral("没有可贴的条目"));
         return;
     }
-    const QImage image = imageForEntry(entry, pinTextStyleFromSettings());
-    if (image.isNull()) {
+    const PinContent content = contentForEntry(entry, pinTextStyleFromSettings());
+    if (content.image.isNull()) {
         emit toastMessage(QStringLiteral("该条目无可贴内容"));
         return;
     }
-    showPinWindow(image);
+    showPinWindow(content);
 }
 
 void CoreFacade::pinEntry(const QString& id) {
@@ -363,12 +398,13 @@ void CoreFacade::pinEntry(const QString& id) {
         emit toastMessage(QStringLiteral("读取条目失败"));
         return;
     }
-    const QImage image = imageForEntry(resp.value("data").toMap(), pinTextStyleFromSettings());
-    if (image.isNull()) {
+    const PinContent content =
+        contentForEntry(resp.value("data").toMap(), pinTextStyleFromSettings());
+    if (content.image.isNull()) {
         emit toastMessage(QStringLiteral("该条目无可贴内容"));
         return;
     }
-    showPinWindow(image);
+    showPinWindow(content);
 }
 
 void CoreFacade::editEntry(const QString& id) {

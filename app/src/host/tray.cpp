@@ -1,4 +1,5 @@
 #include "tray.hpp"
+#include "capture/capture_session.hpp"
 #include "panel/core_facade.hpp"
 #include "panel/panel_window.hpp"
 
@@ -7,6 +8,7 @@
 #include <QFont>
 #include <QMenu>
 #include <QStyle>
+#include <QTimer>
 
 namespace nb {
 
@@ -48,6 +50,18 @@ void Tray::buildMenu() {
         "QMenu::indicator { width: 14px; height: 14px; }"));
     m_menu->addAction("打开主面板", [this] { m_panel.showAtCursor(); });
     m_menu->addAction("打开翻译窗口", [] { CoreFacade::instance().openTranslate(); });
+    m_menu->addSeparator();
+    // 截图 / 贴图入口(对齐第一代托盘):截图前先收起面板,否则面板会被拍进画面;
+    // 延时 150ms 等窗口真正消失(与热键链路 hidePanelThenCapture 同一取舍)。
+    const auto capture = [this](CaptureIntent intent) {
+        m_panel.hide();
+        QTimer::singleShot(150, [intent] { startCaptureSession(intent); });
+    };
+    m_menu->addAction("矩形截图", [capture] { capture(CaptureIntent::Region); });
+    m_menu->addAction("全屏截图", [capture] { capture(CaptureIntent::Fullscreen); });
+    // 口径与热键一致(默认"最近复制",可在设置里切换为"图片优先")
+    m_menu->addAction("贴图（最近内容）", [] { CoreFacade::instance().pinLatest(); });
+    m_menu->addSeparator();
     m_pauseAction = m_menu->addAction("暂停监听");
     m_pauseAction->setCheckable(true);
     const QJsonObject currentSettings = m_core.call("get_settings").value("data").toObject();

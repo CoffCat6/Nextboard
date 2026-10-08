@@ -426,6 +426,22 @@ AppDrawer {
         Core.probeTranslate(provider)   // 网络请求:异步,完成走 translateProbeFinished
     }
 
+    /// 清空历史数据(core `clear_history`):删除全部剪贴板条目并清理图片文件。
+    /// 破坏性操作,由「危险操作」区的就地二次确认块调用。
+    /// 清空后立即重拉列表(refreshNow 内部一并刷新分类计数),避免界面残留旧条目。
+    function clearHistory() {
+        const resp = Core.call("clear_history")
+        clearConfirm.visible = false
+        if (!resp.ok) {
+            statusLabel.text = "清空失败:" + errText(resp)
+            statusLabel.isError = true
+            return
+        }
+        Entries.refreshNow()
+        statusLabel.text = "已清空历史数据"
+        statusLabel.isError = false
+    }
+
     contentItem: Flickable {
         id: flick
         clip: true
@@ -977,6 +993,54 @@ AppDrawer {
                 color: isError ? Theme.colors.error : Theme.colors.textSecondary
                 font.pixelSize: Theme.metrics.fontCaption
                 wrapMode: Text.WrapAnywhere
+            }
+
+            // ---- 危险操作 ----
+            SectionDivider {}
+            SectionTitle { text: "危险操作" }
+            HintLabel {
+                id: clearHint
+                text: Core.counts.all > 0
+                      ? "删除全部 " + Core.counts.all + " 条剪贴板历史(含图片文件),此操作不可恢复。"
+                      : "当前没有历史数据。"
+            }
+            ThemedButton {
+                id: clearButton
+                Layout.fillWidth: true
+                variant: "danger"
+                text: "清空历史数据"
+                // 无数据时置灰,避免"点了没反应"的困惑
+                enabled: Core.counts.all > 0
+                onClicked: clearConfirm.visible = true
+            }
+            // 就地二次确认:破坏性操作必须二次确认,但不弹 Dialog/Popup ——
+            // 外层 SettingsDrawer 本身即 Popup,嵌套弹层有定位/焦点问题
+            // (同 ColorSwatchGrid 的取舍,见上方注释)。
+            ColumnLayout {
+                id: clearConfirm
+                Layout.fillWidth: true
+                visible: false
+                spacing: Theme.metrics.spacingXs
+                HintLabel {
+                    text: "确认清空全部历史?此操作不可恢复。"
+                    color: Theme.colors.error
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.metrics.spacingSm
+                    ThemedButton {
+                        Layout.fillWidth: true
+                        variant: "danger"
+                        text: "确认清空"
+                        onClicked: root.clearHistory()
+                    }
+                    ThemedButton {
+                        Layout.fillWidth: true
+                        variant: "secondary"
+                        text: "取消"
+                        onClicked: clearConfirm.visible = false
+                    }
+                }
             }
 
             // 改动即时保存(去抖 400ms),故不再有「保存 / 关闭」按钮 ——
