@@ -24,6 +24,60 @@ Rectangle {
         Entries.setQuery(text)
     }
 
+    // ---- 右键菜单:全面板**唯一实例** ----
+    // 原先每个 EntryCard 各自持有一个 Menu,存在两个问题:
+    //   ① 委托被 ListView 回收/重建时,菜单与卡片的绑定可能失效;
+    //   ② 点击菜单外部(尤其左键点其他卡片)时,这一次点击会**穿透**到下层卡片,
+    //      触发"复制并收起面板",与菜单操作互相干扰、菜单也没能正常关闭。
+    // 现改为面板级单例:卡片只上抛内容快照;菜单打开期间由**屏障**吃掉外部点击。
+    /// 当前菜单的目标条目快照(entryId/kind/pinned/text);null = 菜单未打开。
+    property var menuTarget: null
+
+    /// EntryCard 右键时调用:记住目标条目并在光标处弹出菜单。
+    function openEntryMenu(entry) {
+        menuTarget = entry
+        entryMenu.popup()
+    }
+
+    /// 收起菜单并清空目标(屏障点击、菜单自身关闭都会走到这里)。
+    function closeEntryMenu() {
+        menuTarget = null
+        entryMenu.close()
+    }
+
+    // ---- 菜单动作 ----
+    // 与卡片内的同名逻辑等价,但只作用于**快照里的 id** —— 不依赖委托实例是否还在。
+    function copyEntryAndHide(id) {
+        const resp = Entries.copyEntry(id)
+        if (resp.ok) panelWindow.hidePanel()
+        else Core.showToast("复制失败:" + (resp.error ? resp.error.message : ""))
+    }
+    function copyPathAndHide(text) {
+        const resp = Core.call("copy_text_to_clipboard", { text: text })
+        if (resp.ok) panelWindow.hidePanel()
+        else Core.showToast("复制失败:" + (resp.error ? resp.error.message : ""))
+    }
+    function editEntryAfterHide(id) {
+        panelWindow.hidePanel()
+        Core.editEntry(id)
+    }
+    function deleteEntryWithToast(id) {
+        const resp = Entries.deleteEntry(id)
+        if (resp.ok) Core.showToast("已删除")
+        else Core.showToast("删除失败:" + (resp.error ? resp.error.message : ""))
+    }
+    /// 翻译:文本条目取全文交翻译窗口;图片/文件明确提示而非静默失败。
+    function translateEntry(entry) {
+        if (entry.kind !== "text") {
+            Core.showToast(entry.kind === "image" ? "图片请先「识别文字」再翻译"
+                                                 : "文件条目不支持翻译")
+            return
+        }
+        const resp = Core.call("get_entry", { id: entry.entryId })
+        if (resp.ok && resp.data.textContent) Core.openTranslateWith(resp.data.textContent)
+        else Core.showToast("读取条目内容失败")
+    }
+
     Keys.onEscapePressed: {
         if (settingsDrawer.opened) {
             settingsDrawer.close()
@@ -328,8 +382,12 @@ Rectangle {
             delegate: EntryCard {
                 required property int index
                 width: list.width
-                // 翻译走独立窗口:打开即收起面板(C++ 侧也会兜底收起)
-                onTranslateRequested: function(text) { Core.openTranslateWith(text) }
+                // 「当前操作对象」高亮:只有被右键的那张卡片亮起(菜单为面板级单例)
+                menuOpen: root.menuTarget !== null && root.menuTarget.entryId === entryId
+                // 防御:菜单打开期间,任何卡片都吞掉点击(即使屏障因平台差异没拦住)
+                menuOpenElsewhere: root.menuTarget !== null
+                onContextMenuRequested: function(entry) { root.openEntryMenu(entry) }
+                onMenuDismissRequested: root.closeEntryMenu()
             }
         }
 
@@ -524,6 +582,7 @@ Rectangle {
     // ---- Toast(§36:右下角通知卡,Surface+Border+柔和层级,非 accent 大色块) ----
     Rectangle {
         id: toast
+        z: 1000   // 高于菜单外部点击屏障,通知不会被挡
         function showMsg(message) {
             toastText.text = message
             toast.x = -12   // 进入:X +12 → 0(配合 right anchor 用偏移)
@@ -555,5 +614,86 @@ Rectangle {
             interval: 1600
             onTriggered: toast.opacity = 0
         }
+    }
+
+    // ---- 右键菜单(面板级单例;内容按目标条目类型在弹出前重建) ----
+    // 动态构建而非 visible 开关:Menu 底层是 ListView,visible:false 的委托仍占高度,
+    // 会在菜单里留出空白间隙。
+    ThemedMenu {
+        id: entryMenu
+
+        // 外部点击**只由屏障处理**,这里必须关掉 Menu 默认的 CloseOnPressOutside:
+        // 否则按下时 Qt 会先关菜单 → onClosed 把 menuTarget 置空 → 屏障立刻隐藏,
+        // 紧接着这次点击继续派发给下层卡片,于是"关菜单"的同时又触发了一次复制。
+        closePolicy: Popup.CloseOnEscape
+
+        Component { id: menuItemComp; ThemedMenuItem {} }
+        Component { id: menuSepComp; ThemedMenuSeparator {} }
+
+        /// 菜单关闭即清空目标:屏障随之撤掉(点菜单项、点外部、Esc 都走这里)
+        onClosed: root.menuTarget = null
+
+        function rebuild() {
+            while (count > 0) takeItem(0).destroy()
+            const entry = root.menuTarget
+            if (!entry) return
+
+            function addAction(label, fn, danger) {
+                const it = menuItemComp.createObject(entryMenu, { text: label, danger: danger === true })
+                it.triggered.connect(fn)
+                addItem(it)
+            }
+            function addSep() { addItem(menuSepComp.createObject(entryMenu)) }
+
+            // 组 1:类型专属操作
+            if (entry.kind === "file") {
+                addAction("打开", function() { Core.openEntry(entry.entryId) })
+                addAction("定位文件", function() { Core.revealEntry(entry.entryId) })
+            } else if (entry.kind === "image") {
+                addAction("编辑", function() { root.editEntryAfterHide(entry.entryId) })
+                addAction("识别文字", function() { Core.ocrEntry(entry.entryId) })
+                addAction("翻译", function() { root.translateEntry(entry) })
+            } else {
+                addAction("翻译", function() { root.translateEntry(entry) })
+            }
+            addSep()
+
+            // 组 2:通用操作(复制 / 贴图)
+            addAction("复制", function() { root.copyEntryAndHide(entry.entryId) })
+            if (entry.kind === "file")
+                addAction("复制路径", function() { root.copyPathAndHide(entry.text) })
+            else
+                addAction("贴到屏幕", function() { Core.pinEntry(entry.entryId) })
+            addSep()
+
+            // 组 3:固定;组 4:删除(危险项置底)
+            addAction(entry.pinned ? "取消固定" : "固定",
+                      function() { Entries.togglePin(entry.entryId, !entry.pinned) })
+            addSep()
+            addAction("删除", function() { root.deleteEntryWithToast(entry.entryId) }, true)
+        }
+
+        // 每次弹出前重建,保证「固定/取消固定」文案与当前状态一致
+        onAboutToShow: rebuild()
+    }
+
+    // 面板收起时收掉菜单:否则下次呼出会残留菜单与点击屏障
+    Connections {
+        target: panelWindow
+        function onPanelHidden() { root.closeEntryMenu() }
+    }
+
+    // ---- 菜单外部点击屏障 ----
+    // 菜单打开时铺满面板,**吃掉**这一次点击:否则左键会穿透到下层卡片触发
+    // "复制并收起面板",与菜单操作互相干扰。z 高于所有内容、低于 Toast。
+    // (菜单本身在 Popup 层,位于内容之上,不受本屏障影响。)
+    MouseArea {
+        id: menuDismissBarrier
+        anchors.fill: parent
+        z: 900
+        visible: root.menuTarget !== null
+        enabled: visible
+        acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+        onClicked: root.closeEntryMenu()
     }
 }

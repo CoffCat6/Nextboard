@@ -55,6 +55,8 @@ signals:
     void clipChanged();
     /// "固定"状态变化(QML 按钮选中态)。
     void pinnedChanged();
+    /// 面板被收起:QML 侧据此收掉瞬时 UI(右键菜单等),避免下次呼出时残留。
+    void panelHidden();
 
 private:
     void setupUi();

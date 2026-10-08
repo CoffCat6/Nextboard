@@ -21,8 +21,21 @@ Rectangle {
     /// 文本条目是否展开显示全文(长文本默认折叠 4 行)。
     property bool textExpanded: false
 
-    /// 请求翻译本条内容(翻译抽屉位于 Main.qml 作用域,跨组件经信号上抛)。
-    signal translateRequested(string text)
+    /// 请求打开本条目的右键菜单。菜单由 Main.qml **统一持有**(全面板唯一实例),
+    /// 这里只上抛一个内容快照 —— 委托被回收/重建也不影响已打开的菜单。
+    signal contextMenuRequested(var entry)
+
+    /// 菜单打开期间被点到:只请求关闭菜单,不执行卡片动作。
+    /// 正常路径下由 Main.qml 的外部点击屏障吃掉这次点击,不会走到这里;
+    /// 这是防御分支(平台/事件路由差异时的兜底),保证既不会误复制、也不会卡住菜单。
+    signal menuDismissRequested()
+
+    /// 本条目的右键菜单是否已打开(父级注入):驱动"当前操作对象"高亮。
+    property bool menuOpen: false
+
+    /// 面板内是否有右键菜单打开(父级注入):打开期间吞掉卡片点击 ——
+    /// 关闭菜单的那一次点击不应顺带触发复制/收起面板。
+    property bool menuOpenElsewhere: false
 
     /// 卡片元信息行的操作按钮:小胶囊 + 悬停换底(§34,100~140ms)。
     component CardAction: Rectangle {
@@ -50,29 +63,17 @@ Rectangle {
         }
     }
 
-    /// 翻译:文本条目取全文交抽屉;图片/文件暂无取字链路,明确提示而非静默失败。
-    function requestTranslate() {
-        if (root.kind !== "text") {
-            Core.showToast(root.kind === "image" ? "图片请先「识别文字」再翻译"
-                                                 : "文件条目不支持翻译")
-            return
-        }
-        const resp = Core.call("get_entry", { id: root.entryId })
-        if (resp.ok && resp.data.textContent) root.translateRequested(resp.data.textContent)
-        else Core.showToast("读取条目内容失败")
-    }
-
     /// 图片卡片高度上限:截图多为 16:9,不封顶会把列表撑成"一屏一条"。
     readonly property int maxImageCardHeight: 300
 
     // §18/28:Surface + 1px Border,hover 换 SurfaceHover(强调色不铺满列表);
     // 菜单打开时用 AccentSoft + Accent 边框表"当前操作对象"(§18 Selected)。
     radius: Theme.metrics.radiusCard
-    color: menu.opened ? Theme.colors.surfaceSelected
+    color: root.menuOpen ? Theme.colors.surfaceSelected
          : ma.containsMouse ? Theme.colors.surfaceHover
          : Theme.colors.surface
     border.width: Theme.metrics.borderWidth
-    border.color: menu.opened ? Theme.colors.accent
+    border.color: root.menuOpen ? Theme.colors.accent
                 : ma.containsMouse ? Theme.colors.borderStrong
                 : Theme.colors.border
     Behavior on color { ColorAnimation { duration: Theme.animation.fast } }
@@ -88,13 +89,6 @@ Rectangle {
         else Core.showToast("复制失败:" + (resp.error ? resp.error.message : ""))
     }
 
-    /// 文件条目:显式复制路径文本(与「复制文件」CF_HDROP 区分开)。
-    function copyPathAndHide() {
-        const resp = Core.call("copy_text_to_clipboard", { text: root.text })
-        if (resp.ok) panelWindow.hidePanel()
-        else Core.showToast("复制失败:" + (resp.error ? resp.error.message : ""))
-    }
-
     /// 图片条目:编辑器会遮住面板,先收起再打开(第一代同语义)。
     function editEntryAfterHide() {
         panelWindow.hidePanel()
@@ -105,56 +99,6 @@ Rectangle {
         const resp = Entries.deleteEntry(root.entryId)
         if (resp.ok) Core.showToast("已删除")
         else Core.showToast("删除失败:" + (resp.error ? resp.error.message : ""))
-    }
-
-    // 条目操作菜单:按类型(text / image / file)分组构建,顺序为
-    // 「类型专属操作 | 通用操作(复制/贴图) | 固定 | 删除(危险项置底)」。
-    // 动态构建而非 visible 开关:Menu 底层是 ListView,visible:false 的
-    // 委托仍占高度,会在菜单里留出空白间隙。
-    ThemedMenu {
-        id: menu
-
-        Component { id: menuItemComp; ThemedMenuItem {} }
-        Component { id: menuSepComp; ThemedMenuSeparator {} }
-
-        function rebuild() {
-            while (count > 0) takeItem(0).destroy()
-
-            function addAction(label, fn, danger) {
-                const it = menuItemComp.createObject(menu, { text: label, danger: danger === true })
-                it.triggered.connect(fn)
-                addItem(it)
-            }
-            function addSep() { addItem(menuSepComp.createObject(menu)) }
-
-            // 组 1:类型专属操作
-            if (root.kind === "file") {
-                addAction("打开", function() { Core.openEntry(root.entryId) })
-                addAction("定位文件", function() { Core.revealEntry(root.entryId) })
-            } else if (root.kind === "image") {
-                addAction("编辑", root.editEntryAfterHide)
-                addAction("识别文字", function() { Core.ocrEntry(root.entryId) })
-                addAction("翻译", root.requestTranslate)
-            } else {
-                addAction("翻译", root.requestTranslate)
-            }
-            addSep()
-
-            // 组 2:通用操作(复制 / 贴图)
-            addAction("复制", root.copyEntryAndHide)
-            if (root.kind === "file") addAction("复制路径", root.copyPathAndHide)
-            else addAction("贴到屏幕", function() { Core.pinEntry(root.entryId) })
-            addSep()
-
-            // 组 3:固定;组 4:删除(危险项置底)
-            addAction(root.pinned ? "取消固定" : "固定",
-                      function() { Entries.togglePin(root.entryId, !root.pinned) })
-            addSep()
-            addAction("删除", root.deleteEntryWithToast, true)
-        }
-
-        // 每次弹出前重建,保证「固定/取消固定」文案与当前状态一致
-        onAboutToShow: rebuild()
     }
 
     // 文件条目单击复制的延迟器:双击的第一击同样会触发 onClicked,若不延迟一拍,
@@ -182,8 +126,19 @@ Rectangle {
             }
         }
         onClicked: function(mouse) {
+            // 有右键菜单打开时:这一次点击只用于关闭菜单,不触发卡片动作
+            if (root.menuOpenElsewhere) {
+                root.menuDismissRequested()
+                return
+            }
             if (mouse.button === Qt.RightButton) {
-                menu.popup()
+                // 菜单由 Main.qml 统一持有:只上抛内容快照,不依赖本实例存活
+                root.contextMenuRequested({
+                    entryId: root.entryId,
+                    kind: root.kind,
+                    pinned: root.pinned,
+                    text: root.text
+                })
             } else if (root.kind === "file") {
                 // 单击 = 复制(经 fileCopyTimer 延迟一拍);双击 = 打开文件
                 fileCopyTimer.restart()

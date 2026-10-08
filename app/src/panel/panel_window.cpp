@@ -176,6 +176,9 @@ bool PanelWindow::nativeEvent(const QByteArray& eventType, void* message, qint64
 bool PanelWindow::event(QEvent* e) {
     if (e->type() == QEvent::WinIdChange) {
         m_cachedHwnd = reinterpret_cast<HWND>(winId());
+    } else if (e->type() == QEvent::Hide) {
+        // 面板收起 → 通知 QML 收掉瞬时 UI(右键菜单/屏障),避免下次呼出时残留
+        emit panelHidden();
     }
     return QWidget::event(e);
 }
