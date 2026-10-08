@@ -7,7 +7,9 @@
 #include <QDir>
 #include <QFileDialog>
 #include <QFont>
+#include <QGraphicsEllipseItem>
 #include <QGraphicsItem>
+#include <QGraphicsLineItem>
 #include <QGraphicsPathItem>
 #include <QGraphicsPixmapItem>
 #include <QGraphicsRectItem>
@@ -45,13 +47,21 @@ constexpr double kPi = 3.14159265358979323846;
 /// 马赛克像素块边长(第一代 §3.4:底图预生成 8px 像素化版本)。
 constexpr int kMosaicBlock = 8;
 
+/// 模糊纹理的降采样倍数:缩到 1/k 再平滑放大 = 一次近似高斯模糊。
+constexpr int kBlurBlock = 8;
+
 QString toolLabel(EditorTool tool) {
     switch (tool) {
         case EditorTool::Pen: return QStringLiteral("画笔");
         case EditorTool::Arrow: return QStringLiteral("箭头");
+        case EditorTool::Line: return QStringLiteral("直线");
         case EditorTool::Rect: return QStringLiteral("矩形");
+        case EditorTool::Ellipse: return QStringLiteral("椭圆");
         case EditorTool::Mosaic: return QStringLiteral("马赛克");
+        case EditorTool::Blur: return QStringLiteral("模糊");
+        case EditorTool::Number: return QStringLiteral("序号");
         case EditorTool::Text: return QStringLiteral("文字");
+        case EditorTool::Picker: return QStringLiteral("取色");
     }
     return QStringLiteral("标注");
 }
@@ -89,6 +99,37 @@ public:
 private:
     QGraphicsScene* m_scene;
     QGraphicsItem* m_item;
+};
+
+/// 序号标注:实心圆 + 居中数字(圆点半径随粗细档位)。
+/// 自绘成**一个**图元,保证「一次标注 = 一条撤销记录」。
+class NumberBadgeItem : public QGraphicsItem {
+public:
+    NumberBadgeItem(int number, const QColor& color, qreal radius)
+        : m_number(number), m_color(color), m_radius(radius) {}
+
+    QRectF boundingRect() const override {
+        return QRectF(-m_radius, -m_radius, m_radius * 2.0, m_radius * 2.0);
+    }
+
+    void paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget*) override {
+        painter->setRenderHint(QPainter::Antialiasing);
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(m_color);
+        painter->drawEllipse(QPointF(0, 0), m_radius, m_radius);
+        // 数字色随底色明暗取反,避免"白底白字"看不清
+        QFont font;
+        font.setPixelSize(qMax(10, qRound(m_radius * 1.25)));
+        font.setBold(true);
+        painter->setFont(font);
+        painter->setPen(m_color.lightness() > 160 ? QColor(0x21, 0x25, 0x29) : QColor(Qt::white));
+        painter->drawText(boundingRect(), Qt::AlignCenter, QString::number(m_number));
+    }
+
+private:
+    int m_number;
+    QColor m_color;
+    qreal m_radius;
 };
 
 } // namespace
@@ -261,18 +302,23 @@ void EditorWindow::buildToolBar() {
     tools->setMovable(false);
     m_toolGroup = new QActionGroup(this);
     m_toolGroup->setExclusive(true);
-    const EditorTool kTools[] = {EditorTool::Pen, EditorTool::Arrow, EditorTool::Rect,
-                                 EditorTool::Mosaic, EditorTool::Text};
+    // 顺序:绘制类 → 擦除类(马赛克/模糊) → 标注类(序号/文字) → 取色
+    const EditorTool kTools[] = {EditorTool::Pen,  EditorTool::Arrow,  EditorTool::Line,
+                                 EditorTool::Rect, EditorTool::Ellipse, EditorTool::Mosaic,
+                                 EditorTool::Blur, EditorTool::Number,  EditorTool::Text,
+                                 EditorTool::Picker};
     for (EditorTool tool : kTools) {
         QAction* action = addTool(tools, toolLabel(tool), tool == m_tool,
                                   [this, tool] { setTool(tool); });
         action->setActionGroup(m_toolGroup);
+        // 存枚举值:程序化切换工具(取色器采样后回退)时据此同步选中态
+        action->setData(int(tool));
     }
     tools->addSeparator();
 
     // 颜色:第一代 PALETTE 七色
-    auto* colorGroup = new QActionGroup(this);
-    colorGroup->setExclusive(true);
+    m_colorGroup = new QActionGroup(this);
+    m_colorGroup->setExclusive(true);
     const QColor kPalette[] = {QColor(0xE0, 0x31, 0x31), QColor(0xF7, 0x67, 0x07),
                                QColor(0xFA, 0xB0, 0x05), QColor(0x40, 0xC0, 0x57),
                                QColor(0x1C, 0x7E, 0xD6), QColor(0x21, 0x25, 0x29),
@@ -280,8 +326,10 @@ void EditorWindow::buildToolBar() {
     for (const QColor& color : kPalette) {
         QAction* action = tools->addAction(swatchIcon(color), color.name());
         action->setCheckable(true);
-        action->setActionGroup(colorGroup);
+        action->setActionGroup(m_colorGroup);
         action->setChecked(color == m_color);
+        // 存色值:取色器采到调色板外的颜色时,需要据此把全部色块取消选中
+        action->setData(color);
         connect(action, &QAction::triggered, this, [this, color] { m_color = color; });
     }
     m_toolBars.append(tools);
@@ -328,9 +376,50 @@ void EditorWindow::buildToolBar() {
 
 void EditorWindow::setTool(EditorTool tool) {
     bakeTextItem();
+    const EditorTool previous = m_tool;
     m_tool = tool;
+    // 记住"上一个绘图工具",供取色器采样后回退(取色器自身不作回退目标)
+    if (previous != EditorTool::Picker) m_prevTool = previous;
+    // 模糊纹理惰性生成:不用模糊工具的图不必付这份全尺寸拷贝
+    if (tool == EditorTool::Blur && m_blurSource.isNull()) {
+        const int smallW = qMax(1, m_base.width() / kBlurBlock);
+        const int smallH = qMax(1, m_base.height() / kBlurBlock);
+        const QImage blurred = m_base.scaled(smallW, smallH, Qt::IgnoreAspectRatio,
+                                             Qt::SmoothTransformation)
+                                   .scaled(m_base.size(), Qt::IgnoreAspectRatio,
+                                           Qt::SmoothTransformation);
+        m_blurSource = QPixmap::fromImage(blurred);
+    }
     if (auto* canvas = qobject_cast<EditorCanvas*>(m_view)) canvas->setPassthrough(false);
-    setCursor(tool == EditorTool::Text ? Qt::IBeamCursor : Qt::CrossCursor);
+    setCursor(tool == EditorTool::Text    ? Qt::IBeamCursor
+              : tool == EditorTool::Picker ? Qt::PointingHandCursor
+                                           : Qt::CrossCursor);
+    syncToolAction();
+}
+
+void EditorWindow::syncToolAction() {
+    if (!m_toolGroup) return;
+    for (QAction* action : m_toolGroup->actions()) {
+        if (action->data().toInt() == int(m_tool)) {
+            action->setChecked(true);   // 互斥组:选中一个会自动取消其余
+            return;
+        }
+    }
+}
+
+void EditorWindow::syncColorSwatch() {
+    if (!m_colorGroup) return;
+    // 互斥组无法直接取消选中:临时关掉互斥再逐项设置,最后恢复
+    const bool exclusive = m_colorGroup->isExclusive();
+    m_colorGroup->setExclusive(false);
+    for (QAction* action : m_colorGroup->actions())
+        action->setChecked(action->data().value<QColor>() == m_color);
+    m_colorGroup->setExclusive(exclusive);
+}
+
+qreal EditorWindow::badgeRadius() const {
+    // 随粗细档位变化:细 14 / 中 18 / 粗 26
+    return qBound(14.0, 10.0 + m_size * 2.0, 26.0);
 }
 
 void EditorWindow::fitCanvas() {
@@ -382,8 +471,16 @@ QPainterPath EditorWindow::strokePath() const {
 
 QGraphicsItem* EditorWindow::buildDragItem() const {
     const QRectF rect = QRectF(m_start, m_current).normalized();
-    if (m_tool == EditorTool::Rect) {
-        auto* item = new QGraphicsRectItem(rect);
+    if (m_tool == EditorTool::Line) {
+        auto* item = new QGraphicsLineItem(QLineF(m_start, m_current));
+        item->setPen(QPen(m_color, m_size, Qt::SolidLine, Qt::RoundCap));
+        return item;
+    }
+    if (m_tool == EditorTool::Rect || m_tool == EditorTool::Ellipse) {
+        // 两者同为 QAbstractGraphicsShapeItem 子类,统一设置画笔/画刷
+        auto* item = m_tool == EditorTool::Rect
+                         ? static_cast<QAbstractGraphicsShapeItem*>(new QGraphicsRectItem(rect))
+                         : static_cast<QAbstractGraphicsShapeItem*>(new QGraphicsEllipseItem(rect));
         item->setPen(QPen(m_color, m_size));
         item->setBrush(Qt::NoBrush);
         return item;
@@ -411,11 +508,13 @@ QGraphicsItem* EditorWindow::buildDragItem() const {
 }
 
 QGraphicsItem* EditorWindow::buildPreviewItem() const {
-    if (m_tool == EditorTool::Pen || m_tool == EditorTool::Mosaic) {
+    if (m_tool == EditorTool::Pen || m_tool == EditorTool::Mosaic ||
+        m_tool == EditorTool::Blur) {
         auto* item = new QGraphicsPathItem(strokePath());
-        // 马赛克预览只画示意描边:真正的像素化纹理在松手时按轮廓合成,
+        // 马赛克/模糊预览只画示意描边:真正的纹理在松手时按轮廓合成,
         // 避免每一帧都重算 QPainterPathStroker
-        item->setPen(m_tool == EditorTool::Mosaic
+        const bool eraser = (m_tool == EditorTool::Mosaic || m_tool == EditorTool::Blur);
+        item->setPen(eraser
                          ? QPen(QColor(255, 255, 255, 170), qMax(m_size * 6, 18),
                                 Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin)
                          : QPen(m_color, m_size, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
@@ -432,15 +531,15 @@ QGraphicsItem* EditorWindow::buildFinalItem() const {
         item->setBrush(Qt::NoBrush);
         return item;
     }
-    if (m_tool == EditorTool::Mosaic) {
-        // 以笔画为 mask:先把折线描成有宽度的轮廓,再用像素化纹理填充该轮廓
+    if (m_tool == EditorTool::Mosaic || m_tool == EditorTool::Blur) {
+        // 以笔画为 mask:先把折线描成有宽度的轮廓,再用像素化/模糊纹理填充该轮廓
         QPainterPathStroker stroker;
         stroker.setWidth(qMax(m_size * 6, 18));
         stroker.setCapStyle(Qt::RoundCap);
         stroker.setJoinStyle(Qt::RoundJoin);
         auto* item = new QGraphicsPathItem(stroker.createStroke(strokePath()));
         item->setPen(Qt::NoPen);
-        item->setBrush(QBrush(m_mosaicSource));
+        item->setBrush(QBrush(m_tool == EditorTool::Mosaic ? m_mosaicSource : m_blurSource));
         return item;
     }
     return buildDragItem();
@@ -473,6 +572,26 @@ void EditorWindow::onCanvasPressed(const QPointF& scenePos) {
         return;
     }
 
+    if (m_tool == EditorTool::Number) {
+        // 序号:点击即落一个圆点徽标,编号会话内自增(不参与拖拽)
+        auto* item = new NumberBadgeItem(m_nextNumber, m_color, badgeRadius());
+        item->setPos(scenePos);
+        pushItem(item, toolLabel(m_tool));
+        ++m_nextNumber;
+        return;
+    }
+
+    if (m_tool == EditorTool::Picker) {
+        // 取色:从**底图**取样(不应被已画的标注影响);采完切回上一个绘图工具
+        const QPoint p = scenePos.toPoint();
+        if (QRect(0, 0, m_base.width(), m_base.height()).contains(p)) {
+            m_color = m_base.pixelColor(p);
+            syncColorSwatch();
+        }
+        setTool(m_prevTool);
+        return;
+    }
+
     m_dragging = true;
     m_start = scenePos;
     m_current = scenePos;
@@ -483,7 +602,9 @@ void EditorWindow::onCanvasPressed(const QPointF& scenePos) {
 void EditorWindow::onCanvasMoved(const QPointF& scenePos) {
     if (!m_dragging) return;
     m_current = scenePos;
-    if (m_tool == EditorTool::Pen || m_tool == EditorTool::Mosaic) m_stroke.append(scenePos);
+    if (m_tool == EditorTool::Pen || m_tool == EditorTool::Mosaic ||
+        m_tool == EditorTool::Blur)
+        m_stroke.append(scenePos);
     clearPreview();
     m_preview = buildPreviewItem();
     if (m_preview) m_scene->addItem(m_preview);
@@ -493,11 +614,14 @@ void EditorWindow::onCanvasReleased(const QPointF& scenePos) {
     if (!m_dragging) return;
     m_dragging = false;
     m_current = scenePos;
-    if (m_tool == EditorTool::Pen || m_tool == EditorTool::Mosaic) m_stroke.append(scenePos);
+    if (m_tool == EditorTool::Pen || m_tool == EditorTool::Mosaic ||
+        m_tool == EditorTool::Blur)
+        m_stroke.append(scenePos);
     clearPreview();
 
     // 滤掉"点一下没动"的误触:描边类要有轨迹,拖拽类要有实际范围
-    const bool isStroke = (m_tool == EditorTool::Pen || m_tool == EditorTool::Mosaic);
+    const bool isStroke = (m_tool == EditorTool::Pen || m_tool == EditorTool::Mosaic ||
+                           m_tool == EditorTool::Blur);
     if (isStroke ? m_stroke.size() < 2 : QLineF(m_start, m_current).length() < 3.0) return;
 
     if (QGraphicsItem* item = buildFinalItem()) pushItem(item, toolLabel(m_tool));

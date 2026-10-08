@@ -28,8 +28,9 @@ class QUndoStack;
 
 namespace nb {
 
-/// 标注工具(与第一代 editor-core.ts 的 Tool 一一对应)。
-enum class EditorTool { Pen, Arrow, Rect, Mosaic, Text };
+/// 标注工具。前五项对齐第一代 editor-core.ts 的 Tool;
+/// 直线 / 椭圆 / 模糊 / 序号 / 取色为后续补充。
+enum class EditorTool { Pen, Arrow, Line, Rect, Ellipse, Mosaic, Blur, Number, Text, Picker };
 
 /// 编辑器窗口。完成时发 committed(合成图),取消时发 cancelled。
 class EditorWindow : public QWidget {
@@ -66,6 +67,12 @@ private:
     void saveToFile();
     void finish();
     void cancel();
+    /// 把色块选中态同步到 m_color(取色器采到调色板外的颜色时全部取消选中)。
+    void syncColorSwatch();
+    /// 把工具选中态同步到 m_tool(取色器采样后程序化切回上一个工具时用)。
+    void syncToolAction();
+    /// 序号标注圆点半径(随粗细档位变化)。
+    qreal badgeRadius() const;
 
     /// 把笔画点串平滑成折线路径(相邻点取中点做二次贝塞尔,避免锯齿)。
     QPainterPath strokePath() const;
@@ -95,6 +102,11 @@ private:
     QGraphicsTextItem* m_textItem = nullptr; // 正在编辑的文字图元
 
     QPixmap m_mosaicSource;                  // 预生成的像素化底图(马赛克纹理)
+    QPixmap m_blurSource;                    // 模糊纹理(首次用模糊工具时惰性生成)
+    QActionGroup* m_colorGroup = nullptr;    // 色块动作组(取色器需同步选中态)
+
+    EditorTool m_prevTool = EditorTool::Pen; // 取色器采样后回退到的工具
+    int m_nextNumber = 1;                    // 序号标注的下一个编号
 };
 
 } // namespace nb
