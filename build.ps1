@@ -110,6 +110,24 @@ if ($needDeploy) {
     Write-Host '  Qt 运行库已部署,跳过(强制重跑用 -Deploy)'
 }
 # nbcore.dll 由 CMake POST_BUILD 自动拷贝;QML 经 qrc 打进 exe,无需部署资源目录
+# ---- 第 4 步:完整性标签修复(托盘图标可见的前提)----
+# 背景:AI 沙箱类工具会给项目目录打上 "Low Mandatory Level" 完整性标签,目录下新建的
+# 可执行文件会继承该标签;而 Windows 是按【可执行文件自身的标签】设定进程令牌的——
+# 于是 nextboard.exe 以 Low(0x1000) 运行,而 Shell(explorer) 为 Medium(0x2000)。
+# 低完整性进程调用 Shell_NotifyIcon 会被 UIPI 拒绝(ERROR_ACCESS_DENIED=5),Qt 又会
+# 静默忽略该返回值 → 现象是:进程存活、热键全部正常,唯独系统托盘图标不显示。
+# 这里把构建目录及其产物显式提升回 Medium,保证每次构建后托盘都能正常注册。
+Step '修复完整性标签 (托盘图标可见的前提)'
+$nbExe = Join-Path $BuildDir 'nextboard.exe'
+icacls $BuildDir /setintegritylevel '(OI)(CI)Medium' > $null
+icacls $nbExe /setintegritylevel Medium > $null
+$nbLabel = (icacls $nbExe | Select-String 'Mandatory Label') -join '; '
+if ($nbLabel -match 'Low Mandatory') {
+    Write-Host "  [WARN] nextboard.exe 完整性仍为 Low,托盘图标可能不显示:$nbLabel" -ForegroundColor Yellow
+} else {
+    Ok '构建目录与 nextboard.exe 完整性级别 = Medium'
+}
+
 # ---- 完成 ----
 $exe = Join-Path $BuildDir 'nextboard.exe'
 Write-Host "`n==== 构建完成 ====" -ForegroundColor Cyan
