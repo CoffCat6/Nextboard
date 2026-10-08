@@ -1,4 +1,6 @@
 // 贴图窗口:置顶无边框,拖动/滚轮缩放/透明度/双击关闭(第一代 pin 交互语义)。
+// DPI:窗口逻辑尺寸 = 原图 ÷ 当前屏 DPR × 用户缩放,物理尺寸恒为「原图 × 缩放」,
+//      跨不同缩放比的屏幕拖动、或改系统缩放,都不会忽大忽小。
 #pragma once
 
 #include <QColor>
@@ -39,12 +41,21 @@ protected:
     void mouseReleaseEvent(QMouseEvent* e) override;
     void wheelEvent(QWheelEvent* e) override;
     void mouseDoubleClickEvent(QMouseEvent* e) override;
+    /// 窗口被拖到不同缩放比的屏幕(或系统缩放变化)时重算尺寸。
+    bool event(QEvent* e) override;
 
 private:
     void applyScale();
+    /// 窗口**当前所在屏**的 DPR;窗口未 show 时回退窗口自身/主屏值。
+    /// 必须用当前屏而非主屏 —— 否则贴到不同缩放比的屏上会整体放大/缩小。
+    qreal currentDpr() const;
+    /// 目标逻辑尺寸 = 原图 × 用户缩放 ÷ DPR。
+    /// 由此保证**物理尺寸 = 原图 × 用户缩放**,与所在屏的 DPR 无关。
+    QSize logicalSizeFor(qreal dpr) const;
 
     QImage m_image;
-    qreal m_scale = 1.0;      // 0.1 ~ 4.0
+    /// 用户缩放(0.1 ~ 4.0);1.0 = 1 图像像素对 1 物理像素。与 DPI 换算解耦。
+    qreal m_zoom = 1.0;
     qreal m_opacity = 1.0;    // 0.3 ~ 1.0(滚轮 + Alt 调节,或 S3 工具条)
     bool m_dragging = false;
     QPoint m_dragOffset;

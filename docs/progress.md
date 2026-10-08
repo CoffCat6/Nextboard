@@ -1135,3 +1135,49 @@ Bash 里直接启动被拦。且 `reg.exe` 仍在黑名单,`vcvars64` 仍受限�
   2. **开启「图片优先」后**:先复制图片、再复制文字 → 按热键应贴**图片**(旧口径);
      删掉全部图片条目后 → 按热键应回退贴最近文字;
   3. 设置里切换开关后无需重启即生效(下次按热键按新口径取数)。
+
+---
+
+## 2026-10-08(四)修复贴图跨屏 DPI:在不同缩放比的屏幕上忽大忽小
+
+### 现象
+
+贴图窗口在多屏(不同缩放比)之间拖动时,图会**忽大忽小**;缩到极小时几乎成一个点。
+
+### 根因(两处,均在 `pin/PinWindow`)
+
+1. **初始尺寸用了主屏的 DPR**:
+   `m_scale = 1.0 / QGuiApplication::primaryScreen()->devicePixelRatio()`,
+   再 `resize(原图 × m_scale)`。窗口 show 之前 `devicePixelRatioF()` 还是主屏值,
+   若贴图落点屏的缩放比 ≠ 主屏(如主屏 100%、副屏 150%),逻辑尺寸就整体偏大/偏小
+   —— 这正是"在不同屏幕上变大变小"的直接来源。
+2. **`m_scale` 把"DPI 换算"和"用户缩放"揉在一个变量里,且不响应 DPR 变化**:
+   查 Qt 源码确认 —— `QWidgetWindow::handleDevicePixelRatioChange()` 只重绘、
+   **不调整窗口几何**(qwidgetwindow.cpp:780);窗口逻辑尺寸不变 → 物理尺寸随 DPR 变化。
+   而滚轮缩放走 `applyScale()` 时又用陈旧的 `m_scale` 重算,和 Qt 的平台层
+   (`QWindowsWindow::handleDpiChanged` 在 WM_DPICHANGED 里 SetWindowPos)互相打架,
+   于是拖动/滚轮来回时尺寸反复跳变,缩放下限(0.1)下再叠一次错误换算就小成一个点。
+
+### 修复(`pin/pin_window.cpp` / `.hpp`)
+
+| 改动 | 说明 |
+| --- | --- |
+| `m_scale` → `m_zoom` | 语义拆开:**`m_zoom` 只表示用户缩放**(1.0 = 1 图像像素对 1 物理像素),与 DPI 换算解耦 |
+| 新增 `logicalSizeFor(dpr)` | 窗口逻辑尺寸 = `原图 × m_zoom ÷ dpr` ⇒ **物理尺寸恒为 原图 × 缩放**,与所在屏 DPR 无关 |
+| 新增 `currentDpr()` | 取窗口**当前所在屏**的 DPR(`QWidget::screen()->devicePixelRatio()`),不用主屏 |
+| 构造函数 | 改用**目标屏**(`screenAt(光标)`)的 DPR 换算初始尺寸 |
+| 新增 `event()` 覆写 | 收到 `DevicePixelRatioChange` / `ScreenChangeInternal` 时,延到事件循环末尾重算尺寸 |
+
+> 为何延后:Qt 在 `screenChanged` 里同步发 `DevicePixelRatioChange`(qwindow.cpp 的
+> `init()` 连接),**早于**平台层 WM_DPICHANGED 的 `SetWindowPos`;立即 `resize` 会被
+> 后者覆盖,故用 `QTimer::singleShot(0, …)` 在几何落定后再定尺寸。
+
+### 验证与限制
+
+- app 编译链接通过(`[37/37] Linking`)、无编译警告;
+- ⚠️ **沙箱无法启动 GUI**,多屏 DPI 行为须在真实桌面验证。确认清单:
+  1. 主屏 100% + 副屏 150%(或反之):在两个屏上分别按 `Ctrl+Shift+P` 贴同一张图 →
+     两处应显示**同样的物理尺寸**(与原图 1:1),不再一大一小;
+  2. 把一张贴图从 100% 屏拖到 150% 屏(再拖回)→ 尺寸**保持不变**;
+  3. 滚轮缩放:1.0 档位下与原图 1:1;缩放到最小仍清晰可辨,不会变成一个点;
+  4. 运行中改系统缩放(如 100%→125%)→ 贴图尺寸按新 DPR 自适应,不残留错位。
