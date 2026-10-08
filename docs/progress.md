@@ -1708,3 +1708,174 @@ F26 曾提到译文另存;已实现过一版(`CoreFacade::saveTextAsFile` + 译�
      面板列表出现 `ocr` 来源的文本条目,内容可被搜索;不弹编辑器、不弹翻译窗口;
   3. 给「延时截图」绑键 → 触发 → 出现倒计时 → 归零后进入框选;
   4. 清空全部快捷键后保存应成功(不再报"快捷键不能为空")。
+
+---
+
+## 2026-10-08(四)翻译默认通道改为微软免密钥端点 + 自定义设置可读性
+
+### 1. 微软翻译改为**免授权端点**,并作为默认通道
+
+**动机**:原先默认是 `openai`(需用户自备 Key),新装用户不配密钥就**完全无法翻译**。
+
+依据 2026-08 起 Edge 内置翻译的端点变更,契约改为:
+
+```
+POST {endpoint}/translatetext?from=<tag>&to=<tag>&isEnterpriseClient=false
+Content-Type: application/json
+Body: ["待翻译文本"]            ← 字符串数组(支持批量)
+→ [{"translations":[{"text":"…","to":"en"}]}]
+```
+
+| 层 | 改动 |
+| --- | --- |
+| `microsoft.rs` | 全量重写:去掉订阅密钥头与区域头、请求体由 `[{"Text":…}]` 改为字符串数组、`from` 自动检测时拼成**空值** `from=`(带 `auto` 会被判非法)、路径改为 `/translatetext` |
+| `settings.rs` | `MicrosoftProvider` 精简为只剩 `endpoint`(默认 `https://edge.microsoft.com/translate`);**默认提供方 `openai` → `microsoft`**;校验去掉区域规则 |
+| `translate/mod.rs` | 探测文案改为「可用(端点 · 免密钥)」 |
+| `SettingsDrawer.qml` | 服务商下拉顺序改为**微软在前**;去掉密钥/区域字段,改为端点 + 说明;补充"非公开端点、无 SLA"的提示 |
+
+**权衡**:免授权端点属 Edge 前端内部接口,**无 SLA**;因此端点保留可配置,失败时给可读错误,
+用户可随时切到 `openai` / `custom`。原 Azure 订阅密钥版实现**已按需求移除**。
+
+### 2. 自定义 HTTP 设置更易懂
+
+- 顶部总说明:讲清"用占位符描述发什么/从哪取译文",列出 5 个占位符与 `${name:-默认值}` 写法;
+- 逐字段说明:请求地址(可用占位符、按 URL 编码)、API Key(**只替换占位符,不会自动加鉴权头**)、
+  模型/部署名、请求头(每行 `Name: Value`)、请求体(原文引号换行会自动转义)、响应取值路径;
+- 末尾给一份**可照抄的完整示例**(DeepL 风格:地址/请求头/请求体/响应路径),并提醒
+  各服务语言代码写法可能不同(DeepL 用 `ZH`,本项目默认发 `zh-Hans`)。
+
+### 3. 请求头/请求体编辑框可滚动
+
+原先两个 `TextArea` 用固定 `preferredHeight`(54/66)且**不可滚动**,内容一多就被截断看不到。
+现改为 `ScrollView` 包裹:高度提到 84/96、`clip: true`、横向滚动条关闭(靠自动换行),
+并补上主题化背景与聚焦高亮边框。
+
+### 验证与限制
+
+- core `cargo test`:**166 项**通过。改动涉及的用例:
+  `dispatch_reports_missing_key_per_provider` → 收窄为 `..._for_keyed_provider`(microsoft 不再需要密钥);
+  `validate_checks_microsoft_region_and_proxy` → `..._endpoint_and_proxy`;
+  microsoft 侧用例全部重写,新增"免授权:请求里**不得出现任何鉴权头**"与
+  "自动检测时 `from` 必须为空值"两条契约测试;
+- app 编译链接通过(`[6/6] Linking`)、无编译警告;`qmllint` 无新增告警类别;
+- ⚠️ 需真机确认:
+  1. 设置 → 翻译:默认即为「微软翻译(免密钥)」,**不填任何密钥**点「测试连接」应返回可用;
+  2. 翻译窗口实际翻译一段中英文,译文正确;断网时应给出可读错误而不是静默失败;
+  3. 切到「自定义 HTTP」:请求头/请求体输入多行内容后**可滚动查看**,不再被截断;
+     说明文字与示例可读、能照着填通一个自定义服务。
+
+### 追加修复(真机反馈):微软端点测试报 404
+
+**现象**:切到「微软翻译」点「测试连接」→ `microsoft 接口地址可能有误(HTTP 404):
+{"error":"Not found","rc":1}`。
+
+**排查**(先实测端点、再查真实配置,没有靠猜):
+
+1. 直接 curl 文档给的地址 —— **HTTP 200 且返回正常译文**(还带 `detectedLanguage`):
+   `POST https://edge.microsoft.com/translate/translatetext?from=&to=zh-Hans&isEnterpriseClient=false`
+   → 端点与我的实现都是对的,问题在**实际发出的地址**。
+2. 读本机真实配置 `%LOCALAPPDATA%/Nextboard/Nextboard/app_config.json`:
+   ```json
+   "translateMicrosoft": { "endpoint": "" },
+   "translateProvider": "openai"
+   ```
+   **端点是空串** —— 早期 UI 只把默认地址当 `placeholderText`,值本身是空的;
+   一旦保存就写进空串,`endpoint("")` 会拼出**相对地址** `/translatetext?…` → 请求必然失败。
+
+**修复(两处,防御 + 可见)**
+
+| 位置 | 改动 |
+| --- | --- |
+| `translate/microsoft.rs` | 新增 `pub const DEFAULT_ENDPOINT`(单一来源);`endpoint()` 在 `base` 为空时**回退默认端点**,不再拼相对地址 |
+| `settings.rs` | `MicrosoftProvider::default()` 改用该常量;新增加载期修复 `repair_blank_microsoft_endpoint()`(与既有 `migrate_legacy_*` 同套路),把空端点补成默认值 —— 这样**设置页输入栏里会直接显示** `https://edge.microsoft.com/translate`,而不是只有灰字提示 |
+
+**说明**:`translateProvider` 仍是 `openai` 属**正常**行为 —— 你此前显式配过 openai(智谱),
+新默认值只对**全新配置**生效,不会覆盖用户的既有选择。要用微软通道,在下拉里选「微软翻译」即可。
+
+**验证**:core `cargo test` **168 项**通过(新增 `endpoint_falls_back_to_default_when_base_blank`
+与 `load_repairs_blank_microsoft_endpoint`,后者同时断言"已填自定义端点不得被覆盖");
+app 构建通过、无警告。真机确认:重启后设置 → 翻译 → 微软翻译,输入栏应**直接显示**
+`https://edge.microsoft.com/translate`,点「测试连接」应返回可用。
+
+---
+
+## 2026-10-09(五)翻译语种代码可在主界面自定义
+
+### 背景
+
+接彩云小译(自定义通道)时发现语言代码对不上:彩云简体中文是 `zh`,本项目是 `zh-Hans`,
+拼出的 `auto2zh-Hans` 被服务拒绝(**实测 HTTP 409 Unsupported trans_type**)。
+
+### 先做实测,再定方案
+
+| 探针 | 结果 |
+| --- | --- |
+| 彩云 `trans_type=auto2zh` | HTTP 200 ✓ |
+| 彩云 `auto2zh-Hans` | HTTP **409** `Unsupported trans_type` ✗ |
+| 微软端点 `to=zh` | HTTP **200** ✓(`to=zh-Hans` 同样 200) |
+
+结论:**两家都接受 `zh`** —— 所以不需要"按服务商维护一张语言代码映射表",
+只要语言代码本身可自定义就够了(原计划加的 `langMap` 字段已按此**撤除**,
+设置页保持"统一使用 `${from}` / `${to}`"的简单形态)。
+
+### 实现(翻译窗口)
+
+| 位置 | 改动 |
+| --- | --- |
+| `TranslateWindow.qml` | 语言栏新增**可编辑的「语种代码」输入框**(紧邻目标语言下拉);下拉仍负责常用语言,选中时同步写入代码框;代码框可直接改写为任意代码(回车/失焦即保存) |
+| 同上 | 新增 `targetCodeValue()` / `applyTargetLang()`:`doTranslate` 与"历史回填"统一以**代码框为准**(此前只读下拉的平行数组,自定义代码会被忽略) |
+
+这样 `${from}` / `${to}` 携带的就是用户填的代码,彩云、DeepL(大写)这类
+"代码写法不同"的服务都能直接用,不必改设置页模板。
+
+### 验证与限制
+
+- core `cargo test`:**168 项**通过(撤除映射表后回到原数量,无残留);
+- app 编译链接通过(`[8/8] Linking`)、无编译警告;`qmllint` 无新增告警类别;
+- ⚠️ 需真机确认:
+  1. 翻译窗口语言栏出现「语种代码」框,默认显示当前目标语言代码(如 `zh-Hans`);
+  2. 把它改成 `zh` → 翻译一段英文:彩云通道应正常出中文(不再 409);
+  3. 从下拉选「English」→ 代码框自动变 `en` 并持久化;重开窗口应保持;
+  4. 点翻译历史回填:代码框应回到该条历史当时使用的语言代码。
+
+---
+
+## 2026-10-09(五)语言下拉显示修复 + 彩云小译内置化
+
+### 1. 修复:语言下拉被省略成「…」
+
+上一轮把目标语言下拉写成固定 `Layout.preferredWidth: 110` 以腾出代码框的位置,
+结果「简体中文」放不下、被 `elide` 成「…」(用户截图确认)。
+
+改为**按内容自适应**并保留下限:`Layout.preferredWidth: Math.max(140, implicitWidth)` ——
+Basic ComboBox 的 `implicitWidth` 由 `displayText` 宽度推出,语言名长短不一也不会再截断;
+代码框相应收窄到 78 以守住这一行不溢出(窗口宽 520)。
+
+### 2. 新增内置服务商:彩云小译(LingoCloud)
+
+先实测确认了接口行为(见上节),再按同一套 provider 结构实现:
+
+| 层 | 改动 |
+| --- | --- |
+| `translate/caiyun.rs`(新增) | `POST {endpoint}/v1/translator`;请求头 `X-Authorization: token <token>`(**前缀 `token ` 是协议的一部分**);请求体 `{"source":[…],"trans_type":"auto2zh","detect":…,"media":"text"}`;响应取 `target[0]`;200 但 `rc != 0` 时优先报出服务给的原因 |
+| 同上 | **语言代码转换**:本项目 `zh-Hans` → 彩云 `zh`(实测直接发 `zh-Hans` 会 **409**);`zh-Hant` 与其余代码一致;空/`auto` 统一成 `auto` 且 `detect=true` |
+| 同上 | 从响应 `trans_type`(如 `en2zh`)反推源语言,填进 `detected_source` |
+| `settings.rs` | 新增 `CaiyunProvider { endpoint, token }`;**默认 Token 即官方测试 Token `3975l6lr5pcbvidl6jl2`**;provider 白名单加 `caiyun` |
+| `translate/mod.rs` | `Provider::Caiyun` 枚举/`as_str`/`parse`/分派/探测/端点探测全部接入 |
+| `SettingsDrawer.qml` | 下拉新增「彩云小译(内置测试 Token)」+ Token / 接口地址两个字段 |
+
+**关于测试 Token**:官方文档明确"不保证该 Token 的可用性",故设置页按需求给出提示 ——
+*"已预填官方测试 Token,装上即可试;官方不保证其稳定可用性,持续使用请到彩云科技开放平台
+申请正式 Token 后替换(新用户有 100 万字 / 1 个月免费额度)"*。
+
+### 验证与限制
+
+- core `cargo test`:**177 项**通过(新增 9 条彩云用例:语言代码转换 / 方向串拼接 /
+  请求体形状 / 端点回退 / 响应解析(含 200 带业务错误) / 401 映射 / 缺 Token /
+  环回端到端(**钉住 `token ` 前缀**与请求体形状));
+- app 编译链接通过(`[8/8] Linking`)、无编译警告;`qmllint` 无新增告警类别;
+- ⚠️ 需真机确认:
+  1. 翻译窗口语言下拉完整显示「简体中文」等语言名(不再是「…」);
+  2. 设置 → 翻译选「彩云小译」→ Token 已预填测试 Token,点「测试连接」返回可用;
+  3. 用彩云翻译中英双向:选「简体中文」→ 英文出中文;把语言代码改成 `en` → 中文出英文;
+  4. Token 改成乱码 → 报「鉴权失败(HTTP 401): Invalid token」而不是静默失败。

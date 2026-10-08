@@ -10,6 +10,8 @@ pub mod json_path;
 pub mod lang;
 pub mod microsoft;
 pub mod openai;
+/// 彩云小译（LingoCloud）。
+pub mod caiyun;
 // 测试专用环回服务端:仅编译进测试,不进入发布产物
 #[cfg(test)]
 pub mod test_server;
@@ -26,6 +28,7 @@ use crate::error::{AppError, AppResult};
 /// 提供方显示名(用于状态条与日志,不含密钥)。
 pub const PROVIDER_OPENAI: &str = "openai";
 pub const PROVIDER_MICROSOFT: &str = "microsoft";
+pub const PROVIDER_CAIYUN: &str = "caiyun";
 pub const PROVIDER_CUSTOM: &str = "custom";
 
 /// 已配置的提供方枚举。
@@ -33,6 +36,7 @@ pub const PROVIDER_CUSTOM: &str = "custom";
 pub enum Provider {
     OpenAi,
     Microsoft,
+    Caiyun,
     Custom,
 }
 
@@ -43,6 +47,7 @@ impl Provider {
         match value.trim().to_ascii_lowercase().as_str() {
             "" | PROVIDER_OPENAI => Provider::OpenAi,
             PROVIDER_MICROSOFT => Provider::Microsoft,
+            PROVIDER_CAIYUN => Provider::Caiyun,
             PROVIDER_CUSTOM => Provider::Custom,
             other => {
                 log::warn!("未知的翻译提供方「{other}」,回退 OpenAI 兼容");
@@ -55,6 +60,7 @@ impl Provider {
         match self {
             Provider::OpenAi => PROVIDER_OPENAI,
             Provider::Microsoft => PROVIDER_MICROSOFT,
+            Provider::Caiyun => PROVIDER_CAIYUN,
             Provider::Custom => PROVIDER_CUSTOM,
         }
     }
@@ -167,6 +173,7 @@ pub fn translate_with_settings(
         Provider::Microsoft => {
             microsoft::translate(&settings.translate_microsoft, &request, timeout, proxy)
         }
+        Provider::Caiyun => caiyun::translate(&settings.translate_caiyun, &request, timeout, proxy),
         // S3 已落地:模板化请求 + 用户配置的响应取值路径
         Provider::Custom => custom::translate(&settings.translate_custom, &request, timeout, proxy),
     }
@@ -262,18 +269,19 @@ pub fn probe(settings: &crate::settings::Settings, provider: &str) -> TranslateP
             }),
         Provider::Microsoft => {
             microsoft::translate(&settings.translate_microsoft, &sample, timeout, proxy).map(|_| {
-                let region = settings.translate_microsoft.region.trim();
                 format!(
-                    "可用({} · 区域 {})",
-                    settings.translate_microsoft.endpoint.trim(),
-                    if region.is_empty() {
-                        "未指定"
-                    } else {
-                        region
-                    }
+                    "可用({} · 免密钥)",
+                    settings.translate_microsoft.endpoint.trim()
                 )
             })
         }
+        Provider::Caiyun => caiyun::translate(&settings.translate_caiyun, &sample, timeout, proxy)
+            .map(|_| {
+                format!(
+                    "可用({})",
+                    caiyun::endpoint(&settings.translate_caiyun.endpoint)
+                )
+            }),
         Provider::Custom => custom::translate(&settings.translate_custom, &sample, timeout, proxy)
             .map(|_| {
                 format!(
@@ -360,6 +368,7 @@ fn provider_endpoint(settings: &crate::settings::Settings) -> Option<String> {
     let url = match Provider::parse(&settings.translate_provider) {
         Provider::OpenAi => Some(settings.translate_openai.base_url.trim().to_owned()),
         Provider::Microsoft => Some(settings.translate_microsoft.endpoint.trim().to_owned()),
+        Provider::Caiyun => Some(settings.translate_caiyun.endpoint.trim().to_owned()),
         Provider::Custom => {
             let url = settings.translate_custom.url.trim().to_owned();
             (!url.is_empty()).then_some(url)
@@ -477,8 +486,6 @@ mod tests {
                     translate_provider: "microsoft".into(),
                     translate_microsoft: crate::settings::MicrosoftProvider {
                         endpoint: format!("http://127.0.0.1:{port}"),
-                        api_key: "k".into(),
-                        ..Default::default()
                     },
                     ..Default::default()
                 },
@@ -516,30 +523,20 @@ mod tests {
         }
     }
 
-    /// 未配置 Key 的提供方应由各自实现给出可读错误(而非 panic 或空译文)。
+    /// 需要密钥的通道应由各自实现给出可读错误(而非 panic 或空译文)。
+    ///
+    /// microsoft 已改为**免授权端点**（默认提供方），不再要求密钥 ——
+    /// 它"无密钥也能翻译"由 `translate::microsoft` 的环回端到端用例覆盖。
     #[test]
-    fn dispatch_reports_missing_key_per_provider() {
-        for (name, settings) in [
-            (
-                "openai",
-                Settings {
-                    translate_provider: "openai".into(),
-                    ..Default::default()
-                },
-            ),
-            (
-                "microsoft",
-                Settings {
-                    translate_provider: "microsoft".into(),
-                    ..Default::default()
-                },
-            ),
-        ] {
-            let err = translate_with_settings(&settings, "你好", None, None)
-                .expect_err("未配置 Key 应报错")
-                .to_string();
-            assert!(err.contains("未配置"), "{name} 应提示未配置 Key: {err}");
-        }
+    fn dispatch_reports_missing_key_for_keyed_provider() {
+        let settings = Settings {
+            translate_provider: "openai".into(),
+            ..Default::default()
+        };
+        let err = translate_with_settings(&settings, "你好", None, None)
+            .expect_err("未配置 Key 应报错")
+            .to_string();
+        assert!(err.contains("未配置"), "openai 应提示未配置 Key: {err}");
     }
 
     #[test]

@@ -24,12 +24,32 @@ Rectangle {
     /// 目标语言持久化:settings.translateTargetLang 为唯一来源。
     /// ComboBox 用纯字符串 model(见 ReadableComboBox 的注入约束),
     /// 语言代码由 targetLang.langCodes 平行数组维护。
+    ///
+    /// ⚠️ **代码输入框才是权威**:下拉只覆盖常用语言,代码框可填任意服务商代码
+    /// (如彩云小译要 `zh`、DeepL 要大写 `ZH`)。发请求时以代码框为准。
     function loadTargetLang() {
         const resp = Core.call("get_settings")
         if (!resp.ok) return
         const code = resp.data.translateTargetLang
+        targetCode.text = code || ""
         const idx = targetLang.langCodes.indexOf(code)
         if (idx >= 0) targetLang.currentIndex = idx
+    }
+
+    /// 当前生效的目标语言代码:优先取代码框(用户可自定义),空则回退下拉选中项。
+    function targetCodeValue() {
+        const typed = targetCode.text.trim()
+        if (typed.length > 0) return typed
+        const idx = targetLang.currentIndex
+        return idx >= 0 ? targetLang.langCodes[idx] : ""
+    }
+
+    /// 同步目标语言:下拉与代码框一起更新,并持久化。
+    function applyTargetLang(code) {
+        targetCode.text = code
+        const idx = targetLang.langCodes.indexOf(code)
+        if (idx >= 0) targetLang.currentIndex = idx
+        saveTargetLang(code)
     }
 
     function saveTargetLang(code) {
@@ -73,7 +93,7 @@ Rectangle {
         statusLabel.text = "翻译中…"
         statusLabel.isError = false
         root.translating = true
-        Core.translateText(text, "", targetLang.langCodes[targetLang.currentIndex])
+        Core.translateText(text, "", root.targetCodeValue())
     }
 
     function copyResult() {
@@ -105,8 +125,8 @@ Rectangle {
         if (!item) return
         input.text = item.sourceText || ""
         output.text = item.targetText || ""
-        const idx = targetLang.langCodes.indexOf(item.to)
-        if (idx >= 0) targetLang.currentIndex = idx
+        // 当时用的语言也要回填(含自定义代码)
+        root.applyTargetLang(item.to)
         statusLabel.text = "已回填历史条目"
         statusLabel.isError = false
         historyOverlay.visible = false
@@ -306,14 +326,43 @@ Rectangle {
                 }
                 ReadableComboBox {
                     id: targetLang
-                    Layout.preferredWidth: 150
+                    // 宽度按**内容自适应**(语言名长短不一),并给一个下限。
+                    // ⚠️ 不要写死宽度:写死后「简体中文」这类较长的名字会被省略成「…」。
+                    Layout.preferredWidth: Math.max(140, implicitWidth)
                     Layout.preferredHeight: Theme.metrics.controlHeight
                     /// 与 model 一一对应的语言代码(持久化到 settings.translateTargetLang)
                     readonly property var langCodes: ["zh-Hans", "zh-Hant", "en", "ja",
                                                       "ko", "fr", "de", "ru"]
                     model: ["简体中文", "繁體中文", "English", "日本語",
                             "한국어", "Français", "Deutsch", "Русский"]
-                    onActivated: root.saveTargetLang(langCodes[currentIndex])
+                    // 选中常用语言 → 同步写进右边的代码框并持久化
+                    onActivated: root.applyTargetLang(langCodes[currentIndex])
+                }
+                // 语种代码:可自定义 —— 下拉只覆盖常用语言,这里能填任意服务商要求的代码
+                // (彩云小译简体中文是 zh、DeepL 用大写 ZH),发请求时以它为准。
+                TextField {
+                    id: targetCode
+                    Layout.preferredWidth: 78
+                    Layout.preferredHeight: Theme.metrics.controlHeight
+                    placeholderText: "语种代码"
+                    horizontalAlignment: TextInput.AlignHCenter
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.metrics.fontCaption
+                    color: Theme.colors.textPrimary
+                    placeholderTextColor: Theme.colors.textTertiary
+                    selectionColor: Theme.colors.accent
+                    selectedTextColor: Theme.colors.accentText
+                    ToolTip.visible: hovered
+                    ToolTip.text: "发请求时实际使用的语言代码,可直接改写(如 zh、ZH)"
+                    background: Rectangle {
+                        radius: Theme.metrics.radiusInput
+                        color: Theme.colors.surfaceSecondary
+                        border.width: Theme.metrics.borderWidth
+                        border.color: targetCode.activeFocus ? Theme.colors.accent
+                                                             : Theme.colors.border
+                    }
+                    // 回车或失焦即保存
+                    onEditingFinished: root.saveTargetLang(text.trim())
                 }
                 ThemedButton {
                     variant: "ghost"

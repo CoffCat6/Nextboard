@@ -13,7 +13,7 @@ AppDrawer {
     id: root
 
     /// 服务提供方,取值与 core 的 Provider::parse 一致
-    readonly property var providers: ["openai", "microsoft", "custom"]
+    readonly property var providers: ["microsoft", "openai", "caiyun", "custom"]
     readonly property string provider: providers[Math.max(0, providerCombo.currentIndex)]
 
     /// 代理是否处于手动配置模式(控制 manual 字段组的可见性)。
@@ -305,8 +305,10 @@ AppDrawer {
 
         const ms = s.translateMicrosoft || {}
         msEndpoint.text = ms.endpoint || ""
-        msApiKey.text = ms.apiKey || ""
-        msRegion.text = ms.region || ""
+
+        const cy = s.translateCaiyun || {}
+        cyToken.text = cy.token || ""
+        cyEndpoint.text = cy.endpoint || ""
 
         const cu = s.translateCustom || {}
         cuUrl.text = cu.url || ""
@@ -380,9 +382,12 @@ AppDrawer {
 
         const ms = s.translateMicrosoft || {}
         ms.endpoint = msEndpoint.text
-        ms.apiKey = msApiKey.text
-        ms.region = msRegion.text
         s.translateMicrosoft = ms
+
+        const cy = s.translateCaiyun || {}
+        cy.token = cyToken.text.trim()
+        cy.endpoint = cyEndpoint.text.trim()
+        s.translateCaiyun = cy
 
         const cu = s.translateCustom || {}
         cu.url = cuUrl.text
@@ -814,7 +819,7 @@ AppDrawer {
             ReadableComboBox {
                 id: providerCombo
                 Layout.fillWidth: true
-                model: ["OpenAI 兼容接口", "微软翻译", "自定义 HTTP"]
+                model: ["微软翻译(免密钥,开箱可用)", "AI 翻译(OpenAI 兼容)", "彩云小译(内置测试 Token)", "自定义 HTTP"]
                 onActivated: root.scheduleSave()
             }
 
@@ -845,33 +850,52 @@ AppDrawer {
                 placeholderText: "gpt-4o-mini"
             }
 
-            // 微软翻译
+            // 微软翻译(免授权端点)
+            HintLabel {
+                visible: root.provider === "microsoft"
+                text: "默认通道:使用 Edge 内置翻译的免授权端点,**无需申请任何密钥**即可翻译。"
+                      + "该端点非微软公开 API(无 SLA),若日后失效,可改下方地址或切到其它通道。"
+            }
             FieldLabel { text: "接口地址"; visible: root.provider === "microsoft" }
             ReadableTextField {
                 id: msEndpoint
                 onTextEdited: root.scheduleSave()
                 visible: root.provider === "microsoft"
                 Layout.fillWidth: true
-                placeholderText: "https://api.translator.azure.cn"
+                placeholderText: "https://edge.microsoft.com/translate"
             }
-            FieldLabel { text: "API Key"; visible: root.provider === "microsoft" }
-            ReadableTextField {
-                id: msApiKey
-                onTextEdited: root.scheduleSave()
-                visible: root.provider === "microsoft"
-                Layout.fillWidth: true
-                echoMode: TextInput.Password
+
+            // 彩云小译(内置)
+            HintLabel {
+                visible: root.provider === "caiyun"
+                text: "内置通道:已预填**官方测试 Token**,装上即可试。官方不保证该 Token 的"
+                      + "稳定可用性,持续使用请到彩云科技开放平台申请正式 Token 后替换下方内容"
+                      + "(新用户有 100 万字 / 1 个月免费额度)。"
             }
-            FieldLabel { text: "区域(可选)"; visible: root.provider === "microsoft" }
+            FieldLabel { text: "访问 Token"; visible: root.provider === "caiyun" }
             ReadableTextField {
-                id: msRegion
+                id: cyToken
                 onTextEdited: root.scheduleSave()
-                visible: root.provider === "microsoft"
+                visible: root.provider === "caiyun"
                 Layout.fillWidth: true
-                placeholderText: "如 eastasia"
+                placeholderText: "3975l6lr5pcbvidl6jl2"
+            }
+            FieldLabel { text: "接口地址"; visible: root.provider === "caiyun" }
+            ReadableTextField {
+                id: cyEndpoint
+                onTextEdited: root.scheduleSave()
+                visible: root.provider === "caiyun"
+                Layout.fillWidth: true
+                placeholderText: "https://api.interpreter.caiyunai.com"
             }
 
             // 自定义 HTTP
+            HintLabel {
+                visible: root.provider === "custom"
+                text: "按自己的接口拼请求:下面用占位符描述「发什么」与「从哪取译文」。"
+                      + "占位符 ${text} ${from} ${to} ${apiKey} ${model} 会在发送前替换成实际值"
+                      + "(支持 ${model:-默认值} 写法);未知占位符会直接报错,不会静默留空。"
+            }
             FieldLabel { text: "请求地址"; visible: root.provider === "custom" }
             ReadableTextField {
                 id: cuUrl
@@ -879,6 +903,10 @@ AppDrawer {
                 visible: root.provider === "custom"
                 Layout.fillWidth: true
                 placeholderText: "https://…"
+            }
+            HintLabel {
+                visible: root.provider === "custom"
+                text: "完整接口地址(含查询参数也可以);值里同样可用占位符,会按 URL 编码转义。"
             }
             FieldLabel { text: "请求方法"; visible: root.provider === "custom" }
             ReadableComboBox {
@@ -896,48 +924,108 @@ AppDrawer {
                 Layout.fillWidth: true
                 echoMode: TextInput.Password
             }
-            FieldLabel { text: "模型(可选)"; visible: root.provider === "custom" }
+            HintLabel {
+                visible: root.provider === "custom"
+                text: "只用于替换 ${apiKey} 占位符,**不会**自动加到请求头 —— 需要哪种鉴权头请自己写在请求头里。"
+            }
+            FieldLabel { text: "模型 / 部署名(可选)"; visible: root.provider === "custom" }
             ReadableTextField {
                 id: cuModel
                 onTextEdited: root.scheduleSave()
                 visible: root.provider === "custom"
                 Layout.fillWidth: true
             }
-            FieldLabel { text: "请求头(每行一条 Name: Value)"; visible: root.provider === "custom" }
-            TextArea {
-                id: cuHeaders
-                onTextEdited: root.scheduleSave()
+            HintLabel {
+                visible: root.provider === "custom"
+                text: "只用于替换 ${model} 占位符(Azure 风格接口常把部署名写在地址里)。"
+            }
+            // ---- 请求头(可滚动:内容多时不再被截断) ----
+            FieldLabel { text: "请求头"; visible: root.provider === "custom" }
+            HintLabel {
+                visible: root.provider === "custom"
+                text: "每行一条,格式 Name: Value;值里可用占位符,如 Authorization: Bearer ${apiKey}。"
+            }
+            ScrollView {
+                id: cuHeadersScroll
                 visible: root.provider === "custom"
                 Layout.fillWidth: true
-                Layout.preferredHeight: 54
-                wrapMode: TextArea.WrapAnywhere
-                placeholderText: "Content-Type: application/json"
-                color: Theme.colors.textPrimary
-                placeholderTextColor: Theme.colors.textTertiary
-                selectionColor: Theme.colors.accent
-                selectedTextColor: Theme.colors.accentText
+                Layout.preferredHeight: 84
+                clip: true
+                ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                background: Rectangle {
+                    color: Theme.colors.surfaceSecondary
+                    radius: Theme.metrics.radiusInput
+                    border.width: Theme.metrics.borderWidth
+                    border.color: cuHeaders.activeFocus ? Theme.colors.accent : Theme.colors.border
+                }
+                TextArea {
+                    id: cuHeaders
+                    onTextEdited: root.scheduleSave()
+                    wrapMode: TextArea.WrapAnywhere
+                    placeholderText: "Content-Type: application/json"
+                    color: Theme.colors.textPrimary
+                    placeholderTextColor: Theme.colors.textTertiary
+                    selectionColor: Theme.colors.accent
+                    selectedTextColor: Theme.colors.accentText
+                    padding: 8
+                }
             }
+
+            // ---- 请求体模板(可滚动) ----
             FieldLabel { text: "请求体模板"; visible: root.provider === "custom" }
-            TextArea {
-                id: cuBody
-                onTextEdited: root.scheduleSave()
+            HintLabel {
+                visible: root.provider === "custom"
+                text: "按目标接口的 JSON 结构写,原文放在 ${text} 的位置;"
+                      + "原文里的引号与换行会自动转义,不会破坏 JSON。GET 请求可留空。"
+            }
+            ScrollView {
+                id: cuBodyScroll
                 visible: root.provider === "custom"
                 Layout.fillWidth: true
-                Layout.preferredHeight: 66
-                wrapMode: TextArea.WrapAnywhere
-                placeholderText: "可用 ${text} ${from} ${to} ${apiKey} ${model}"
-                color: Theme.colors.textPrimary
-                placeholderTextColor: Theme.colors.textTertiary
-                selectionColor: Theme.colors.accent
-                selectedTextColor: Theme.colors.accentText
+                Layout.preferredHeight: 96
+                clip: true
+                ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                background: Rectangle {
+                    color: Theme.colors.surfaceSecondary
+                    radius: Theme.metrics.radiusInput
+                    border.width: Theme.metrics.borderWidth
+                    border.color: cuBody.activeFocus ? Theme.colors.accent : Theme.colors.border
+                }
+                TextArea {
+                    id: cuBody
+                    onTextEdited: root.scheduleSave()
+                    wrapMode: TextArea.WrapAnywhere
+                    placeholderText: "{\"text\": [\"${text}\"], \"target_lang\": \"${to}\"}"
+                    color: Theme.colors.textPrimary
+                    placeholderTextColor: Theme.colors.textTertiary
+                    selectionColor: Theme.colors.accent
+                    selectedTextColor: Theme.colors.accentText
+                    padding: 8
+                }
             }
+
+            // ---- 响应取值路径 ----
             FieldLabel { text: "响应取值路径"; visible: root.provider === "custom" }
+            HintLabel {
+                visible: root.provider === "custom"
+                text: "从响应 JSON 里取译文的路径,用点号与下标逐层往下写。"
+            }
             ReadableTextField {
                 id: cuPath
                 onTextEdited: root.scheduleSave()
                 visible: root.provider === "custom"
                 Layout.fillWidth: true
-                placeholderText: "如 data.translations[0].text"
+                placeholderText: "如 translations[0].text"
+            }
+            HintLabel {
+                visible: root.provider === "custom"
+                text: "完整示例(以 DeepL 为例):\n"
+                      + "地址 https://api-free.deepl.com/v2/translate\n"
+                      + "请求头 Authorization: DeepL-Auth-Key ${apiKey}\n"
+                      + "请求体 {\"text\":[\"${text}\"],\"target_lang\":\"${to}\"}\n"
+                      + "响应路径 translations[0].text\n"
+                      + "注意:各服务的语言代码写法可能不同(DeepL 用大写 ZH)。"
+                      + "语言代码在翻译窗口顶部可选可改,按服务要求填即可。"
             }
 
             FieldLabel { text: "超时(秒)" }

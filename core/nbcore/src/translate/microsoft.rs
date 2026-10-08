@@ -1,14 +1,17 @@
-//! 微软翻译（Azure AI Translator v3.0，Phase 7 F22）。
+//! 微软翻译（**免授权端点**，Phase 7 F22 改造）。
 //!
-//! 契约（已按官方文档核实，docs/phase7.md §4.1）：
-//! - `POST {endpoint}/translate?api-version=3.0&to=<tag>[&from=<tag>]`
-//! - 请求头 `Ocp-Apim-Subscription-Key: <key>`；区域或多服务资源**必须**再带
-//!   `Ocp-Apim-Subscription-Region: <region>`
-//! - 请求体为 JSON 数组：`[{"Text":"…"}]`
-//! - 响应为 JSON 数组：`[{"detectedLanguage":{"language":"en"},"translations":[{"text":"…","to":"zh-Hans"}]}]`
-//! - 单请求上限 50000 字符（跨所有目标语言合计），已在 `validate_request` 统一拦截
+//! 契约（依据 2026-08 起 Edge 内置翻译的端点变更，见 `docs/progress.md`）：
+//! - `POST {endpoint}/translatetext?from=<tag>&to=<tag>&isEnterpriseClient=false`
+//! - **无需任何鉴权**：不带 `Authorization`、不带订阅密钥
+//! - 请求体为 JSON **字符串数组**：`["你好世界","早上好"]`（支持批量；本项目每次一条）
+//! - 响应为 JSON 数组：`[{"translations":[{"text":"…","to":"en"}]}]`
+//! - `from` 留空 = 由服务自动检测源语言
 //!
-//! **默认端点为中国版**（21Vianet 运营，用户决策 U1）；国际版改设置里的 `endpoint` 即可。
+//! 选它当默认提供方的理由：**零配置、装上就能翻译**（用户不必先申请密钥）。
+//!
+//! ⚠️ 这是 Edge 前端使用的**非公开端点**，没有 SLA，路径与风控策略可能随时调整。
+//! 因此端点保留可配置（设置 → 翻译 → 接口地址），失败时给出可读错误，
+//! 用户可随时切到 `openai` / `custom` 通道。
 
 use crate::error::{AppError, AppResult};
 use crate::settings::MicrosoftProvider;
@@ -16,34 +19,41 @@ use crate::translate::http::{HttpMethod, HttpRequest, HttpResponse};
 use crate::translate::lang;
 use crate::translate::{status_error, value_as_text, Provider, TranslateRequest, TranslateResult};
 
-/// API 版本：v3.0 是当前稳定版（官方参考文档）。
-const API_VERSION: &str = "3.0";
-
 /// 译文的响应取值路径（首元素为数组，故以 `[0]` 起始）。
 pub const RESPONSE_PATH: &str = "[0].translations[0].text";
 
-/// 探测到的源语言路径；服务未返回时为缺失，按 `None` 处理。
+/// 探测到的源语言路径。免授权端点通常**不返回**该字段，缺失时按 `None` 降级
+/// （保留解析是为了兼容同形态的其它实现）。
 pub const DETECTED_PATH: &str = "[0].detectedLanguage.language";
 
-/// 从基础端点构造 `/translate` 地址。
+/// 固定查询参数：抓包显示 Edge 前端始终带该值。
+const ENTERPRISE_FLAG: &str = "isEnterpriseClient=false";
+
+/// 默认端点（免授权）。设置层与端点构造共用同一个常量，避免两处各写一份而漂移。
+pub const DEFAULT_ENDPOINT: &str = "https://edge.microsoft.com/translate";
+
+/// 从基础端点构造 `/translatetext` 地址。
 ///
-/// 端点可由用户改成带路径的自定义域（虚拟网络场景下形如
-/// `https://<domain>.cognitiveservices.azure.com/translator/text/v3.0`），
-/// 故这里只在末尾追加 `/translate`，不假设端点一定是纯域名。
+/// `from` 留空（或 `auto`）时拼成 `from=`，由服务自动检测源语言 —— 带 `from=auto`
+/// 会被服务判为非法语言，故必须真的留空。
+///
+/// `base` 为空时回退到 [`DEFAULT_ENDPOINT`]：空端点会拼出**相对地址**
+/// （`/translatetext?…`），请求必然失败，回退比报错更有用。
 pub fn endpoint(base: &str, to: &str, from: &str) -> String {
     let base = base.trim().trim_end_matches('/');
-    let mut url = format!("{base}/translate?api-version={API_VERSION}&to={to}");
-    // `auto` 表示交由服务自动检测：省略 from 参数（带 from=auto 会被服务判为非法语言）
-    if !from.trim().is_empty() && !from.trim().eq_ignore_ascii_case(lang::AUTO) {
-        url.push_str("&from=");
-        url.push_str(from.trim());
-    }
-    url
+    let base = if base.is_empty() { DEFAULT_ENDPOINT } else { base };
+    let from = from.trim();
+    let from_param = if from.is_empty() || from.eq_ignore_ascii_case(lang::AUTO) {
+        ""
+    } else {
+        from
+    };
+    format!("{base}/translatetext?from={from_param}&to={to}&{ENTERPRISE_FLAG}")
 }
 
-/// 构造请求体：v3.0 接受元素数组，每个元素含 `Text` 字段。
+/// 构造请求体：字符串数组，每项一段待翻译文本。
 pub fn build_body(request: &TranslateRequest) -> serde_json::Value {
-    serde_json::json!([{ "Text": request.text }])
+    serde_json::json!([request.text])
 }
 
 /// 发起一次翻译请求。
@@ -53,28 +63,12 @@ pub fn translate(
     timeout_secs: i64,
     proxy: Option<super::http::ProxyConfig>,
 ) -> AppResult<TranslateResult> {
-    if config.api_key.trim().is_empty() {
-        return Err(AppError::Translate(
-            "未配置微软翻译 API Key，请在设置 → 翻译中填写".into(),
-        ));
-    }
     let started = std::time::Instant::now();
     let url = endpoint(&config.endpoint, &request.to, &request.from);
     let body = serde_json::to_string(&build_body(request))
         .map_err(|err| AppError::Internal(format!("请求体序列化失败: {err}")))?;
-
-    let mut headers = vec![
-        ("Content-Type".into(), "application/json".into()),
-        (
-            "Ocp-Apim-Subscription-Key".into(),
-            config.api_key.trim().to_owned(),
-        ),
-    ];
-    // 区域头按需附带：区域资源与多服务资源必填，全局资源带了也合法
-    let region = config.region.trim();
-    if !region.is_empty() {
-        headers.push(("Ocp-Apim-Subscription-Region".into(), region.to_owned()));
-    }
+    // 免授权端点只要求 JSON 内容类型，不需要任何鉴权头
+    let headers = vec![("Content-Type".to_owned(), "application/json".to_owned())];
 
     log::info!(
         "已向 {}({}) 发送翻译请求，{} 字符",
@@ -93,7 +87,7 @@ pub fn translate(
     parse_response(response, started)
 }
 
-/// 解析响应：非 2xx 先映射为可读错误，再取译文与探测到的源语言。
+/// 解析响应：非 2xx 先映射为可读错误，再取译文与（若有的）探测源语言。
 fn parse_response(
     response: HttpResponse,
     started: std::time::Instant,
@@ -138,13 +132,7 @@ fn host_of(url: &str) -> &str {
 mod tests {
     use super::*;
 
-    fn config() -> MicrosoftProvider {
-        MicrosoftProvider {
-            endpoint: "https://api.translator.azure.cn".into(),
-            region: "chinaeast2".into(),
-            api_key: "test-key".into(),
-        }
-    }
+    const BASE: &str = "https://edge.microsoft.com/translate";
 
     fn request(from: &str, to: &str) -> TranslateRequest {
         TranslateRequest {
@@ -155,58 +143,84 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_adds_version_and_target() {
+    fn endpoint_adds_path_target_and_flag() {
         assert_eq!(
-            endpoint("https://api.translator.azure.cn", "en", "auto"),
-            "https://api.translator.azure.cn/translate?api-version=3.0&to=en"
+            endpoint(BASE, "en", "zh-Hans"),
+            "https://edge.microsoft.com/translate/translatetext\
+             ?from=zh-Hans&to=en&isEnterpriseClient=false"
         );
-        // 尾部斜杠应归一
+        // 尾部斜杠应归一，不能拼出双斜杠
         assert_eq!(
-            endpoint("https://api.translator.azure.cn/", "en", "auto"),
-            "https://api.translator.azure.cn/translate?api-version=3.0&to=en"
+            endpoint("https://edge.microsoft.com/translate/", "en", "zh-Hans"),
+            "https://edge.microsoft.com/translate/translatetext\
+             ?from=zh-Hans&to=en&isEnterpriseClient=false"
         );
     }
 
     #[test]
-    fn endpoint_omits_from_when_auto() {
-        let url = endpoint("https://api.translator.azure.cn", "zh-Hans", "auto");
-        assert!(!url.contains("from="), "auto 不应拼出 from 参数: {url}");
-        let url = endpoint("https://api.translator.azure.cn", "zh-Hans", "AUTO");
-        assert!(!url.contains("from="), "auto 大小写不敏感: {url}");
+    fn endpoint_leaves_from_empty_when_auto() {
+        // 自动检测必须拼成 `from=`（空值），带 `from=auto` 会被判为非法语言
+        let url = endpoint(BASE, "zh-Hans", "auto");
+        assert!(url.contains("?from=&to=zh-Hans"), "{url}");
+        let url = endpoint(BASE, "zh-Hans", "AUTO");
+        assert!(url.contains("?from=&to=zh-Hans"), "auto 大小写不敏感: {url}");
+        let url = endpoint(BASE, "zh-Hans", "");
+        assert!(url.contains("?from=&to=zh-Hans"), "留空等同自动检测: {url}");
     }
 
     #[test]
-    fn endpoint_includes_from_when_specified() {
-        let url = endpoint("https://api.translator.azure.cn", "zh-Hans", "en");
-        assert!(url.contains("&from=en"), "指定源语言应拼出 from: {url}");
-    }
-
-    #[test]
-    fn endpoint_supports_path_style_custom_domain() {
-        // 虚拟网络场景：端点自带路径
-        let url = endpoint(
-            "https://example.cognitiveservices.azure.com/translator/text/v3.0",
-            "en",
-            "auto",
+    fn endpoint_falls_back_to_default_when_base_blank() {
+        // 设置里端点留空时不得拼出相对地址（那必然失败），应回退到默认端点
+        let expected = format!(
+            "{DEFAULT_ENDPOINT}/translatetext?from=&to=zh-Hans&isEnterpriseClient=false"
         );
+        assert_eq!(endpoint("", "zh-Hans", "auto"), expected);
+        assert_eq!(endpoint("   ", "zh-Hans", "auto"), expected);
+    }
+
+    #[test]
+    fn endpoint_supports_custom_domain_with_path() {
+        let url = endpoint("https://example.com/api/translate", "en", "zh-Hans");
         assert_eq!(
             url,
-            "https://example.cognitiveservices.azure.com/translator/text/v3.0/translate?api-version=3.0&to=en"
+            "https://example.com/api/translate/translatetext\
+             ?from=zh-Hans&to=en&isEnterpriseClient=false"
         );
     }
 
     #[test]
-    fn body_is_single_element_array_with_text_field() {
+    fn body_is_string_array() {
         let body = build_body(&request("auto", "en"));
-        assert!(body.is_array(), "v3.0 要求数组形式的请求体");
-        assert_eq!(body[0]["Text"], "你好");
+        assert!(body.is_array(), "端点要求字符串数组形式的请求体");
+        assert_eq!(body[0], "你好");
         assert_eq!(body.as_array().map(Vec::len), Some(1));
     }
 
     #[test]
-    fn parse_response_reads_v3_shape() {
+    fn parse_response_reads_edge_shape() {
+        // 免授权端点的响应形态（无 detectedLanguage）
+        let body = r#"[{ "translations": [ { "text": "Hello", "to": "en" } ] }]"#;
+        let result = parse_response(
+            HttpResponse {
+                status: 200,
+                body: body.into(),
+            },
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        assert_eq!(result.text, "Hello");
+        assert_eq!(result.provider, "microsoft");
+        assert!(
+            result.detected_source.is_none(),
+            "该端点不返回源语言，应降级为 None 而不是报错"
+        );
+    }
+
+    #[test]
+    fn parse_response_uses_detected_language_when_present() {
+        // 同形态实现若返回 detectedLanguage，也应被取用
         let body = r#"[{
-            "detectedLanguage": { "language": "zh-Hans", "score": 1.0 },
+            "detectedLanguage": { "language": "zh-Hans" },
             "translations": [{ "text": "Hello", "to": "en" }]
         }]"#;
         let result = parse_response(
@@ -217,59 +231,23 @@ mod tests {
             std::time::Instant::now(),
         )
         .unwrap();
-        assert_eq!(result.text, "Hello");
         assert_eq!(result.detected_source.as_deref(), Some("zh-Hans"));
-        assert_eq!(result.provider, "microsoft");
-    }
-
-    #[test]
-    fn parse_response_tolerates_missing_detected_language() {
-        // 指定了 from 时服务可能不回 detectedLanguage：译文照常返回
-        let body = r#"[{ "translations": [{ "text": "你好", "to": "zh-Hans" }] }]"#;
-        let result = parse_response(
-            HttpResponse {
-                status: 200,
-                body: body.into(),
-            },
-            std::time::Instant::now(),
-        )
-        .unwrap();
-        assert_eq!(result.text, "你好");
-        assert!(result.detected_source.is_none(), "缺失源语言不应导致失败");
     }
 
     #[test]
     fn parse_response_rejects_non_2xx() {
-        // Azure 错误体形态
-        let body = r#"{"error":{"code":401000,"message":"The request is not authorized because credentials are missing or invalid."}}"#;
+        let body = r#"{"error":{"code":429,"message":"Too many requests"}}"#;
         let err = parse_response(
             HttpResponse {
-                status: 401,
+                status: 429,
                 body: body.into(),
             },
             std::time::Instant::now(),
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("鉴权失败"), "{err}");
-        assert!(err.contains("credentials"), "应带出服务原文: {err}");
-    }
-
-    #[test]
-    fn parse_response_rejects_invalid_language_error() {
-        // 目标语言不受支持时 Azure 返回 400
-        let body = r#"{"error":{"code":400036,"message":"The target language is not valid."}}"#;
-        let err = parse_response(
-            HttpResponse {
-                status: 400,
-                body: body.into(),
-            },
-            std::time::Instant::now(),
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("400"), "{err}");
-        assert!(err.contains("target language"), "应带出服务原文: {err}");
+        assert!(err.contains("过于频繁") || err.contains("429"), "{err}");
+        assert!(err.contains("Too many requests"), "应带出服务原文: {err}");
     }
 
     #[test]
@@ -288,94 +266,82 @@ mod tests {
     }
 
     #[test]
-    fn translate_rejects_missing_api_key() {
-        // 未填 Key 时应在发请求前拦下，而不是拿到 401 才知道
-        let mut broken = config();
-        broken.api_key = "  ".into();
-        let err = translate(&broken, &request("auto", "en"), 30, None)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("未配置"), "{err}");
-    }
-
-    #[test]
     fn host_of_ignores_path_and_query() {
         assert_eq!(
-            host_of("https://api.translator.azure.cn/translate?api-version=3.0&to=en"),
-            "api.translator.azure.cn"
+            host_of("https://edge.microsoft.com/translate/translatetext?to=en"),
+            "edge.microsoft.com"
         );
     }
 
-    /// **端到端（环回明文）**：走完整 `translate()` 链路——端点构造 → WinHTTP 发送 →
-    /// 状态码判定 → 按响应路径取译文与探测源语言。
+    /// **端到端（环回明文）**：走完整 `translate()` 链路 —— 端点构造 → WinHTTP 发送 →
+    /// 状态码判定 → 按响应路径取译文。
     ///
-    /// 真实 Key 的请求在本环境无法执行（TLS 被策略阻断），但这条测试真实执行了除 TLS 外的
-    /// 全部生产代码，包括请求头拼装与响应解析的接线。
+    /// 这条测试真实执行了除 TLS 外的全部生产代码；同时钉住"**不带任何鉴权头**"这一关键契约
+    /// （免授权端点最容易被误加回密钥头）。
     #[test]
     fn translate_end_to_end_over_loopback() {
-        let body = r#"[{"detectedLanguage":{"language":"zh-Hans"},"translations":[{"text":"Hello","to":"en"}]}]"#;
-        let (port, server) = crate::translate::test_server::spawn(
-            crate::translate::test_server::json_response("HTTP/1.1 200 OK", body),
-        );
-
-        let config = MicrosoftProvider {
-            // 指向环回服务端（明文），其余字段与真实配置一致
-            endpoint: format!("http://127.0.0.1:{port}"),
-            region: "chinaeast2".into(),
-            api_key: "test-key".into(),
-        };
-        let result = translate(&config, &request("zh-Hans", "en"), 10, None).expect("应翻译成功");
-        let received = server.join().expect("服务端线程应正常结束");
-
-        // 结果：译文与探测源语言都按 v3 结构取到
-        assert_eq!(result.text, "Hello");
-        assert_eq!(result.detected_source.as_deref(), Some("zh-Hans"));
-        assert_eq!(result.provider, "microsoft");
-
-        // 请求：v3 端点形状、鉴权头、区域头
-        assert!(
-            received
-                .request_line()
-                .starts_with("POST /translate?api-version=3.0&to=en&from=zh-Hans"),
-            "请求行不符: {}",
-            received.request_line()
-        );
-        assert_eq!(
-            received.header("Ocp-Apim-Subscription-Key").as_deref(),
-            Some("test-key")
-        );
-        assert_eq!(
-            received.header("Ocp-Apim-Subscription-Region").as_deref(),
-            Some("chinaeast2"),
-            "区域头应在配置了区域时附带"
-        );
-        // 请求体为 v3 要求的单元素数组
-        let sent: serde_json::Value =
-            serde_json::from_str(received.body()).expect("请求体应是 JSON");
-        assert_eq!(sent[0]["Text"], "你好");
-    }
-
-    /// 未配置区域时**不应**发送区域头（全局资源场景）。
-    #[test]
-    fn translate_omits_region_header_when_unset() {
         let body = r#"[{"translations":[{"text":"Hello","to":"en"}]}]"#;
         let (port, server) = crate::translate::test_server::spawn(
             crate::translate::test_server::json_response("HTTP/1.1 200 OK", body),
         );
 
         let config = MicrosoftProvider {
+            // 指向环回服务端（明文），其余与真实配置一致
             endpoint: format!("http://127.0.0.1:{port}"),
-            region: String::new(),
-            api_key: "test-key".into(),
         };
-        let result = translate(&config, &request("en", "en"), 10, None).expect("应翻译成功");
+        let result = translate(&config, &request("zh-Hans", "en"), 10, None).expect("应翻译成功");
         let received = server.join().expect("服务端线程应正常结束");
 
         assert_eq!(result.text, "Hello");
+        assert_eq!(result.provider, "microsoft");
+
+        // 请求行：/translatetext + from/to + 固定 flag
         assert!(
-            received.header("Ocp-Apim-Subscription-Region").is_none(),
-            "未配置区域时不应带区域头: {}",
+            received.request_line().starts_with(
+                "POST /translatetext?from=zh-Hans&to=en&isEnterpriseClient=false"
+            ),
+            "请求行不符: {}",
+            received.request_line()
+        );
+        // 免授权：不得出现任何鉴权头
+        assert!(
+            received.header("Ocp-Apim-Subscription-Key").is_none(),
+            "免授权端点不应带订阅密钥头: {}",
             received.raw
+        );
+        assert!(
+            received.header("Authorization").is_none(),
+            "免授权端点不应带 Authorization 头: {}",
+            received.raw
+        );
+        assert_eq!(
+            received.header("Content-Type").as_deref(),
+            Some("application/json")
+        );
+        // 请求体为字符串数组
+        let sent: serde_json::Value =
+            serde_json::from_str(received.body()).expect("请求体应是 JSON");
+        assert_eq!(sent[0], "你好");
+    }
+
+    /// 自动检测源语言时，请求里 `from` 必须是**空值**。
+    #[test]
+    fn translate_sends_empty_from_when_auto() {
+        let body = r#"[{"translations":[{"text":"Hello","to":"en"}]}]"#;
+        let (port, server) = crate::translate::test_server::spawn(
+            crate::translate::test_server::json_response("HTTP/1.1 200 OK", body),
+        );
+        let config = MicrosoftProvider {
+            endpoint: format!("http://127.0.0.1:{port}"),
+        };
+        translate(&config, &request("auto", "en"), 10, None).expect("应翻译成功");
+        let received = server.join().expect("服务端线程应正常结束");
+        assert!(
+            received
+                .request_line()
+                .starts_with("POST /translatetext?from=&to=en"),
+            "自动检测应发空 from: {}",
+            received.request_line()
         );
     }
 
@@ -384,18 +350,16 @@ mod tests {
     fn translate_maps_server_error_over_loopback() {
         let (port, _server) =
             crate::translate::test_server::spawn(crate::translate::test_server::json_response(
-                "HTTP/1.1 401 Unauthorized",
-                r#"{"error":{"code":401000,"message":"credentials are missing or invalid."}}"#,
+                "HTTP/1.1 429 Too Many Requests",
+                r#"{"error":{"code":429,"message":"Too many requests"}}"#,
             ));
         let config = MicrosoftProvider {
             endpoint: format!("http://127.0.0.1:{port}"),
-            region: "chinaeast2".into(),
-            api_key: "wrong".into(),
         };
         let err = translate(&config, &request("zh-Hans", "en"), 10, None)
             .expect_err("应报错")
             .to_string();
-        assert!(err.contains("鉴权失败"), "{err}");
-        assert!(err.contains("credentials"), "应带出服务原文: {err}");
+        assert!(err.contains("过于频繁") || err.contains("429"), "{err}");
+        assert!(err.contains("Too many requests"), "应带出服务原文: {err}");
     }
 }

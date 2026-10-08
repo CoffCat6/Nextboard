@@ -78,7 +78,8 @@ pub struct Settings {
     /// 默认关的理由：OCR 约 0.7s/条，批量导入截图时逐条跑会拖慢入库；且用户可能
     /// 并不需要搜索截图内容。
     pub ocr_enabled: bool,
-    /// 翻译提供方：`openai`（默认）/ `microsoft` / `custom`（Phase 7 F21~F23）。
+    /// 翻译提供方：`microsoft`（默认，免密钥）/ `openai` / `custom`（Phase 7 F21~F23）。
+    /// 默认取微软免授权端点，**开箱即可翻译、无需任何配置**。
     pub translate_provider: String,
     /// 翻译源语言：`auto`（默认，交由提供方检测）或语言标签。
     pub translate_source_lang: String,
@@ -92,6 +93,8 @@ pub struct Settings {
     pub translate_openai: OpenAiProvider,
     /// 微软翻译（Azure AI Translator v3.0）配置。
     pub translate_microsoft: MicrosoftProvider,
+    /// 彩云小译（内置；默认使用官方测试 Token）。
+    pub translate_caiyun: CaiyunProvider,
     /// 自定义 HTTP 提供方配置。
     pub translate_custom: CustomProvider,
 }
@@ -179,18 +182,37 @@ impl Default for OpenAiProvider {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct MicrosoftProvider {
+    /// 端点基址（末尾追加 `/translatetext`）。默认取 Edge 内置翻译的**免授权**端点；
+    /// 若该非公开端点有变动，可在此换成等价实现。
     pub endpoint: String,
-    /// 区域或多服务资源必填（如 `chinaeast2`）；留空则不带区域头。
-    pub region: String,
-    pub api_key: String,
 }
 
 impl Default for MicrosoftProvider {
     fn default() -> Self {
         Self {
-            endpoint: "https://api.translator.azure.cn".into(),
-            region: String::new(),
-            api_key: String::new(),
+            endpoint: crate::translate::microsoft::DEFAULT_ENDPOINT.into(),
+        }
+    }
+}
+
+/// 彩云小译（LingoCloud）配置。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CaiyunProvider {
+    /// 端点基址（末尾追加 `/v1/translator`）。
+    pub endpoint: String,
+    /// 访问 Token，请求头形如 `X-Authorization: token <token>`。
+    ///
+    /// 默认填**官方测试 Token**：官方明确"不保证该 Token 的可用性"，仅供装上就能试；
+    /// 持续使用请在彩云开放平台申请正式 Token（设置页有同样提示）。
+    pub token: String,
+}
+
+impl Default for CaiyunProvider {
+    fn default() -> Self {
+        Self {
+            endpoint: crate::translate::caiyun::DEFAULT_ENDPOINT.into(),
+            token: crate::translate::caiyun::DEFAULT_TOKEN.into(),
         }
     }
 }
@@ -347,13 +369,14 @@ impl Default for Settings {
             // 放大 2 倍：实测对 12px 代码截图明显改善且耗时可控（docs/phase6.md §3.6）
             ocr_scale: 2,
             ocr_enabled: false,
-            translate_provider: "openai".into(),
+            translate_provider: "microsoft".into(),
             translate_source_lang: "auto".into(),
             translate_target_lang: "zh-Hans".into(),
             translate_timeout_secs: 30,
             proxy: ProxySettings::default(),
             translate_openai: OpenAiProvider::default(),
             translate_microsoft: MicrosoftProvider::default(),
+            translate_caiyun: CaiyunProvider::default(),
             translate_custom: CustomProvider::default(),
         }
     }
@@ -471,10 +494,10 @@ impl Settings {
     fn validate_translate(&self) -> AppResult<()> {
         if !matches!(
             self.translate_provider.trim().to_ascii_lowercase().as_str(),
-            "" | "openai" | "microsoft" | "custom"
+            "" | "openai" | "microsoft" | "caiyun" | "custom"
         ) {
             return Err(AppError::InvalidInput(
-                "翻译提供方只支持 openai（AI 翻译）、microsoft 或 custom".into(),
+                "翻译提供方只支持 openai（AI 翻译）、microsoft、caiyun 或 custom".into(),
             ));
         }
         if !crate::translate::lang::is_valid_tag(&self.translate_source_lang) {
@@ -512,18 +535,10 @@ impl Settings {
                 "OpenAI temperature 须在 0 ~ 1 之间".into(),
             ));
         }
-        // 微软：端点与区域
+        // 微软：仅端点（免授权端点无需密钥/区域）
         validate_endpoint("微软翻译接口地址", &self.translate_microsoft.endpoint)?;
-        let region = self.translate_microsoft.region.trim();
-        if !region.is_empty()
-            && !region
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        {
-            return Err(AppError::InvalidInput(
-                "微软翻译区域只能是小写字母、数字与连字符（如 chinaeast2）".into(),
-            ));
-        }
+        // 彩云小译：仅端点（Token 在发请求时校验，缺失时给可读错误）
+        validate_endpoint("彩云小译接口地址", &self.translate_caiyun.endpoint)?;
         // 自定义：仅在使用时才要求必填，避免"配了模板但当前用 OpenAI"被拦
         let custom = &self.translate_custom;
         let method = custom.method.trim().to_ascii_uppercase();
@@ -785,10 +800,39 @@ pub fn load(data_dir: &Path) -> AppResult<Settings> {
     };
     migrate_legacy_hotkeys(&mut value);
     migrate_legacy_proxy(&mut value);
+    repair_blank_microsoft_endpoint(&mut value);
     Ok(serde_json::from_value(value).unwrap_or_else(|err| {
         warn!("配置字段解析失败,使用默认设置: {err}");
         Settings::default()
     }))
+}
+
+/// 修复：微软翻译端点留空时补上默认值（免授权端点）。
+///
+/// 背景：默认提供方改为微软免密钥端点后，旧配置里 `translateMicrosoft.endpoint`
+/// 可能是空串（早期 UI 只把默认地址当 placeholder、没写进输入框，一保存就是空）。
+/// 空端点会拼出**相对地址**（`/translatetext?…`）导致请求必然失败；
+/// 在加载时统一补齐，设置页的输入栏里也会**直接显示**默认地址，而不是只显示灰字提示。
+fn repair_blank_microsoft_endpoint(value: &mut serde_json::Value) {
+    let Some(root) = value.as_object_mut() else {
+        return;
+    };
+    let Some(ms) = root
+        .get_mut("translateMicrosoft")
+        .and_then(|node| node.as_object_mut())
+    else {
+        return;
+    };
+    let blank = ms
+        .get("endpoint")
+        .and_then(|node| node.as_str())
+        .is_none_or(|text| text.trim().is_empty());
+    if blank {
+        ms.insert(
+            "endpoint".into(),
+            serde_json::Value::String(crate::translate::microsoft::DEFAULT_ENDPOINT.into()),
+        );
+    }
 }
 
 /// 旧代理配置迁移（Phase 8）：单串 `translateProxy` → 结构化 `proxy`。
@@ -1266,7 +1310,7 @@ mod tests {
             "一键贴图默认贴最近复制的内容（图片优先默认关，作为可选项）"
         );
         // Phase 7：翻译字段缺失时全部取默认（旧配置升级不阻塞启动）
-        assert_eq!(settings.translate_provider, "openai");
+        assert_eq!(settings.translate_provider, "microsoft");
         assert_eq!(settings.translate_source_lang, "auto");
         assert_eq!(settings.translate_target_lang, "zh-Hans");
         assert_eq!(settings.translate_timeout_secs, 30);
@@ -1275,7 +1319,7 @@ mod tests {
         assert_eq!(settings.hotkeys.open_translate, "Ctrl+Shift+T");
         assert_eq!(settings.hotkeys.capture_translate, "Ctrl+Shift+E");
         assert_eq!(
-            settings.translate_microsoft.endpoint, "https://api.translator.azure.cn",
+            settings.translate_microsoft.endpoint, "https://edge.microsoft.com/translate",
             "默认中国版端点"
         );
     }
@@ -1360,19 +1404,21 @@ mod tests {
     }
 
     #[test]
-    fn validate_checks_microsoft_region_and_proxy() {
-        let with_region = |region: &str| Settings {
+    fn validate_checks_microsoft_endpoint_and_proxy() {
+        let with_endpoint = |endpoint: &str| Settings {
             translate_microsoft: MicrosoftProvider {
-                region: region.into(),
-                ..MicrosoftProvider::default()
+                endpoint: endpoint.into(),
             },
             ..Default::default()
         };
-        assert!(with_region("").validate().is_ok(), "留空允许");
-        assert!(with_region("chinaeast2").validate().is_ok());
         assert!(
-            with_region("China East 2").validate().is_err(),
-            "大写与空格非法"
+            with_endpoint("https://edge.microsoft.com/translate")
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            with_endpoint("edge.microsoft.com").validate().is_err(),
+            "缺少协议应非法"
         );
 
         let with_mode = |mode: &str| Settings {
@@ -1512,6 +1558,40 @@ mod tests {
             PathBuf::from("D:/custom"),
             "自定义目录应去首尾空白后生效"
         );
+    }
+
+    #[test]
+    fn load_repairs_blank_microsoft_endpoint() {
+        let root = std::env::temp_dir().join(format!(
+            "nb_settings_ms_{}_{}",
+            std::process::id(),
+            crate::now_ms()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+
+        // 旧配置里端点是空串（早期 UI 只把它当 placeholder）→ 加载时补默认值
+        std::fs::write(
+            root.join(CONFIG_FILE),
+            r#"{"settings":{"translateMicrosoft":{"endpoint":"   "}}}"#,
+        )
+        .unwrap();
+        let settings = load(&root).unwrap();
+        assert_eq!(
+            settings.translate_microsoft.endpoint,
+            crate::translate::microsoft::DEFAULT_ENDPOINT,
+            "空端点应补默认值，否则会拼出相对地址而必然失败"
+        );
+
+        // 已填自定义端点的不得被覆盖
+        std::fs::write(
+            root.join(CONFIG_FILE),
+            r#"{"settings":{"translateMicrosoft":{"endpoint":"https://my.example/tr"}}}"#,
+        )
+        .unwrap();
+        let settings = load(&root).unwrap();
+        assert_eq!(settings.translate_microsoft.endpoint, "https://my.example/tr");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
