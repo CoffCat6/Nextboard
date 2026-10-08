@@ -17,6 +17,7 @@ Rectangle {
     required property string sizeText
     required property bool pinned
     required property string source
+    required property var tags      // QStringList → JS 数组(S5.2)
 
     /// 文本条目是否展开显示全文(长文本默认折叠 4 行)。
     property bool textExpanded: false
@@ -137,7 +138,8 @@ Rectangle {
                     entryId: root.entryId,
                     kind: root.kind,
                     pinned: root.pinned,
-                    text: root.text
+                    text: root.text,
+                    tags: root.tags ? root.tags.join(",") : ""
                 })
             } else if (root.kind === "file") {
                 // 单击 = 复制(经 fileCopyTimer 延迟一拍);双击 = 打开文件
@@ -187,6 +189,17 @@ Rectangle {
                 padding: 3; leftPadding: 6; rightPadding: 6
                 color: Theme.colors.textTertiary
                 background: Rectangle { color: Theme.colors.surfaceSecondary; radius: Theme.metrics.radiusBadge }
+            }
+            // 标签(S5.2):只读展示,编辑走右键菜单「标签…」。
+            // 用**单个 Label 拼接**而不是 Layout 里放 Repeater —— 在 RowLayout 中动态
+            // 增删委托会让布局的隐式尺寸失效(清空标签后卡片会塌陷、内容不可见)。
+            Label {
+                visible: root.tags !== undefined && root.tags !== null && root.tags.length > 0
+                text: visible ? root.tags.join(" · ") : ""
+                font.pixelSize: Theme.metrics.fontMicro
+                padding: 3; leftPadding: 6; rightPadding: 6
+                color: Theme.colors.accent
+                background: Rectangle { color: Theme.colors.accentSoft; radius: Theme.metrics.radiusBadge }
             }
             Item { Layout.fillWidth: true }
 

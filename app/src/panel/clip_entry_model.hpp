@@ -24,6 +24,10 @@ class ClipEntryModel : public QAbstractListModel {
     Q_PROPERTY(bool loading READ loading NOTIFY loadingChanged)
     Q_PROPERTY(bool hasMore READ hasMore NOTIFY hasMoreChanged)
     Q_PROPERTY(QString errorText READ errorText NOTIFY errorTextChanged)
+    /// 全部标签及条目数([{tag, count}]),驱动面板的标签筛选条(S5.2)。
+    /// ⚠️ 属性名不能叫 `tags`:模型另有一个**角色**名为 tags(条目自身标签),
+    /// 属性与角色同名会让委托里的 `tags` 取到统计值而不是该条目的标签。
+    Q_PROPERTY(QVariantList tagStats READ tagStats NOTIFY tagStatsChanged)
 public:
     enum Roles {
         IdRole = Qt::UserRole + 1,
@@ -38,6 +42,7 @@ public:
         SourceRole,
         FilePathsRole,   // QStringList
         BlobPathRole,
+        TagsRole,        // QStringList(条目自身的标签)
     };
     Q_ENUM(Roles)
 
@@ -53,6 +58,7 @@ public:
     bool loading() const { return m_loading; }
     bool hasMore() const { return m_rows.size() < m_total; }
     const QString& errorText() const { return m_errorText; }
+    const QVariantList& tagStats() const { return m_tags; }
 
     // ---- QML 接口 ----
     Q_INVOKABLE void setView(const QString& view);      // all|text|image|file|pinned
@@ -66,6 +72,10 @@ public:
     Q_INVOKABLE QVariantMap copyByIndex(int index);
     Q_INVOKABLE QVariantMap deleteEntry(const QString& id);
     Q_INVOKABLE void togglePin(const QString& id, bool pinned);
+    /// 标签筛选(S5.2):空串 = 不筛选;与分类/搜索可叠加。
+    Q_INVOKABLE void setTag(const QString& tag);
+    /// 覆盖设置条目的标签(S5.2);成功后重拉列表与标签统计。
+    Q_INVOKABLE void saveTags(const QString& id, const QStringList& tags);
 
 signals:
     void totalChanged();
@@ -73,11 +83,14 @@ signals:
     void loadingChanged();
     void hasMoreChanged();
     void errorTextChanged();
+    void tagStatsChanged();
     void toast(const QString& message);
 
 private:
     void reload(int limit);            // 全量重拉(视图/搜索/刷新)
     void applyPage(const QVariantMap& resp, bool append);
+    /// 重新拉取标签统计(与列表同源:applyPage 后刷新)。
+    void refreshTags();
     /// 由 blob 路径拼出 file:// URL(thumb=true 时取同名 .thumb.png 缩略图)。
     /// 静态且只依赖入参:列表重绘时**不得**再走同步 FFI 查询。
     static QString imageUrlForBlob(const QString& blobPath, bool thumb);
@@ -92,6 +105,7 @@ private:
         QString blobPath;
         QStringList filePaths;
         QString source;
+        QStringList tags;      // 条目自身标签(S5.2)
         qint64 lastUsedAt = 0;
         qint64 byteSize = 0;
         bool pinned = false;
@@ -100,6 +114,8 @@ private:
     QString m_view = "all";
     QString m_query;
     QString m_pendingQuery;
+    QString m_tag;          // 标签筛选(空 = 不筛选)
+    QVariantList m_tags;    // [{tag, count}]
     QString m_errorText;
     int m_total = 0;
     int m_limit = 50;

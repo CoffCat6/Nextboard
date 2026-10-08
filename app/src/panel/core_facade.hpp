@@ -23,6 +23,10 @@ class CoreFacade : public QObject {
     Q_PROPERTY(QVariantMap counts READ counts NOTIFY countsChanged)
     /// 当前是否为暗色主题。QML 的 Theme 单例绑定它,切换后全部引用点自动刷新。
     Q_PROPERTY(bool darkTheme READ darkTheme NOTIFY themeChanged)
+    /// 应用版本(由 CMake 的 project(... VERSION) 注入,单一来源)。设置页「关于」显示。
+    Q_PROPERTY(QString appVersion READ appVersion CONSTANT)
+    /// nbcore 版本(形如 "0.1.0";核心未加载时为空串)。
+    Q_PROPERTY(QString coreVersion READ coreVersion CONSTANT)
 public:
     static CoreFacade& instance();
 
@@ -54,6 +58,10 @@ public:
     void reapplyTheme() { applyTheme(m_themeMode); }
 
     bool darkTheme() const { return m_darkTheme; }
+
+    /// 应用版本 / nbcore 版本(设置页「关于」)。
+    QString appVersion() const;
+    QString coreVersion() const;
 
     /// UI 反馈(toast 由 QML 侧显示;C++ 各处也能发)。
     Q_INVOKABLE void showToast(const QString& message);

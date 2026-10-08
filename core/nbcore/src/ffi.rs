@@ -312,6 +312,7 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
                 None => None,
             };
             let pinned = req.get("pinned").and_then(|v| v.as_bool());
+            let tag = str_opt(req, "tag");   // S5.2 标签筛选
             let limit = req.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
             let offset = req.get("offset").and_then(|v| v.as_i64()).unwrap_or(0);
             let db = core.db.lock()?;
@@ -320,10 +321,34 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
                 query.as_deref(),
                 kind,
                 pinned,
+                tag.as_deref(),
                 limit,
                 offset,
             )?;
             Ok(serde_json::json!({ "items": items, "total": total }))
+        }
+        // 全部标签及条目数(S5.2 标签筛选条)
+        "list_tags" => {
+            let core = crate::core::Core::get()?;
+            let db = core.db.lock()?;
+            Ok(serde_json::to_value(entry::list_tags(&db)?)?)
+        }
+        // 覆盖设置条目标签(S5.2);tags 为字符串数组
+        "set_entry_tags" => {
+            let core = crate::core::Core::get()?;
+            let id = str_req(req, "id")?;
+            let tags: Vec<String> = req
+                .get("tags")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .ok_or_else(|| AppError::InvalidInput("缺少 tags 数组".into()))?;
+            let db = core.db.lock()?;
+            entry::set_tags(&db, &id, &tags)?;
+            Ok(serde_json::Value::Null)
         }
         "entry_counts" => {
             let core = crate::core::Core::get()?;
@@ -526,6 +551,18 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
                 .to_rgba8();
             let (width, height) = img.dimensions();
             let stored = crate::clip::ingest_image(core, img.as_raw(), width, height, &source)?;
+            notify_host(WM_APP_CLIP_CHANGED);
+            Ok(serde_json::json!({ "entry": stored }))
+        }
+
+        // 文本「存为条目」(S5.1 统一素材库):翻译原文/译文等应用内文本入库。
+        // 与剪贴板共用 hash 去重;source 记录来源(translate 等),入库后可被搜索。
+        "save_text_entry" => {
+            let core = crate::core::Core::get()?;
+            let text = str_req(req, "text")?;
+            let source = str_opt(req, "source").unwrap_or_else(|| "clipboard".to_owned());
+            let stored = crate::clip::ingest_text(core, &text, &source)?
+                .ok_or_else(|| AppError::InvalidInput("文本超过大小上限,未入库".into()))?;
             notify_host(WM_APP_CLIP_CHANGED);
             Ok(serde_json::json!({ "entry": stored }))
         }

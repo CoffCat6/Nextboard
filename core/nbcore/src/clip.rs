@@ -480,6 +480,25 @@ pub fn ingest_image(
     Ok(stored)
 }
 
+/// 应用内部来源的文本入库(S5.1 统一素材库):翻译原文/译文等"存为条目"走这里。
+///
+/// 与剪贴板监听共用「大小过滤 → hash 去重 → 入库 → 淘汰」路径 —— 因此
+/// 与剪贴板里的同内容文本自然去重;`source` 记录来源(如 `translate`),
+/// 入库后经 FTS 触发器自动可被搜索。`None` 表示超过文本大小上限被忽略。
+pub fn ingest_text(core: &Core, text: &str, source: &str) -> AppResult<Option<ClipEntry>> {
+    let settings = core.settings()?;
+    let item = ClipItem::Text(text.to_owned());
+    let hash = item.hash();
+    let mut stored = process(core, item, &hash, &settings)?;
+    if let Some(entry) = &mut stored {
+        if entry.source != source {
+            set_source(core, &entry.id, source)?;
+            entry.source = source.to_owned();
+        }
+    }
+    Ok(stored)
+}
+
 /// 更新条目来源(v5 source 列;截图/翻译保存入库后回写)。
 fn set_source(core: &Core, id: &str, source: &str) -> AppResult<()> {
     let db = core.db.lock()?;
@@ -727,7 +746,7 @@ pub fn spawn_thumbnail_backfill(core: &'static Core) {
                 let Ok(db) = core.db.lock() else {
                     return;
                 };
-                match entry::list(&db, None, Some(EntryKind::Image), None, 10_000, 0) {
+                match entry::list(&db, None, Some(EntryKind::Image), None, None, 10_000, 0) {
                     Ok((items, _)) => items,
                     Err(err) => {
                         warn!("缩略图回填:读取图片条目失败: {err}");

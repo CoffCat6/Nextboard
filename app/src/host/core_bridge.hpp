@@ -16,6 +16,7 @@ using NbCallFn = int(__cdecl*)(const char*, const char*, char**);
 using NbFreeString = void(__cdecl*)(char*);
 using NbFreeBuffer = void(__cdecl*)(unsigned char*, unsigned long long);
 using NbAbiVersion = unsigned(__cdecl*)();
+using NbVersion = unsigned(__cdecl*)();
 using NbShutdown = void(__cdecl*)();
 using NbCaptureMonitor = int(__cdecl*)(unsigned, unsigned char**, unsigned*, unsigned*);
 using NbCaptureCrop = int(__cdecl*)(const unsigned char*, unsigned long long,
@@ -60,6 +61,9 @@ public:
     /// blobs 目录绝对路径(图片条目磁盘位置;主面板经 file:// 加载)。
     static QString blobsDirAbs();
 
+    /// nbcore 版本(形如 "0.1.0";未加载时返回空串)。设置页「关于」显示用。
+    QString coreVersion() const;
+
     static CoreBridge& instance();
 
 private:
@@ -69,6 +73,7 @@ private:
     NbFreeString m_freeString = nullptr;
     NbFreeBuffer m_freeBuffer = nullptr;
     NbAbiVersion m_abi = nullptr;
+    NbVersion m_version = nullptr;
     NbShutdown m_shutdown = nullptr;
     NbCaptureMonitor m_captureMonitor = nullptr;
     NbCaptureCrop m_captureCrop = nullptr;

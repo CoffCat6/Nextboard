@@ -31,6 +31,7 @@ bool CoreBridge::init(bool /*startHidden*/, QString* error) {
     m_freeString = reinterpret_cast<NbFreeString>(resolve("nb_free_string"));
     m_freeBuffer = reinterpret_cast<NbFreeBuffer>(resolve("nb_free_buffer"));
     m_abi = reinterpret_cast<NbAbiVersion>(resolve("nb_abi_version"));
+    m_version = reinterpret_cast<NbVersion>(resolve("nb_version"));
     m_shutdown = reinterpret_cast<NbShutdown>(resolve("nb_shutdown"));
     m_captureMonitor = reinterpret_cast<NbCaptureMonitor>(resolve("nb_capture_monitor"));
     m_captureCrop = reinterpret_cast<NbCaptureCrop>(resolve("nb_capture_crop"));
@@ -127,6 +128,16 @@ void CoreBridge::setNotifyHwnd(HWND hwnd) {
 QString CoreBridge::blobsDirAbs() {
     // 生效目录:自定义数据目录启用后,默认目录下没有 blobs
     return instance().m_effectiveDataDir + "/blobs";
+}
+
+QString CoreBridge::coreVersion() const {
+    if (!m_version) return {};
+    // 与 nb_version() 的编码一致:major*10000 + minor*100 + patch
+    const unsigned v = m_version();
+    return QStringLiteral("%1.%2.%3")
+        .arg(v / 10000)
+        .arg((v / 100) % 100)
+        .arg(v % 100);
 }
 
 QImage CoreBridge::captureMonitor(unsigned index) {

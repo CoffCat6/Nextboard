@@ -224,18 +224,22 @@ pub fn get(conn: &Connection, id: &str) -> AppResult<Option<ClipEntry>> {
 }
 
 /// 分页列出条目：固定优先、最近使用在后；`query` 非空时按文本内容或文件路径模糊匹配，
-/// `kind` / `pinned` 为分类过滤（Phase 2 F3），三者可叠加。
+/// `kind` / `pinned` / `tag` 为过滤条件（Phase 2 F3 / S5.2），可叠加。
 /// 返回 `(条目, 匹配总数)`。
 pub fn list(
     conn: &Connection,
     query: Option<&str>,
     kind: Option<EntryKind>,
     pinned: Option<bool>,
+    tag: Option<&str>,
     limit: i64,
     offset: i64,
 ) -> AppResult<(Vec<ClipEntry>, i64)> {
     let kind_str = kind.map(|k| k.as_str().to_owned());
     let pinned_i64 = pinned.map(i64::from);
+    // 标签筛选：tags 是 JSON 数组字符串，用 json_each 展开后精确匹配单个标签
+    // （SQLite ≥3.38 的 JSON 函数是内置的，bundled 版无需额外编译开关）。
+    let tag_str = tag.map(str::trim).filter(|t| !t.is_empty());
 
     // 搜索分派（Phase 9 F27）：有关键词时先走 FTS5 全文索引（走 `idx_entries_*`
     // 之外的倒排索引，避免 LIKE 前导 % 的全表扫描）；FTS 无命中时回退 LIKE。
@@ -249,6 +253,7 @@ pub fn list(
                 &match_expr,
                 kind_str.as_deref(),
                 pinned_i64,
+                tag_str,
                 limit,
                 offset,
             )?;
@@ -268,10 +273,15 @@ pub fn list(
                     OR (kind = 'image' AND ocr_text LIKE ?1 ESCAPE '\\'))
                AND (?2 IS NULL OR kind = ?2)
                AND (?3 IS NULL OR pinned = ?3)
+               AND (?4 IS NULL OR EXISTS (SELECT 1 FROM json_each(clip_entries.tags)
+                                          WHERE json_each.value = ?4))
              ORDER BY pinned DESC, last_used_at DESC
-             LIMIT ?4 OFFSET ?5",
+             LIMIT ?5 OFFSET ?6",
         )?
-        .query_map(params![pattern, kind_str, pinned_i64, limit, offset], ClipEntry::from_row)?
+        .query_map(
+            params![pattern, kind_str, pinned_i64, tag_str, limit, offset],
+            ClipEntry::from_row,
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let total: i64 = conn.query_row(
         "SELECT COUNT(*) FROM clip_entries
@@ -279,8 +289,10 @@ pub fn list(
                 OR (kind = 'file' AND file_paths LIKE ?1 ESCAPE '\\')
                 OR (kind = 'image' AND ocr_text LIKE ?1 ESCAPE '\\'))
            AND (?2 IS NULL OR kind = ?2)
-           AND (?3 IS NULL OR pinned = ?3)",
-        params![pattern, kind_str, pinned_i64],
+           AND (?3 IS NULL OR pinned = ?3)
+           AND (?4 IS NULL OR EXISTS (SELECT 1 FROM json_each(clip_entries.tags)
+                                      WHERE json_each.value = ?4))",
+        params![pattern, kind_str, pinned_i64, tag_str],
         |row| row.get(0),
     )?;
     Ok((items, total))
@@ -288,13 +300,14 @@ pub fn list(
 
 /// 经 FTS5 虚拟表检索：MATCH 命中的行按 entry_id（UNINDEXED）JOIN 回主表取完整字段。
 ///
-/// `kind`/`pinned` 过滤在 JOIN 之后做；`total` 用同一 WHERE 条件计数，
+/// `kind`/`pinned`/`tag` 过滤在 JOIN 之后做；`total` 用同一 WHERE 条件计数，
 /// 保证前端分页的页数与实际一致。
 fn list_via_fts(
     conn: &Connection,
     match_expr: &str,
     kind: Option<&str>,
     pinned: Option<i64>,
+    tag: Option<&str>,
     limit: i64,
     offset: i64,
 ) -> AppResult<(Vec<ClipEntry>, i64)> {
@@ -307,11 +320,13 @@ fn list_via_fts(
              WHERE clip_fts MATCH ?1
                AND (?2 IS NULL OR e.kind = ?2)
                AND (?3 IS NULL OR e.pinned = ?3)
+               AND (?4 IS NULL OR EXISTS (SELECT 1 FROM json_each(e.tags)
+                                          WHERE json_each.value = ?4))
              ORDER BY e.pinned DESC, e.last_used_at DESC
-             LIMIT ?4 OFFSET ?5",
+             LIMIT ?5 OFFSET ?6",
         )?
         .query_map(
-            params![match_expr, kind, pinned, limit, offset],
+            params![match_expr, kind, pinned, tag, limit, offset],
             ClipEntry::from_row,
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -321,8 +336,10 @@ fn list_via_fts(
          JOIN clip_entries e ON e.id = f.entry_id
          WHERE clip_fts MATCH ?1
            AND (?2 IS NULL OR e.kind = ?2)
-           AND (?3 IS NULL OR e.pinned = ?3)",
-        params![match_expr, kind, pinned],
+           AND (?3 IS NULL OR e.pinned = ?3)
+           AND (?4 IS NULL OR EXISTS (SELECT 1 FROM json_each(e.tags)
+                                      WHERE json_each.value = ?4))",
+        params![match_expr, kind, pinned, tag],
         |row| row.get(0),
     )?;
     Ok((items, total))
@@ -444,6 +461,65 @@ pub fn set_pinned(conn: &Connection, id: &str, pinned: bool) -> AppResult<()> {
         return Err(AppError::InvalidInput(format!("条目不存在: {id}")));
     }
     Ok(())
+}
+
+/// 标签及其条目数（S5.2 标签筛选条用），按条目数降序、同名升序。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagCount {
+    pub tag: String,
+    pub count: i64,
+}
+
+/// 覆盖设置条目的标签；id 不存在时报错。
+///
+/// 归一化：去首尾空白、丢弃空串、按出现顺序去重；全空则写 NULL。
+/// 存 JSON 数组字符串（v5 预留的 `tags` 列），筛选侧用 `json_each` 精确匹配。
+pub fn set_tags(conn: &Connection, id: &str, tags: &[String]) -> AppResult<()> {
+    let mut normalized: Vec<String> = Vec::with_capacity(tags.len());
+    for raw in tags {
+        let tag = raw.trim();
+        if tag.is_empty() || normalized.iter().any(|t| t == tag) {
+            continue;
+        }
+        normalized.push(tag.to_owned());
+    }
+    let stored: Option<String> = if normalized.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&normalized)?)
+    };
+    let changed = conn.execute(
+        "UPDATE clip_entries SET tags = ?1 WHERE id = ?2",
+        params![stored, id],
+    )?;
+    if changed == 0 {
+        return Err(AppError::InvalidInput(format!("条目不存在: {id}")));
+    }
+    Ok(())
+}
+
+/// 全部标签及其条目数。
+///
+/// `json_each(NULL)` 会产出一行全 NULL（而不是零行），故必须显式过滤 `je.value IS NOT NULL`，
+/// 否则"没有标签的条目"会在统计里变成一个空标签。
+pub fn list_tags(conn: &Connection) -> AppResult<Vec<TagCount>> {
+    let mut stmt = conn.prepare(
+        "SELECT je.value AS tag, COUNT(*) AS n
+         FROM clip_entries e, json_each(e.tags) je
+         WHERE je.value IS NOT NULL
+         GROUP BY je.value
+         ORDER BY n DESC, tag ASC",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(TagCount {
+                tag: row.get(0)?,
+                count: row.get(1)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 /// 写入图片条目的 OCR 文本（Phase 9 F28 自动入库）。
@@ -608,7 +684,7 @@ mod tests {
         insert(&conn, &entry("a", "h-a", "alpha", false, 100)).unwrap();
         insert(&conn, &entry("b", "h-b", "bravo", false, 300)).unwrap();
         insert(&conn, &entry("c", "h-c", "charlie", true, 100)).unwrap();
-        let (items, total) = list(&conn, None, None, None, 10, 0).unwrap();
+        let (items, total) = list(&conn, None, None, None, None, 10, 0).unwrap();
         assert_eq!(total, 3);
         let ids: Vec<&str> = items.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(ids, ["c", "b", "a"]);
@@ -630,7 +706,7 @@ mod tests {
             )
             .unwrap();
         }
-        let (page, total) = list(&conn, None, None, None, 2, 1).unwrap();
+        let (page, total) = list(&conn, None, None, None, None, 2, 1).unwrap();
         assert_eq!(total, 5);
         assert_eq!(page.len(), 2);
         assert_eq!(page[0].id, "id3");
@@ -652,16 +728,16 @@ mod tests {
         insert(&conn, &entry("a", "h-a", "折扣 50%_off 活动", false, 1)).unwrap();
         insert(&conn, &entry("b", "h-b", "plain text", false, 2)).unwrap();
 
-        let (hits, _) = list(&conn, Some("50"), None, None, 10, 0).unwrap();
+        let (hits, _) = list(&conn, Some("50"), None, None, None, 10, 0).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "a");
 
         // "_" 是通配符，未转义时会匹配任意字符；转义后只匹配字面量
-        let (hits, _) = list(&conn, Some("%_off"), None, None, 10, 0).unwrap();
+        let (hits, _) = list(&conn, Some("%_off"), None, None, None, 10, 0).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "a");
 
-        let (hits, _) = list(&conn, Some("_"), None, None, 10, 0).unwrap();
+        let (hits, _) = list(&conn, Some("_"), None, None, None, 10, 0).unwrap();
         assert_eq!(hits.len(), 1, "转义后下划线应只匹配含字面量 '_' 的文本");
         assert_eq!(hits[0].id, "a");
     }
@@ -695,7 +771,7 @@ mod tests {
         insert(&conn, &entry("txt", "h-t", "text", false, 2)).unwrap();
         let blobs = clear(&conn).unwrap();
         assert_eq!(blobs, vec!["C:/blobs/a.png".to_string()]);
-        assert_eq!(list(&conn, None, None, None, 10, 0).unwrap().1, 0);
+        assert_eq!(list(&conn, None, None, None, None, 10, 0).unwrap().1, 0);
     }
 
     #[test]
@@ -740,7 +816,7 @@ mod tests {
                 "C:/blobs/mid.png".to_string()
             ]
         );
-        let ids: Vec<String> = list(&conn, None, None, None, 10, 0)
+        let ids: Vec<String> = list(&conn, None, None, None, None, 10, 0)
             .unwrap()
             .0
             .into_iter()
@@ -771,23 +847,23 @@ mod tests {
             |items: Vec<ClipEntry>| -> Vec<String> { items.into_iter().map(|e| e.id).collect() };
 
         assert_eq!(
-            ids(list(&conn, None, Some(EntryKind::Text), None, 10, 0)
+            ids(list(&conn, None, Some(EntryKind::Text), None, None, 10, 0)
                 .unwrap()
                 .0),
             ["t2", "t1"]
         );
         assert_eq!(
-            ids(list(&conn, None, Some(EntryKind::Image), None, 10, 0)
+            ids(list(&conn, None, Some(EntryKind::Image), None, None, 10, 0)
                 .unwrap()
                 .0),
             ["i2", "i1"]
         );
         assert_eq!(
-            ids(list(&conn, None, None, Some(true), 10, 0).unwrap().0),
+            ids(list(&conn, None, None, Some(true), None, 10, 0).unwrap().0),
             ["i2", "t2"]
         );
         assert_eq!(
-            ids(list(&conn, None, Some(EntryKind::Text), Some(true), 10, 0)
+            ids(list(&conn, None, Some(EntryKind::Text), Some(true), None, 10, 0)
                 .unwrap()
                 .0),
             ["t2"]
@@ -795,14 +871,14 @@ mod tests {
         // 分类与搜索叠加
         assert_eq!(
             ids(
-                list(&conn, Some("alpha"), Some(EntryKind::Text), None, 10, 0)
+                list(&conn, Some("alpha"), Some(EntryKind::Text), None, None, 10, 0)
                     .unwrap()
                     .0
             ),
             ["t1"]
         );
         assert_eq!(
-            list(&conn, None, Some(EntryKind::Image), None, 10, 0)
+            list(&conn, None, Some(EntryKind::Image), None, None, 10, 0)
                 .unwrap()
                 .1,
             2
@@ -843,9 +919,9 @@ mod tests {
         assert_eq!(got.preview, "报告.docx 等 2 个文件");
 
         // 文件名与路径片段均可命中搜索；分类过滤正确
-        assert_eq!(list(&conn, Some("报告"), None, None, 10, 0).unwrap().1, 1);
-        assert_eq!(list(&conn, Some("docx"), None, None, 10, 0).unwrap().1, 1);
-        let (items, total) = list(&conn, None, Some(EntryKind::File), None, 10, 0).unwrap();
+        assert_eq!(list(&conn, Some("报告"), None, None, None, 10, 0).unwrap().1, 1);
+        assert_eq!(list(&conn, Some("docx"), None, None, None, 10, 0).unwrap().1, 1);
+        let (items, total) = list(&conn, None, Some(EntryKind::File), None, None, 10, 0).unwrap();
         assert_eq!(total, 1);
         assert_eq!(items[0].id, "f1");
     }
@@ -1012,7 +1088,7 @@ mod tests {
         assert_eq!(indexed, 1, "存量行应已被 rebuild 进索引");
         // list() 面向**最新 schema**(v5 起含 source/tags 列):补到 v5 再验证可搜索性
         conn.execute_batch(crate::store::MIGRATION_V5).unwrap();
-        let (items, _) = list(&conn, Some("legacy"), None, None, 10, 0).unwrap();
+        let (items, _) = list(&conn, Some("legacy"), None, None, None, 10, 0).unwrap();
         assert_eq!(items.len(), 1, "迁移后存量数据应可被搜到");
     }
 
@@ -1035,7 +1111,7 @@ mod tests {
             [],
         )
         .unwrap();
-        let (items, _) = list(&conn, Some("recognized"), None, None, 10, 0).unwrap();
+        let (items, _) = list(&conn, Some("recognized"), None, None, None, 10, 0).unwrap();
         assert_eq!(items.len(), 1, "OCR 文本应参与全文检索");
     }
 
@@ -1055,15 +1131,15 @@ mod tests {
             [],
         )
         .unwrap();
-        let (items, _) = list(&conn, Some("revised"), None, None, 10, 0).unwrap();
+        let (items, _) = list(&conn, Some("revised"), None, None, None, 10, 0).unwrap();
         assert_eq!(items.len(), 1, "更新后的文本应可被搜到");
-        let (stale, _) = list(&conn, Some("token"), None, None, 10, 0).unwrap();
+        let (stale, _) = list(&conn, Some("token"), None, None, None, 10, 0).unwrap();
         assert_eq!(stale.len(), 1, "旧词应只出现在未改的 b 条目");
 
         // DELETE：删除后旧词不应再命中
         conn.execute("DELETE FROM clip_entries WHERE id = 'b'", [])
             .unwrap();
-        let (items, total) = list(&conn, Some("bravo"), None, None, 10, 0).unwrap();
+        let (items, total) = list(&conn, Some("bravo"), None, None, None, 10, 0).unwrap();
         assert_eq!((items.len(), total), (0, 0), "已删除条目不应再被搜到");
         // FTS 表行数与主表一致（索引不残留）
         let fts_count: i64 = conn
@@ -1084,21 +1160,21 @@ mod tests {
         let conn = crate::store::memory();
         insert(&conn, &entry("a", "h-a", "open the main menu", false, 1)).unwrap();
         // 相邻词命中
-        let (items, _) = list(&conn, Some("main menu"), None, None, 10, 0).unwrap();
+        let (items, _) = list(&conn, Some("main menu"), None, None, None, 10, 0).unwrap();
         assert_eq!(items.len(), 1, "相邻词应命中");
         // 乱序（两词都出现但不相邻/顺序不同）——FTS 的 AND 语义**命中**，
         // LIKE 的连写语义不命中：这是升级而非回归，测试固定该行为
-        let (items, total) = list(&conn, Some("menu open"), None, None, 10, 0).unwrap();
+        let (items, total) = list(&conn, Some("menu open"), None, None, None, 10, 0).unwrap();
         assert_eq!(
             (items.len(), total),
             (1, 1),
             "两词都出现即命中（FTS 隐式 AND，强于 LIKE 连写）"
         );
         // 只出现其中一词 → 不命中（AND 语义）
-        let (_, total) = list(&conn, Some("menu missingword"), None, None, 10, 0).unwrap();
+        let (_, total) = list(&conn, Some("menu missingword"), None, None, None, 10, 0).unwrap();
         assert_eq!(total, 0, "缺任一词不应命中");
         // 单词命中
-        let (items, _) = list(&conn, Some("menu"), None, None, 10, 0).unwrap();
+        let (items, _) = list(&conn, Some("menu"), None, None, None, 10, 0).unwrap();
         assert_eq!(items.len(), 1);
     }
 
@@ -1109,10 +1185,10 @@ mod tests {
         let conn = crate::store::memory();
         insert(&conn, &entry("a", "h-a", "打开主菜单查看设置", false, 1)).unwrap();
         // 子串命中（整句的一部分）
-        let (items, _) = list(&conn, Some("主菜单"), None, None, 10, 0).unwrap();
+        let (items, _) = list(&conn, Some("主菜单"), None, None, None, 10, 0).unwrap();
         assert_eq!(items.len(), 1, "中文子串应命中（FTS 或 LIKE 兜底）");
         // 纯标点输入：fts_expression 返回 None，直接走 LIKE，不应报错
-        let (items, _) = list(&conn, Some("！？"), None, None, 10, 0).unwrap();
+        let (items, _) = list(&conn, Some("！？"), None, None, None, 10, 0).unwrap();
         assert_eq!(items.len(), 0, "纯标点不命中任何内容但不报错");
     }
 
@@ -1125,7 +1201,7 @@ mod tests {
             &file_entry("f", "h-f", &["C:/reports/q3-summary.xlsx"], false, 1),
         )
         .unwrap();
-        let (items, _) = list(&conn, Some("summary"), None, None, 10, 0).unwrap();
+        let (items, _) = list(&conn, Some("summary"), None, None, None, 10, 0).unwrap();
         assert_eq!(items.len(), 1, "文件路径词应可被搜到");
     }
 
@@ -1137,7 +1213,7 @@ mod tests {
             let conn = crate::store::memory();
             insert(&conn, &entry("a", "h-a", "alpha beta", false, 1)).unwrap();
             // 不 panic、不报错即通过（命中与否取决于折叠后的词）
-            let _ = list(&conn, Some(malicious), None, None, 10, 0).unwrap();
+            let _ = list(&conn, Some(malicious), None, None, None, 10, 0).unwrap();
         }
     }
 
@@ -1212,7 +1288,7 @@ mod tests {
         // 环节[6]：list() 走 FTS（未命中）→ LIKE 兜底（ocr_text 纳入后应命中）。
         // **这里曾是真实缺陷**：LIKE 回退只查 text_content/file_paths，
         // 图片条目 text_content 为 NULL，OCR 文本永远搜不到。
-        let (items, total) = list(&conn, Some("会议"), None, None, 10, 0).unwrap();
+        let (items, total) = list(&conn, Some("会议"), None, None, None, 10, 0).unwrap();
         assert_eq!(
             (items.len(), total),
             (1, 1),
@@ -1220,7 +1296,7 @@ mod tests {
         );
 
         // 环节[7]：整串词（与 OCR 文本里的 token 完全一致）应走 FTS 命中
-        let (items, total) = list(&conn, Some("会议纪要"), None, None, 10, 0).unwrap();
+        let (items, total) = list(&conn, Some("会议纪要"), None, None, None, 10, 0).unwrap();
         assert_eq!((items.len(), total), (1, 1), "FTS 通道应命中完整中文词");
     }
 
@@ -1260,5 +1336,72 @@ mod tests {
                 "MATCH {expr:?}：unicode61 的中文分词行为变化时此测试会暴露"
             );
         }
+    }
+
+    // ---------- S5.2 标签与分组 ----------
+
+    #[test]
+    fn tags_normalize_filter_and_count() {
+        let conn = crate::store::memory();
+        insert(&conn, &entry("a", "h-a", "alpha", false, 100)).unwrap();
+        insert(&conn, &entry("b", "h-b", "bravo", false, 200)).unwrap();
+
+        // 归一化：去首尾空白、丢空串、按出现顺序去重
+        set_tags(
+            &conn,
+            "a",
+            &[
+                " 工作 ".to_string(),
+                String::new(),
+                "工作".to_string(),
+                "重要".to_string(),
+            ],
+        )
+        .unwrap();
+        set_tags(&conn, "b", &["重要".to_string()]).unwrap();
+        assert_eq!(
+            get(&conn, "a").unwrap().unwrap().tags.as_deref(),
+            Some(r#"["工作","重要"]"#)
+        );
+
+        // 标签筛选（LIKE 通道）
+        assert_eq!(
+            list(&conn, None, None, None, Some("重要"), 10, 0).unwrap().1,
+            2
+        );
+        let (items, total) = list(&conn, None, None, None, Some("工作"), 10, 0).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(items[0].id, "a");
+
+        // 标签筛选与 FTS 通道叠加
+        let (items, total) = list(&conn, Some("alpha"), None, None, Some("重要"), 10, 0).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(items[0].id, "a");
+
+        // 标签统计：按条目数降序
+        let counts = list_tags(&conn).unwrap();
+        assert_eq!(counts.len(), 2);
+        assert_eq!((counts[0].tag.as_str(), counts[0].count), ("重要", 2));
+
+        // 清空 b 的标签 → NULL，只影响它自己的计数
+        set_tags(&conn, "b", &[]).unwrap();
+        assert!(get(&conn, "b").unwrap().unwrap().tags.is_none());
+        // 清空后条目本身仍应完整可列（标签为 NULL 不得影响其他列/文本内容）
+        let (items, total) = list(&conn, None, None, None, None, 10, 0).unwrap();
+        assert_eq!(total, 2);
+        let b = items.iter().find(|e| e.id == "b").expect("清空标签后 b 仍应在列表里");
+        assert_eq!(b.text_content.as_deref(), Some("bravo"));
+        assert!(b.tags.is_none());
+        let counts = list_tags(&conn).unwrap();
+        assert_eq!(counts.len(), 2);
+        let important = counts.iter().find(|c| c.tag == "重要").unwrap();
+        assert_eq!(important.count, 1, "b 清空后「重要」应只剩 a 一条");
+
+        // 全部清空 → 统计为空(顺带验证 json_each(NULL) 不会产出空标签行)
+        set_tags(&conn, "a", &[]).unwrap();
+        assert!(list_tags(&conn).unwrap().is_empty());
+
+        // 不存在的 id 报错
+        assert!(set_tags(&conn, "nope", &["x".to_string()]).is_err());
     }
 }

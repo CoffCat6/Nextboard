@@ -116,6 +116,10 @@ if(MSVC)
         LINK_FLAGS "/MANIFEST:EMBED /MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/app.manifest")
 endif()
 
+# 版本号:注入编译期宏,供设置页「关于」显示 —— 与 project(... VERSION) 单一来源,
+# 避免版本号在 CMake 与 C++ 里各写一份而对不上。
+target_compile_definitions(nextboard PRIVATE NB_APP_VERSION="${PROJECT_VERSION}")
+
 # ---- 部署:运行所需 DLL 拷贝到输出目录 ----
 add_custom_command(TARGET nextboard POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${NBCORE_DIR}/nbcore.dll" "$<TARGET_FILE_DIR:nextboard>"

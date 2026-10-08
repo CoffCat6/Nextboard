@@ -1531,3 +1531,91 @@ F16 的可选工具中除"延时截图"外的四项,并新增取色器。
   万一平台事件路由差异让点击漏到卡片,也只关菜单、不执行动作,不会误复制、也不会卡住菜单。
 - 点击**面板窗口之外**(其他应用)仍由既有的 `panelHidden` 兜底关闭;面板"固定"时
   该场景下菜单会留到下次点面板才关(可接受)。
+
+---
+
+## 2026-10-08(四)S5 差异化三件:关于/版本 · 统一素材库 · 标签与分组
+
+### 1. 设置页「关于/版本」
+
+- 版本号**单一来源**:`app/CMakeLists.txt` 里 `project(Nextboard VERSION 0.2.0)` →
+  `target_compile_definitions(NB_APP_VERSION="${PROJECT_VERSION}")`,不再在 C++ 里另写一份。
+- `CoreBridge` 补解析 `nb_version`(此前只解析了 `nb_abi_version`),`CoreBridge::coreVersion()`
+  按 `major*10000+minor*100+patch` 还原成 "0.1.0"。
+- `CoreFacade` 暴露 `appVersion` / `coreVersion` 两个 CONSTANT 属性;设置页新增「关于」区。
+
+### 2. S5.1 统一素材库:翻译「存为条目」
+
+| 层 | 改动 |
+| --- | --- |
+| nbcore `clip.rs` | 新增 `ingest_text(core, text, source)`:与剪贴板监听**共用**「大小过滤 → hash 去重 → 入库 → 淘汰」路径,并回写 `source`(与既有 `ingest_image` 同构) |
+| nbcore `ffi.rs` | 新增 `save_text_entry(text, source)`,入库后 `notify_host(WM_APP_CLIP_CHANGED)` |
+| `TranslateWindow.qml` | 原文/译文各加「存为条目」按钮 |
+
+因为走的是同一条入库路径:与剪贴板里的同内容文本**天然去重**;入库后经 FTS 触发器
+自动可被搜索;`source=translate` 让条目卡片显示来源徽标。
+
+### 3. S5.2 标签与分组
+
+| 层 | 改动 |
+| --- | --- |
+| nbcore `entry.rs` | 新增 `set_tags`(归一化:去空白/丢空串/按序去重,全空写 NULL)与 `list_tags`(标签+条目数);`list()` 增加 `tag` 过滤,LIKE 与 FTS 两条通道都加 |
+| nbcore `ffi.rs` | 新增 `list_tags` / `set_entry_tags`;`list_entries` 接受 `tag` |
+| `ClipEntryModel` | 新增 `TagsRole`、`setTag()`、`saveTags()`、`tags` 属性(标签统计)与 `refreshTags()`(与 `refreshCounts` 同源刷新) |
+| `Main.qml` | 标签筛选条(chips,有标签才出现,再点取消);右键菜单新增「标签…」→ **内联编辑卡片**(按逗号/空白切分,去空去重);屏障沿用右键菜单同一套"外部点击关闭" |
+| `EntryCard.qml` | 暴露 `tags` 并在元信息行展示标签 chips;菜单快照带上 tags 供编辑预填 |
+
+**标签筛选用 `json_each`** 而不是 LIKE 子串:`tags` 存 JSON 数组字符串,`EXISTS (SELECT 1
+FROM json_each(tags) WHERE value = ?)` 是精确匹配(SQLite ≥3.38 的 JSON 函数已内置,
+bundled 版无需额外开关)。踩坑:`json_each(NULL)` 会产出**一行全 NULL**(不是零行),
+统计必须加 `WHERE je.value IS NOT NULL`,否则"无标签条目"会变成一个空标签。
+
+### 验证与限制
+
+- core `cargo test`:**168 项**通过(新增 `tags_normalize_filter_and_count`,覆盖归一化/
+  LIKE 与 FTS 两条通道的标签过滤/统计/清空/非法 id);
+- app 编译链接通过(`[40/40] Linking`)、无编译警告;`qmllint` 无新增告警类别;
+- ⚠️ 需真机确认:
+  1. 设置 → 关于:显示 `Nextboard 0.2.0` 与 `nbcore 0.1.0`;
+  2. 翻译窗口:点「存为条目」→ 面板出现 `translate` 来源的文本条目,搜索其内容可命中;
+  3. 右键某条 → 「标签…」→ 输入 `工作, 重要` → 保存:卡片出现两个标签 chip,
+     面板顶部出现标签筛选条;
+  4. 点筛选条上的标签 → 列表只剩带该标签的条目;再点一次取消;
+     标签筛选与分类/搜索可叠加;
+  5. 清空某条标签后,若该标签不再被任何条目使用,筛选条上应消失。
+
+### 追加修复(真机反馈):标签清空后卡片内容消失 / 无法取消标签
+
+**现象**:给条目设标签正常;随后在编辑器里把标签清空保存,该列表项**内容不再显示**;
+且感觉"无法取消标签"。
+
+**排查过程**(两步都做了实证,不靠猜):
+
+1. **先排除"清空请求没发出去"**:怀疑 `QVariant(QStringList{})` 经
+   `QVariantMap → QJsonObject` 会退化成 JSON `null`(那样 FFI 会报"缺少 tags 数组",
+   表现为清空无效)。写了临时探针程序实测:**`isNull()=false`、序列化结果是 `Array`** ——
+   该假设**不成立**,请求本身没问题。(探针已删除。)
+2. **再验证数据层**:给 core 测试补断言 —— 清空标签后条目**仍完整可列**
+   (`total` 正确、`text_content` 原样、`tags` 为 None)。数据层**无问题**。
+
+结论:问题在 **QML 层**,定位到两个风险点:
+
+| 风险 | 说明 | 处理 |
+| --- | --- | --- |
+| **`RowLayout` 里放 `Repeater`** | 委托在 Layout 中动态增删会让布局的隐式尺寸失效;清空标签时 Repeater 从 1 个委托销毁到 0 个,卡片塌陷 → 内容不可见(与现象吻合) | 卡片标签改为**单个 Label 拼接**(`tags.join(" · ")`),彻底不用 Repeater |
+| **模型属性与角色同名** | 模型新增的 `Q_PROPERTY(QVariantList tags)` 与角色名 `tags`(条目自身标签)同名,委托里的 `tags` 有取到统计值而非本条目标签的风险 | 属性改名 `tags` → **`tagStats`**(QML 侧 `Entries.tagStats`) |
+
+顺带补齐"取消标签"的可发现性:
+
+- 右键菜单在条目**有标签时**多一项「**清除标签**」(一键清空,不必进编辑器删空);
+- 编辑器输入框占位文案补上"留空保存即清除全部标签"。
+
+### 验证与限制
+
+- core `cargo test`:标签用例补了"清空后仍可列"的断言,全绿;
+- app 编译链接通过(`[40/40] Linking`)、无编译警告;`qmllint` 无新增告警类别;
+- ⚠️ 沙箱无法启动 GUI,以下须真机确认(这是本次修复的关键):
+  1. 设标签 → 卡片显示标签、顶部出现筛选条;
+  2. 进编辑器把标签删空保存 → **卡片内容应正常显示**(不再消失)、标签消失;
+  3. 右键「清除标签」→ 同样只清标签、条目内容完好;
+  4. 反复"设标签 → 清标签"多次,卡片高度与内容始终正常。

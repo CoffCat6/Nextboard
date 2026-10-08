@@ -112,6 +112,15 @@ Rectangle {
         historyOverlay.visible = false
     }
 
+    // ---- 统一素材库(S5.1) ----
+    /// 把原文/译文存为历史条目(source=translate):入库即参与搜索、可固定/贴图。
+    function saveAsEntry(text, label) {
+        if (!text || text.trim().length === 0) return
+        const resp = Core.call("save_text_entry", { text: text, source: "translate" })
+        Core.showToast(resp.ok ? label + "已存为条目"
+                               : "保存失败:" + (resp.error ? resp.error.message : ""))
+    }
+
     Keys.onEscapePressed: {
         // 历史抽屉优先关闭,再退到关窗
         if (historyOverlay.visible) historyOverlay.visible = false
@@ -206,6 +215,13 @@ Rectangle {
                     font.family: Theme.fontFamily
                     font.pixelSize: Theme.metrics.fontCaption
                     color: Theme.colors.textTertiary
+                }
+                ThemedButton {
+                    variant: "ghost"
+                    size: "sm"
+                    text: "存为条目"
+                    enabled: input.text.trim().length > 0
+                    onClicked: root.saveAsEntry(input.text, "原文")
                 }
                 ThemedButton {
                     variant: "ghost"
@@ -362,6 +378,13 @@ Rectangle {
                     color: Theme.colors.textPrimary
                 }
                 Item { Layout.fillWidth: true }
+                ThemedButton {
+                    variant: "ghost"
+                    size: "sm"
+                    text: "存为条目"
+                    enabled: output.text.length > 0
+                    onClicked: root.saveAsEntry(output.text, "译文")
+                }
                 ThemedButton {
                     variant: "ghost"
                     size: "sm"

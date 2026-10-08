@@ -1043,6 +1043,15 @@ AppDrawer {
                 }
             }
 
+            // ---- 关于 ----
+            SectionDivider {}
+            SectionTitle { text: "关于" }
+            HintLabel {
+                text: "Nextboard " + Core.appVersion
+                      + "\n内核 nbcore " + (Core.coreVersion !== "" ? Core.coreVersion : "未加载")
+                      + "\nWindows 桌面一体化效率板:剪贴板历史 + 截图 / 贴图 + 翻译"
+            }
+
             // 改动即时保存(去抖 400ms),故不再有「保存 / 关闭」按钮 ——
             // 关闭抽屉走标题栏的 ✕。状态行只用于反馈结果(尤其是校验失败)。
             Label {

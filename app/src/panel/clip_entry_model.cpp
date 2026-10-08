@@ -5,6 +5,8 @@
 
 #include <QDateTime>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QUrl>
 #include <QDebug>
 
@@ -40,6 +42,7 @@ QVariant ClipEntryModel::data(const QModelIndex& index, int role) const {
         case SourceRole: return r.source;
         case FilePathsRole: return r.filePaths;
         case BlobPathRole: return r.blobPath;
+        case TagsRole: return r.tags;
     }
     return {};
 }
@@ -50,7 +53,7 @@ QHash<int, QByteArray> ClipEntryModel::roleNames() const {
         {ImageUrlRole, "imageUrl"}, {PreviewRole, "preview"},
         {TimeRole, "timeText"}, {SizeRole, "sizeText"}, {ByteSizeRole, "byteSize"},
         {PinnedRole, "pinned"}, {SourceRole, "source"}, {FilePathsRole, "filePaths"},
-        {BlobPathRole, "blobPath"},
+        {BlobPathRole, "blobPath"}, {TagsRole, "tags"},
     };
 }
 
@@ -69,6 +72,7 @@ void ClipEntryModel::fetchMore(const QModelIndex& parent) {
     if (!kind.isEmpty()) req.insert("kind", kind);
     if (m_view == QLatin1String("pinned")) req.insert("pinned", true);
     if (!m_query.trimmed().isEmpty()) req.insert("query", m_query);
+    if (!m_tag.isEmpty()) req.insert("tag", m_tag);
     const QVariantMap resp = CoreFacade::instance().call("list_entries", req);
     m_loading = false;
     emit loadingChanged();
@@ -132,6 +136,33 @@ void ClipEntryModel::togglePin(const QString& id, bool pinned) {
     reload(m_limit);
 }
 
+void ClipEntryModel::setTag(const QString& tag) {
+    if (m_tag == tag) return;
+    m_tag = tag;
+    reload(m_limit);
+}
+
+void ClipEntryModel::saveTags(const QString& id, const QStringList& tags) {
+    const QVariantMap resp =
+        CoreFacade::instance().call("set_entry_tags", {{"id", id}, {"tags", tags}});
+    if (!resp.value("ok").toBool()) {
+        emit toast(QStringLiteral("保存标签失败:%1").arg(
+            resp.value("error").toMap().value("message").toString()));
+        return;
+    }
+    // 重拉列表(applyPage 内会一并刷新标签统计),保证筛选条与条目同步
+    reload(m_limit);
+}
+
+void ClipEntryModel::refreshTags() {
+    const QVariantMap resp = CoreFacade::instance().call("list_tags");
+    if (!resp.value("ok").toBool()) return;
+    const QVariantList list = resp.value("data").toList();
+    if (list == m_tags) return;   // 无变化不发信号,避免无谓的绑定重算
+    m_tags = list;
+    emit tagStatsChanged();
+}
+
 QString ClipEntryModel::imageUrlForBlob(const QString& blobPath, bool thumb) {
     if (blobPath.isEmpty()) return {};
     // blob 存的是相对 blobs 目录的路径;历史数据可能是绝对路径,两种都兼容。
@@ -173,6 +204,7 @@ void ClipEntryModel::reload(int limit) {
     if (!kind.isEmpty()) req.insert("kind", kind);
     if (m_view == QLatin1String("pinned")) req.insert("pinned", true);
     if (!m_query.trimmed().isEmpty()) req.insert("query", m_query);
+    if (!m_tag.isEmpty()) req.insert("tag", m_tag);
     beginResetModel();
     m_rows.clear();
     m_total = 0;
@@ -224,6 +256,12 @@ void ClipEntryModel::applyPage(const QVariantMap& resp, bool append) {
         } else {
             r.text = e.value("textContent").toString();
         }
+        // 标签以 JSON 数组字符串下发;缺省字段(老条目)为空
+        const QString tagsJson = e.value("tags").toString();
+        if (!tagsJson.isEmpty()) {
+            const QJsonArray arr = QJsonDocument::fromJson(tagsJson.toUtf8()).array();
+            for (const QJsonValue& t : arr) r.tags.append(t.toString());
+        }
         rows.append(std::move(r));
     }
     const int newTotal = data.value("total").toInt();
@@ -248,6 +286,7 @@ void ClipEntryModel::applyPage(const QVariantMap& resp, bool append) {
     emit hasMoreChanged();
     // 分类徽标与列表同源:列表重拉后同步刷新计数(无变化则不发信号)
     CoreFacade::instance().refreshCounts();
+    refreshTags();   // 标签筛选条同理
 }
 
 } // namespace nb

@@ -35,6 +35,19 @@ CoreFacade& CoreFacade::instance() {
     return facade;
 }
 
+// 版本号由 CMake 注入(见 app/CMakeLists.txt 的 NB_APP_VERSION);独立构建时兜底。
+#ifndef NB_APP_VERSION
+#define NB_APP_VERSION "0.0.0"
+#endif
+
+QString CoreFacade::appVersion() const {
+    return QStringLiteral(NB_APP_VERSION);
+}
+
+QString CoreFacade::coreVersion() const {
+    return CoreBridge::instance().coreVersion();
+}
+
 int CoreFacade::entryCount(const QString& kind) {
     const QVariantMap resp = call("entry_counts");
     if (!resp.value("ok").toBool()) return -1;

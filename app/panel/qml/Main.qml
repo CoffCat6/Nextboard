@@ -30,8 +30,34 @@ Rectangle {
     //   ② 点击菜单外部(尤其左键点其他卡片)时,这一次点击会**穿透**到下层卡片,
     //      触发"复制并收起面板",与菜单操作互相干扰、菜单也没能正常关闭。
     // 现改为面板级单例:卡片只上抛内容快照;菜单打开期间由**屏障**吃掉外部点击。
-    /// 当前菜单的目标条目快照(entryId/kind/pinned/text);null = 菜单未打开。
+    /// 当前菜单的目标条目快照(entryId/kind/pinned/text/tags);null = 菜单未打开。
     property var menuTarget: null
+
+    /// 标签筛选(S5.2):空串 = 不筛选。与分类标签/搜索叠加。
+    property string activeTag: ""
+
+    /// 标签编辑:目标条目 id 与内联卡片可见性。
+    property string tagEditId: ""
+
+    /// 打开标签编辑卡片(右键菜单「标签…」)。
+    function openTagEditor(entry) {
+        tagEditId = entry.entryId
+        tagInput.text = entry.tags || ""
+        tagEditorCard.visible = true
+        tagInput.forceActiveFocus()
+    }
+
+    /// 提交标签:按逗号/空白切分,去空去重后交模型保存。
+    function commitTagEditor() {
+        const parts = tagInput.text.split(/[,，\s]+/)
+        const tags = []
+        for (let i = 0; i < parts.length; ++i) {
+            const t = parts[i].trim()
+            if (t.length > 0 && tags.indexOf(t) < 0) tags.push(t)
+        }
+        tagEditorCard.visible = false
+        Entries.saveTags(tagEditId, tags)
+    }
 
     /// EntryCard 右键时调用:记住目标条目并在光标处弹出菜单。
     function openEntryMenu(entry) {
@@ -344,6 +370,59 @@ Rectangle {
                         onClicked: {
                             tabs.current = tabDelegate.viewId
                             Entries.setView(tabDelegate.viewId)
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- 标签筛选条(S5.2):有标签时才出现;再点一次取消筛选 ----
+        Flickable {
+            id: tagBar
+            Layout.fillWidth: true
+            Layout.leftMargin: Theme.metrics.spacingMd
+            Layout.rightMargin: Theme.metrics.spacingMd
+            implicitHeight: visible ? 24 : 0
+            visible: Entries.tagStats.length > 0
+            contentWidth: tagRow.implicitWidth
+            contentHeight: height
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+
+            Row {
+                id: tagRow
+                spacing: 6
+                Repeater {
+                    model: Entries.tagStats
+                    delegate: Rectangle {
+                        id: tagChip
+                        required property var modelData
+                        readonly property bool active: root.activeTag === modelData.tag
+                        height: 22
+                        width: tagChipText.implicitWidth + 16
+                        radius: Theme.metrics.radiusBadge
+                        color: active ? Theme.colors.accentSoft
+                             : tagChipMa.containsMouse ? Theme.colors.surfaceHover
+                             : Theme.colors.surfaceSecondary
+                        border.width: Theme.metrics.borderWidth
+                        border.color: active ? Theme.colors.accent : Theme.colors.border
+                        Behavior on color { ColorAnimation { duration: Theme.animation.fast } }
+                        Text {
+                            id: tagChipText
+                            anchors.centerIn: parent
+                            text: modelData.tag + " " + modelData.count
+                            font.pixelSize: Theme.metrics.fontCaption
+                            color: active ? Theme.colors.accent : Theme.colors.textSecondary
+                        }
+                        MouseArea {
+                            id: tagChipMa
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                root.activeTag = tagChip.active ? "" : tagChip.modelData.tag
+                                Entries.setTag(root.activeTag)
+                            }
                         }
                     }
                 }
@@ -666,7 +745,13 @@ Rectangle {
                 addAction("贴到屏幕", function() { Core.pinEntry(entry.entryId) })
             addSep()
 
-            // 组 3:固定;组 4:删除(危险项置底)
+            // 组 3:标签(S5.2)
+            addAction("标签…", function() { root.openTagEditor(entry) })
+            // 有标签时给出**一键清除**入口(不必进编辑器手动删空)
+            if (entry.tags) addAction("清除标签", function() { Entries.saveTags(entry.entryId, []) })
+            addSep()
+
+            // 组 4:固定;组 5:删除(危险项置底)
             addAction(entry.pinned ? "取消固定" : "固定",
                       function() { Entries.togglePin(entry.entryId, !entry.pinned) })
             addSep()
@@ -695,5 +780,84 @@ Rectangle {
         enabled: visible
         acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
         onClicked: root.closeEntryMenu()
+    }
+
+    // ---- 标签编辑卡片(S5.2) ----
+    // 与右键菜单同样的"外部点击关闭"思路:先铺屏障,再放卡片(z 介于菜单与 Toast 之间)。
+    MouseArea {
+        id: tagEditorBarrier
+        anchors.fill: parent
+        z: 950
+        visible: tagEditorCard.visible
+        enabled: visible
+        acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+        onClicked: tagEditorCard.visible = false
+    }
+
+    Rectangle {
+        id: tagEditorCard
+        z: 960
+        visible: false
+        anchors.centerIn: parent
+        width: Math.min(320, root.width - 48)
+        // 只锚上/左右:高度由内容隐式决定(anchors.fill 会与 implicitHeight 互相依赖)
+        height: tagEditorLayout.implicitHeight + 2 * Theme.metrics.spacingMd
+        radius: Theme.metrics.radiusCard
+        color: Theme.colors.surface
+        border.width: Theme.metrics.borderWidth
+        border.color: Theme.colors.borderStrong
+
+        ColumnLayout {
+            id: tagEditorLayout
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: Theme.metrics.spacingMd
+            spacing: Theme.metrics.spacingSm
+
+            Text {
+                Layout.fillWidth: true
+                text: "编辑标签"
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.metrics.fontSection
+                font.weight: Font.DemiBold
+                color: Theme.colors.textPrimary
+            }
+            TextField {
+                id: tagInput
+                Layout.fillWidth: true
+                placeholderText: "用逗号分隔,例如:工作, 重要;留空保存即清除全部标签"
+                placeholderTextColor: Theme.colors.textTertiary
+                color: Theme.colors.textPrimary
+                selectionColor: Theme.colors.accent
+                selectedTextColor: Theme.colors.accentText
+                background: Rectangle {
+                    color: Theme.colors.surfaceSecondary
+                    radius: Theme.metrics.radiusInput
+                    border.width: Theme.metrics.borderWidth
+                    border.color: tagInput.activeFocus ? Theme.colors.accent : Theme.colors.border
+                }
+                Keys.onReturnPressed: root.commitTagEditor()
+                Keys.onEnterPressed: root.commitTagEditor()
+                Keys.onEscapePressed: tagEditorCard.visible = false
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Theme.metrics.spacingSm
+                Item { Layout.fillWidth: true }
+                ThemedButton {
+                    variant: "secondary"
+                    size: "sm"
+                    text: "取消"
+                    onClicked: tagEditorCard.visible = false
+                }
+                ThemedButton {
+                    variant: "primary"
+                    size: "sm"
+                    text: "保存"
+                    onClicked: root.commitTagEditor()
+                }
+            }
+        }
     }
 }
