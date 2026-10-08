@@ -4,6 +4,7 @@
 
 #include <QBuffer>
 #include <QCursor>
+#include <QFont>
 #include <QGuiApplication>
 #include <QIODevice>
 #include <QKeyEvent>
@@ -12,6 +13,7 @@
 #include <QPainter>
 #include <QPointer>
 #include <QScreen>
+#include <QTimer>
 
 #include <windows.h>
 
@@ -52,6 +54,53 @@ QString quickPngBase64(const QImage& image) {
     image.save(&buffer, "PNG");
     return QString::fromLatin1(buffer.data().toBase64());
 }
+
+/// 延时截图的倒计时提示:置顶无边框、**鼠标穿透**(不挡用户去点菜单),屏幕中央显示剩余秒数。
+/// 只服务延时截图链路;倒计时结束自行关闭(调用方也会兜底关闭)。
+class CountdownOverlay : public QWidget {
+public:
+    explicit CountdownOverlay(int seconds)
+        : QWidget(nullptr, Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool |
+                              Qt::WindowTransparentForInput) {
+        setAttribute(Qt::WA_TranslucentBackground);
+        setAttribute(Qt::WA_ShowWithoutActivating);   // 不抢焦点:用户还要去展开菜单
+        setAttribute(Qt::WA_DeleteOnClose);
+        resize(140, 140);
+        m_remaining = seconds;
+        QScreen* screen = QGuiApplication::screenAt(QCursor::pos());
+        if (!screen) screen = QGuiApplication::primaryScreen();
+        if (screen) move(screen->availableGeometry().center() - rect().center());
+        m_timer = new QTimer(this);
+        m_timer->setInterval(1000);
+        connect(m_timer, &QTimer::timeout, this, [this] {
+            if (--m_remaining <= 0) {
+                close();
+                return;
+            }
+            update();
+        });
+        m_timer->start();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(QPen(QColor(255, 255, 255, 70), 2));
+        painter.setBrush(QColor(20, 22, 28, 205));
+        painter.drawEllipse(rect().adjusted(4, 4, -4, -4));
+        QFont font = this->font();
+        font.setPixelSize(60);
+        font.setBold(true);
+        painter.setFont(font);
+        painter.setPen(QColor(240, 244, 250));
+        painter.drawText(rect(), Qt::AlignCenter, QString::number(m_remaining));
+    }
+
+private:
+    int m_remaining = 0;
+    QTimer* m_timer = nullptr;
+};
 
 } // namespace
 
@@ -219,6 +268,24 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured, bool allo
 }
 
 // ---- OverlayWidget ----
+
+void startDelayedCapture(int seconds, CaptureIntent intent, CaptureDone onCaptured,
+                         bool allowEditor) {
+    if (seconds <= 0) {
+        startCaptureSession(intent, std::move(onCaptured), allowEditor);
+        return;
+    }
+    auto* overlay = new CountdownOverlay(seconds);
+    QPointer<CountdownOverlay> guard(overlay);
+    overlay->show();
+    QTimer::singleShot(seconds * 1000, [guard, intent, onCaptured, allowEditor] {
+        // 先收起倒计时(否则数字会被冻进底图),再等窗口真正消失后采屏
+        if (guard) guard->close();
+        QTimer::singleShot(80, [intent, onCaptured, allowEditor] {
+            startCaptureSession(intent, onCaptured, allowEditor);
+        });
+    });
+}
 
 namespace {
 /// 手柄命中半径与绘制边长(逻辑像素)

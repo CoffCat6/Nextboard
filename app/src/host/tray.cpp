@@ -59,6 +59,25 @@ void Tray::buildMenu() {
     };
     m_menu->addAction("矩形截图", [capture] { capture(CaptureIntent::Region); });
     m_menu->addAction("全屏截图", [capture] { capture(CaptureIntent::Fullscreen); });
+    // 延时截图(F16):按下后先去展开菜单/等悬浮提示,倒计时结束才开始框选。
+    // 等待秒数**点击时**从设置读(改设置即时生效,不必重启);读取失败按 3 秒兜底。
+    m_delayAction = m_menu->addAction(QStringLiteral("延时截图"));
+    connect(m_delayAction, &QAction::triggered, this, [this] {
+        const QJsonObject resp = m_core.call("get_settings");
+        const int delay =
+            qBound(1, resp.value("data").toObject().value("captureDelaySecs").toInt(3), 10);
+        m_panel.hide();   // 与即时截图同理:面板必须先收起,否则会被拍进画面
+        QTimer::singleShot(150, [delay] {
+            startDelayedCapture(delay, CaptureIntent::Region);
+        });
+    });
+    // 菜单每次展开时把当前等待秒数写进标题:不进设置也能知道会等多久
+    connect(m_menu, &QMenu::aboutToShow, this, [this] {
+        const QJsonObject resp = m_core.call("get_settings");
+        const int delay =
+            qBound(1, resp.value("data").toObject().value("captureDelaySecs").toInt(3), 10);
+        m_delayAction->setText(QStringLiteral("延时截图（%1 秒）").arg(delay));
+    });
     // 口径与热键一致(默认"最近复制",可在设置里切换为"图片优先")
     m_menu->addAction("贴图（最近内容）", [] { CoreFacade::instance().pinLatest(); });
     m_menu->addSeparator();

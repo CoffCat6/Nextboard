@@ -22,6 +22,8 @@ private:
     CoreBridge& m_core;
     class QMenu* m_menu = nullptr;
     QAction* m_pauseAction = nullptr;
+    /// 「延时截图」菜单项:展开菜单时把当前等待秒数写进标题。
+    QAction* m_delayAction = nullptr;
 };
 
 } // namespace nb

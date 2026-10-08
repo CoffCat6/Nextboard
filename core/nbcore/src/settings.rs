@@ -64,6 +64,9 @@ pub struct Settings {
     /// 与 `region_auto_confirm` 叠加即为"拖拽松手 → 已复制"一步到位；
     /// 需要标注时关闭本项（框选进编辑器），或走历史图片右键「编辑」。
     pub region_skip_editor: bool,
+    /// 延时截图等待秒数（托盘「延时截图」入口用；1~10，默认 3）。
+    /// 用途：先按下入口，再去展开菜单/等悬浮提示出现，倒计时结束才开始框选。
+    pub capture_delay_secs: i64,
     /// OCR 语言：`auto`（默认，按 zh-Hans-CN → en-US → 用户配置语言）/ 指定语言标签如 `en-US`。
     pub ocr_language: String,
     /// OCR 后端：`system`（默认，Windows 内置离线引擎）/ `tesseract`（需自行安装并保证在 PATH）。
@@ -323,6 +326,7 @@ impl Default for Settings {
             region_right_click_cancel: true,
             // 默认"松手即复制"：截图后立刻可粘贴，不经过编辑器
             region_skip_editor: true,
+            capture_delay_secs: 3,
             ocr_language: "auto".into(),
             ocr_backend: "system".into(),
             // 放大 2 倍：实测对 12px 代码截图明显改善且耗时可控（docs/phase6.md §3.6）
@@ -356,6 +360,11 @@ impl Settings {
         if !(1..=4096).contains(&self.max_text_kb) {
             return Err(AppError::InvalidInput(
                 "文本大小上限须在 1 ~ 4096 KB 之间".into(),
+            ));
+        }
+        if !(1..=10).contains(&self.capture_delay_secs) {
+            return Err(AppError::InvalidInput(
+                "延时截图等待须在 1 ~ 10 秒之间".into(),
             ));
         }
         // 快捷键：非空 + 合法组合 + 两两互不相同（相同组合键不能绑定多个动作）
@@ -1216,6 +1225,7 @@ mod tests {
         assert_eq!(settings.hotkeys.pin_latest, "Ctrl+Shift+P");
         assert!(settings.region_auto_confirm, "默认框选即确认");
         assert!(settings.region_skip_editor, "默认直通剪贴板、不进编辑器");
+        assert_eq!(settings.capture_delay_secs, 3, "延时截图默认等待 3 秒");
         assert_eq!(settings.ocr_language, "auto", "OCR 默认自动选语言");
         assert_eq!(settings.ocr_backend, "system", "OCR 默认用系统内置引擎");
         assert_eq!(settings.ocr_scale, 2, "OCR 默认放大 2 倍");

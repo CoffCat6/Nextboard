@@ -32,6 +32,11 @@ using CaptureDone = std::function<void(const QString& entryId)>;
 void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured = {},
                          bool allowEditor = true);
 
+/// 延时截图(F16):先弹一个置顶的倒计时数字(鼠标穿透),倒计时结束再启动会话。
+/// 用途:按下入口后有时间去展开菜单 / 等悬浮提示出现。seconds<=0 时等同立即截图。
+void startDelayedCapture(int seconds, CaptureIntent intent, CaptureDone onCaptured = {},
+                         bool allowEditor = true);
+
 /// 入库一张图片并写入系统剪贴板(截图与编辑器「完成」共用同一通道)。
 /// 返回条目 id;未入库(超大小上限)或失败时返回空串。
 ///

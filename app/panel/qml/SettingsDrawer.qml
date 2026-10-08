@@ -261,6 +261,7 @@ AppDrawer {
         skipEditorCheck.checked = s.regionSkipEditor === true
         autoConfirmCheck.checked = s.regionAutoConfirm === true
         rightClickCancelCheck.checked = s.regionRightClickCancel === true
+        captureDelay.value = s.captureDelaySecs > 0 ? s.captureDelaySecs : 3
         themeCombo.currentIndex = s.theme === "light" ? 1 : s.theme === "dark" ? 2 : 0
         dataDirInput.text = s.dataDir || ""
         root.dataDirDirty = false
@@ -334,6 +335,7 @@ AppDrawer {
         s.regionSkipEditor = skipEditorCheck.checked
         s.regionAutoConfirm = autoConfirmCheck.checked
         s.regionRightClickCancel = rightClickCancelCheck.checked
+        s.captureDelaySecs = captureDelay.value
         s.theme = ["system", "light", "dark"][themeCombo.currentIndex]
         s.dataDir = dataDirInput.text.trim()
 
@@ -515,6 +517,16 @@ AppDrawer {
                 id: rightClickCancelCheck
                 text: "框选时鼠标右键取消截图"
                 onClicked: root.scheduleSave()
+            }
+
+            // 延时截图(F16):托盘「延时截图」入口的等待秒数
+            Label { text: "延时截图等待(秒)"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
+            ReadableSpinBox {
+                id: captureDelay
+                Layout.fillWidth: true
+                from: 1; to: 10
+                editable: true
+                onValueModified: root.scheduleSave()
             }
 
             Label { text: "主题"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
