@@ -1,16 +1,19 @@
 // 贴图窗口:置顶无边框,拖动/滚轮缩放/透明度/双击关闭(第一代 pin 交互语义)。
 // DPI:窗口逻辑尺寸 = 原图 ÷ 当前屏 DPR × 用户缩放,物理尺寸恒为「原图 × 缩放」,
 //      跨不同缩放比的屏幕拖动、或改系统缩放,都不会忽大忽小。
-// 交互补齐(对齐第一代 F13):ESC 关闭 + 悬停工具条(缩放值 / 复制 / 另存 / 关闭 / 不透明度)。
+// 阴影:窗口四周各留一圈留白并自绘柔和阴影(透明无边框窗口系统不会画),
+//      使贴图与背景易于分辨。
+// 交互补齐(对齐第一代 F13):ESC 关闭 + **右键**唤出工具条
+//      (缩放值 / 复制 / 另存 / 关闭 / 不透明度)。
 #pragma once
 
 #include <QColor>
-#include <QEnterEvent>
 #include <QImage>
 #include <QString>
 #include <QWidget>
 
 class QLabel;
+class QPushButton;
 class QSlider;
 class QTimer;
 
@@ -54,6 +57,14 @@ public:
     /// 主面板隐藏时应用级 toast 不可见,故贴图相关反馈走这里。
     void showNotice(const QString& text);
 
+    /// 用新的位图替换贴图内容(编辑结果回写):保持当前缩放,并让画面中心不动。
+    void setImage(const QImage& image);
+
+signals:
+    /// 工具条「编辑」:请求对当前贴图内容做标注编辑。调用方负责打开编辑器,
+    /// 并在「完成」后调 setImage() 回写,否则贴图会停留在编辑前的画面。
+    void editRequested(const QImage& image);
+
 protected:
     void paintEvent(QPaintEvent* e) override;
     void mousePressEvent(QMouseEvent* e) override;
@@ -61,21 +72,29 @@ protected:
     void mouseReleaseEvent(QMouseEvent* e) override;
     void wheelEvent(QWheelEvent* e) override;
     void mouseDoubleClickEvent(QMouseEvent* e) override;
-    /// ESC 关闭(第一代语义:关闭走工具条 ✕ 或 ESC)。
+    /// ESC 关闭(第一代语义:关闭走工具条 ✕ 或 ESC);工具条已展开时先收起工具条。
     void keyPressEvent(QKeyEvent* e) override;
-    /// 悬停显示工具条 / 移出后延时隐藏(移入工具条本身不算移出)。
-    void enterEvent(QEnterEvent* e) override;
-    void leaveEvent(QEvent* e) override;
+    /// 右键唤出 / 收起工具条(取代原"悬停显示")。
+    void contextMenuEvent(QContextMenuEvent* e) override;
     void showEvent(QShowEvent* e) override;
+    /// 工具条(顶层弹层)关闭后把焦点收回贴图,ESC 才能继续生效。
+    bool eventFilter(QObject* obj, QEvent* e) override;
     /// 窗口被拖到不同缩放比的屏幕(或系统缩放变化)时重算尺寸。
     bool event(QEvent* e) override;
 
 private:
     void buildToolbar();
-    void positionToolbar();
+    /// 在指定**屏幕坐标**处展开工具条,并夹在屏幕可用区内。
+    void showToolbarAt(const QPoint& globalPos);
+    /// 收起工具条。
+    void hideToolbar();
     void updateToolbar();
     void copyToClipboard();
     void saveAs();
+    /// 顺时针旋转 90°(像素级置换,无损;仅图片贴图)。
+    void rotateImage();
+    /// 请求编辑当前贴图(发 editRequested)。
+    void requestEdit();
 
     void applyScale();
     /// 窗口**当前所在屏**的 DPR;窗口未 show 时回退窗口自身/主屏值。
@@ -93,11 +112,12 @@ private:
     QPoint m_dragOffset;
     bool m_doubleClickClose = true;
 
-    // ---- 悬停工具条 ----
+    // ---- 右键工具条(顶层弹层:不被贴图窗口裁剪,小贴图也能完整显示) ----
     QWidget* m_toolbar = nullptr;
     QLabel* m_zoomLabel = nullptr;
     QSlider* m_opacitySlider = nullptr;
-    QTimer* m_hideToolbarTimer = nullptr;
+    QPushButton* m_rotateButton = nullptr;   ///< 仅图片贴图可见
+    QPushButton* m_editButton = nullptr;     ///< 仅图片贴图可见
     QLabel* m_hintLabel = nullptr;      ///< 底部瞬时提示(已复制 / 已另存)
     QTimer* m_hintTimer = nullptr;
 };

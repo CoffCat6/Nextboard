@@ -1,6 +1,7 @@
 #include "pin_window.hpp"
 
 #include <QClipboard>
+#include <QContextMenuEvent>
 #include <QCursor>
 #include <QDateTime>
 #include <QFile>
@@ -13,6 +14,7 @@
 #include <QLabel>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPalette>
 #include <QPushButton>
 #include <QScreen>
 #include <QSignalBlocker>
@@ -26,14 +28,64 @@ namespace {
 constexpr int kTextPadding = 14;
 constexpr int kTextMinWidth = 160;
 
-/// 悬停工具条的尺寸与留白(逻辑像素)。
-constexpr int kToolbarMargin = 6;
+/// 工具条的尺寸与留白(逻辑像素)。
 constexpr int kToolbarButtonW = 24;
 constexpr int kToolbarButtonH = 22;
 constexpr int kToolbarSliderW = 74;
 
-/// 鼠标移出后延时隐藏工具条的宽限(毫秒):给"从图面移到工具条"留出时间。
-constexpr int kToolbarHideDelayMs = 220;
+/// 贴图四周的阴影留白(逻辑像素)。窗口比图大一圈,多出的部分用来画阴影 ——
+/// 贴图是无边框透明窗口,系统不会给它画阴影,只能自绘。
+constexpr int kShadowMargin = 6;
+/// 阴影由若干层低透明度圆角矩形自外向内叠加而成(纯 QPainter,不依赖
+/// QGraphicsBlurEffect):近图处层数最多、最深,向外逐层变淡 → 柔和渐变。
+constexpr int kShadowLayers = 3;
+constexpr int kShadowLayerAlpha = 8;   // 单层 alpha(0-255)
+/// 文本贴图的底板是 8px 圆角(见 renderText),阴影随之圆角;图片条目是直角。
+constexpr qreal kTextPlateRadius = 8.0;
+
+/// 顺时针旋转 90°:**像素级置换、无损**(不做插值 —— 反复旋转不会逐次糊化)。
+/// 统一按 32 位 ARGB 处理,源图其他格式先转换。
+QImage rotate90cw(const QImage& src) {
+    const QImage in = src.convertToFormat(QImage::Format_ARGB32);
+    const int w = in.width();
+    const int h = in.height();
+    QImage out(h, w, QImage::Format_ARGB32);
+    for (int y = 0; y < h; ++y) {
+        const auto* line = reinterpret_cast<const QRgb*>(in.constScanLine(y));
+        for (int x = 0; x < w; ++x) {
+            // 顺时针:源 (x, y) → 目标 (h-1-y, x)
+            reinterpret_cast<QRgb*>(out.scanLine(x))[h - 1 - y] = line[x];
+        }
+    }
+    return out;
+}
+
+/// 工具条底板配色(与文本贴图默认底板同色系;贴图多为深色浮层,浅底会"看不清")。
+constexpr int kToolbarRadius = 6;
+const QColor kToolbarBg(38, 39, 46);
+
+/// 工具条容器:**自绘**深色圆角底板。
+///
+/// 不用 QSS 画自身背景的原因:工具条是顶层弹层 + `WA_TranslucentBackground`,
+/// 这种组合下 QSS 给控件**自身**的 `background` 规则不生效 —— 表现为底板缺失,
+/// 只剩半透明白按钮与浅色文字浮在桌面上,看起来"整条是白的、看不清"。
+/// 自绘与 QSS 无关,任何平台/主题下都稳定。
+class ToolbarPanel : public QWidget {
+public:
+    using QWidget::QWidget;
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(QPen(QColor(255, 255, 255, 46), 1));
+        QColor fill = kToolbarBg;
+        fill.setAlpha(244);
+        painter.setBrush(fill);
+        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5),
+                                kToolbarRadius, kToolbarRadius);
+    }
+};
 } // namespace
 
 QImage PinWindow::renderText(const QString& text, const PinTextStyle& style) {
@@ -95,17 +147,25 @@ PinWindow::PinWindow(PinContent content, const PinOptions& options, QWidget* par
         // 图比屏大:退化为左上角起放(第一代 center_in 语义)
         move(avail.center() - rect().center());
     }
-    positionToolbar();
+    // 工具条默认收起,由右键唤出;此处只需同步一次缩放值/不透明度
     updateToolbar();
 }
 
-// ---- 悬停工具条(对齐第一代 PinApp:缩放值 / 复制 / 另存 / 关闭 / 不透明度) ----
+// ---- 工具条构建 ----
 
 void PinWindow::buildToolbar() {
-    m_toolbar = new QWidget(this);
+    // 顶层弹层(同右键菜单机制),不是贴图的子控件 —— 子控件会被父窗口裁剪,
+    // 贴图比工具条窄时右侧(滑杆/✕)会被直接切掉。弹层不受此限,并在 showToolbarAt
+    // 里夹进屏幕可用区,任意大小的贴图都能完整显示。
+    m_toolbar = new ToolbarPanel(this, Qt::Popup | Qt::FramelessWindowHint);
     m_toolbar->setObjectName(QStringLiteral("pinToolbar"));
-    // 纯 QWidget 需显式开启,样式表里的 background/border 才会绘制
-    m_toolbar->setAttribute(Qt::WA_StyledBackground, true);
+    // 顶层窗口要透明底,自绘的圆角才不会被黑色/白色直角覆盖
+    m_toolbar->setAttribute(Qt::WA_TranslucentBackground, true);
+    // 兜底:万一透明底在该环境不生效,窗口底色也必须是深色(绝不能是白底)
+    QPalette panelPalette = m_toolbar->palette();
+    panelPalette.setColor(QPalette::Window, kToolbarBg);
+    m_toolbar->setPalette(panelPalette);
+    m_toolbar->installEventFilter(this);
     m_toolbar->hide();
 
     auto* lay = new QHBoxLayout(m_toolbar);
@@ -131,6 +191,15 @@ void PinWindow::buildToolbar() {
         lay->addWidget(btn);
         return btn;
     };
+    // 旋转 / 编辑:仅图片贴图有意义(文本贴图是渲染出的位图,旋转/标注都不合适)
+    const bool isImage = m_text.isEmpty();
+    m_rotateButton = addButton(QStringLiteral("↻"), QStringLiteral("旋转 90°"),
+                               QStringLiteral("pinButton"), &PinWindow::rotateImage);
+    m_editButton = addButton(QStringLiteral("✎"), QStringLiteral("编辑标注"),
+                             QStringLiteral("pinButton"), &PinWindow::requestEdit);
+    m_rotateButton->setVisible(isImage);
+    m_editButton->setVisible(isImage);
+
     addButton(QStringLiteral("⧉"), QStringLiteral("复制到剪贴板"),
               QStringLiteral("pinButton"), &PinWindow::copyToClipboard);
     addButton(QStringLiteral("💾"), QStringLiteral("另存为…"),
@@ -151,10 +220,8 @@ void PinWindow::buildToolbar() {
     });
     lay->addWidget(m_opacitySlider);
 
-    // 深色小工具条:与文本贴图默认底板同色系(贴图本身多为深色浮层)
+    // 深色小工具条:底板由 ToolbarPanel 自绘,这里只负责**子控件**样式
     m_toolbar->setStyleSheet(QStringLiteral(
-        "#pinToolbar { background: rgba(38,39,46,235); border: 1px solid rgba(255,255,255,40);"
-        " border-radius: 6px; }"
         "#pinZoom { color: #AEB4C0; font-size: 11px; }"
         "#pinButton { background: rgba(255,255,255,22); color: #DFE1E8;"
         " border: 1px solid rgba(255,255,255,38); border-radius: 4px; font-size: 12px; padding: 0; }"
@@ -180,18 +247,28 @@ void PinWindow::buildToolbar() {
     m_hintTimer->setSingleShot(true);
     m_hintTimer->setInterval(1600);
     connect(m_hintTimer, &QTimer::timeout, m_hintLabel, &QLabel::hide);
-
-    m_hideToolbarTimer = new QTimer(this);
-    m_hideToolbarTimer->setSingleShot(true);
-    m_hideToolbarTimer->setInterval(kToolbarHideDelayMs);
-    connect(m_hideToolbarTimer, &QTimer::timeout, m_toolbar, &QWidget::hide);
 }
 
-void PinWindow::positionToolbar() {
+// ---- 右键工具条(对齐第一代 PinApp:缩放值 / 复制 / 另存 / 关闭 / 不透明度) ----
+
+void PinWindow::showToolbarAt(const QPoint& globalPos) {
     if (!m_toolbar) return;
     m_toolbar->adjustSize();
-    const int x = qMax(kToolbarMargin, width() - m_toolbar->width() - kToolbarMargin);
-    m_toolbar->move(x, kToolbarMargin);
+    // 夹在**屏幕可用区**内(不是贴图窗口内):贴图再小,工具条也完整可见
+    QScreen* screen = QGuiApplication::screenAt(globalPos);
+    if (!screen) screen = QGuiApplication::primaryScreen();
+    const QRect avail = screen ? screen->availableGeometry() : QRect(globalPos, m_toolbar->size());
+    const int x = qBound(avail.left(), globalPos.x(),
+                         qMax(avail.left(), avail.right() - m_toolbar->width() + 1));
+    const int y = qBound(avail.top(), globalPos.y(),
+                         qMax(avail.top(), avail.bottom() - m_toolbar->height() + 1));
+    m_toolbar->move(x, y);
+    m_toolbar->show();
+    m_toolbar->raise();
+}
+
+void PinWindow::hideToolbar() {
+    if (m_toolbar) m_toolbar->hide();
 }
 
 void PinWindow::updateToolbar() {
@@ -215,39 +292,67 @@ void PinWindow::copyToClipboard() {
 }
 
 void PinWindow::saveAs() {
+    // 先收起弹层:它持有鼠标抓取,而文件对话框是模态窗口,开着弹层可能挡住对话框
+    hideToolbar();
     const QString suffix = m_idPrefix.isEmpty()
                                ? QString::number(QDateTime::currentMSecsSinceEpoch())
                                : m_idPrefix;
-    if (!m_text.isEmpty()) {
-        const QString path = QFileDialog::getSaveFileName(
-            this, QStringLiteral("另存为"), QStringLiteral("文本_%1.txt").arg(suffix),
-            QStringLiteral("文本文件 (*.txt)"));
-        if (path.isEmpty()) return;
-        QFile file(path);
-        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-            showNotice(QStringLiteral("另存失败"));
-            return;
+    const bool isText = !m_text.isEmpty();
+    const QString path = QFileDialog::getSaveFileName(
+        this, QStringLiteral("另存为"),
+        isText ? QStringLiteral("文本_%1.txt").arg(suffix)
+               : QStringLiteral("贴图_%1.png").arg(suffix),
+        isText ? QStringLiteral("文本文件 (*.txt)") : QStringLiteral("PNG 图片 (*.png)"));
+    if (!path.isEmpty()) {
+        bool ok = false;
+        if (isText) {
+            QFile file(path);
+            if (file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+                ok = file.write(m_text.toUtf8()) >= 0;
+        } else {
+            ok = m_image.save(path, "PNG");
         }
-        file.write(m_text.toUtf8());
-        showNotice(QStringLiteral("已另存为文本"));
-    } else {
-        const QString path = QFileDialog::getSaveFileName(
-            this, QStringLiteral("另存为"), QStringLiteral("贴图_%1.png").arg(suffix),
-            QStringLiteral("PNG 图片 (*.png)"));
-        if (path.isEmpty()) return;
-        if (!m_image.save(path, "PNG")) {
-            showNotice(QStringLiteral("另存失败"));
-            return;
-        }
-        showNotice(QStringLiteral("已另存为图片"));
+        showNotice(ok ? (isText ? QStringLiteral("已另存为文本")
+                                : QStringLiteral("已另存为图片"))
+                      : QStringLiteral("另存失败"));
     }
+    // 文件对话框会夺走焦点:收回焦点,ESC 才能继续生效
+    activateWindow();
+    setFocus(Qt::OtherFocusReason);
+}
+
+void PinWindow::rotateImage() {
+    if (m_image.isNull()) return;
+    // 以画面中心为锚点:旋转后宽高互换,重摆位使中心不动(否则会跳到别处)
+    const QPoint globalCenter = mapToGlobal(rect().center());
+    m_image = rotate90cw(m_image);
+    applyScale();                               // 重算尺寸(宽高互换)+ 夹回工具条
+    move(globalCenter - rect().center());
+    showNotice(QStringLiteral("已旋转 90°"));
+}
+
+void PinWindow::requestEdit() {
+    if (m_image.isNull()) return;
+    hideToolbar();
+    // 交给调用方(panel/CoreFacade)开编辑器;完成后经 setImage 回写
+    emit editRequested(m_image);
+}
+
+void PinWindow::setImage(const QImage& image) {
+    if (image.isNull()) return;
+    const QPoint globalCenter = mapToGlobal(rect().center());
+    m_image = image;
+    applyScale();
+    move(globalCenter - rect().center());
 }
 
 void PinWindow::showNotice(const QString& text) {
     if (!m_hintLabel) return;
     m_hintLabel->setText(text);
     m_hintLabel->adjustSize();
-    m_hintLabel->move(8, qMax(8, height() - m_hintLabel->height() - 8));
+    // 贴图片左下角(与工具条同理,避开阴影留白)
+    const int y = qMax(kShadowMargin, height() - kShadowMargin - m_hintLabel->height() - 8);
+    m_hintLabel->move(kShadowMargin + 8, y);
     m_hintLabel->show();
     m_hintLabel->raise();
     m_hintTimer->start();
@@ -265,20 +370,40 @@ QSize PinWindow::logicalSizeFor(qreal dpr) const {
     if (dpr <= 0.0) dpr = 1.0;
     // 原图是**物理像素**,窗口坐标是**逻辑像素**:除以 DPR 后,窗口的物理尺寸
     // 恰为 原图 × 缩放,与所在屏的缩放比无关(跨屏拖来拖去不会变大变小)。
-    return QSize(qMax(1, qRound(m_image.width() * m_zoom / dpr)),
-                 qMax(1, qRound(m_image.height() * m_zoom / dpr)));
+    // 再各留一圈阴影留白(见 paintEvent)。
+    const int w = qMax(1, qRound(m_image.width() * m_zoom / dpr));
+    const int h = qMax(1, qRound(m_image.height() * m_zoom / dpr));
+    return QSize(w + 2 * kShadowMargin, h + 2 * kShadowMargin);
 }
 
 void PinWindow::paintEvent(QPaintEvent*) {
     QPainter painter(this);
     painter.setOpacity(m_opacity);
+    painter.setRenderHint(QPainter::Antialiasing);
     painter.setRenderHint(QPainter::SmoothPixmapTransform);
-    painter.drawImage(rect(), m_image);
+
+    // 图片占据窗口去掉一圈阴影留白后的区域
+    const QRectF imageRect(kShadowMargin, kShadowMargin,
+                           qMax(1, width() - 2 * kShadowMargin),
+                           qMax(1, height() - 2 * kShadowMargin));
+
+    // 阴影:自外向内叠加若干层低透明度圆角矩形,近图处最深、向外渐隐。
+    // 先画阴影再画图,阴影只在图外一圈可见(图有透明角落时也会透出,更自然)。
+    const qreal cornerRadius = m_text.isEmpty() ? 0.0 : kTextPlateRadius;
+    const qreal step = qreal(kShadowMargin) / kShadowLayers;
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(0, 0, 0, kShadowLayerAlpha));
+    for (int i = kShadowLayers; i >= 1; --i) {
+        const qreal grow = i * step;
+        painter.drawRoundedRect(imageRect.adjusted(-grow, -grow, grow, grow),
+                                cornerRadius, cornerRadius);
+    }
+
+    painter.drawImage(imageRect, m_image);
 }
 
 void PinWindow::applyScale() {
     resize(logicalSizeFor(currentDpr()));
-    positionToolbar();
     updateToolbar();
     update();
 }
@@ -307,28 +432,37 @@ void PinWindow::showEvent(QShowEvent* e) {
     setFocus(Qt::OtherFocusReason);
 }
 
-void PinWindow::enterEvent(QEnterEvent* e) {
-    QWidget::enterEvent(e);
-    if (m_hideToolbarTimer) m_hideToolbarTimer->stop();
-    if (m_toolbar) {
-        positionToolbar();
-        m_toolbar->show();
-        m_toolbar->raise();
+void PinWindow::contextMenuEvent(QContextMenuEvent* e) {
+    // 右键唤出/收起工具条(取代原"悬停显示")。工具条是顶层弹层,定位用屏幕坐标。
+    const QPoint globalPos = e->globalPos();
+    // 工具条自身的右键不参与开关(弹层持有鼠标抓取,一般收不到;保底判断)
+    if (m_toolbar && m_toolbar->isVisible() && m_toolbar->frameGeometry().contains(globalPos)) {
+        e->accept();
+        return;
     }
+    if (m_toolbar && m_toolbar->isVisible())
+        hideToolbar();
+    else
+        showToolbarAt(globalPos);
+    e->accept();
 }
 
-void PinWindow::leaveEvent(QEvent* e) {
-    QWidget::leaveEvent(e);
-    // 从图面移到工具条(子控件)也会触发父窗 Leave:指针仍在工具条上时不隐藏
-    if (m_toolbar && m_toolbar->isVisible() &&
-        m_toolbar->rect().contains(m_toolbar->mapFromGlobal(QCursor::pos())))
-        return;
-    if (m_hideToolbarTimer) m_hideToolbarTimer->start();
+bool PinWindow::eventFilter(QObject* obj, QEvent* e) {
+    if (obj == m_toolbar && e->type() == QEvent::Hide && isVisible()) {
+        // 弹层开着时键盘焦点在弹层上;关闭后收回贴图,ESC 才能继续生效
+        activateWindow();
+        setFocus(Qt::OtherFocusReason);
+    }
+    return QWidget::eventFilter(obj, e);
 }
 
 void PinWindow::keyPressEvent(QKeyEvent* e) {
     if (e->key() == Qt::Key_Escape) {
-        close();
+        // 工具条已展开时先收起工具条,再按一次才关窗
+        if (m_toolbar && m_toolbar->isVisible())
+            hideToolbar();
+        else
+            close();
         return;
     }
     QWidget::keyPressEvent(e);
@@ -336,6 +470,8 @@ void PinWindow::keyPressEvent(QKeyEvent* e) {
 
 void PinWindow::mousePressEvent(QMouseEvent* e) {
     if (e->button() == Qt::LeftButton) {
+        // 左键点图面 = 收起工具条并开始拖动
+        hideToolbar();
         // 点击后确保窗口仍持有焦点(ESC 才能生效)
         activateWindow();
         setFocus(Qt::MouseFocusReason);

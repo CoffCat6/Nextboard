@@ -363,6 +363,27 @@ void showPinWindow(const PinContent& content) {
 
     auto* pin = new PinWindow(content, options);
     pin->setAttribute(Qt::WA_DeleteOnClose);
+    // 工具条「编辑」:用贴图**当前**内容(含已做的旋转)开编辑器;「完成」后走与
+    // 历史条目编辑同一条通道(入库 + 写剪贴板),并把合成结果回写贴图 ——
+    // 否则贴图会停留在编辑前的画面。
+    QObject::connect(pin, &PinWindow::editRequested, pin, [pin](const QImage& image) {
+        auto* editor = new EditorWindow(image);
+        QPointer<PinWindow> guard(pin);   // 贴图可能先被关闭
+        QObject::connect(editor, &EditorWindow::committed, editor,
+                         [guard](const QImage& composed) {
+            CoreFacade& facade = CoreFacade::instance();
+            if (ingestImageAndCopy(composed).isEmpty()) {
+                facade.showToast(QStringLiteral("编辑结果未入库(可能超过图片大小上限)"));
+                return;
+            }
+            facade.showToast(QStringLiteral("已保存编辑结果"));
+            facade.notifyClipChanged();   // 让主面板列表刷新出新图
+            if (guard) guard->setImage(composed);
+        });
+        editor->show();
+        editor->raise();
+        editor->activateWindow();
+    });
     pins.append(pin);
     pin->show();
     if (evicted)
