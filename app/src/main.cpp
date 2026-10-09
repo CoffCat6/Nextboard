@@ -8,7 +8,10 @@
 #include <QDir>
 #include <QFile>
 #include <QIcon>
+#include <QJsonObject>
 #include <QMessageBox>
+#include <QQuickWindow>
+#include <QSGRendererInterface>
 #include <QTimer>
 #include <QDebug>
 
@@ -71,10 +74,14 @@ void onTerminate() {
 } // namespace
 
 int main(int argc, char* argv[]) {
-    // 隐藏自启参数(与第一代 --hidden 语义一致)
+    // 隐藏自启参数(与第一代 --hidden 语义一致);
+    // --software:强制 Qt Quick 用软件(CPU 光栅)后端,用于对比 GPU/RHI 相关内存。
     bool startHidden = false;
+    bool softwareBackend = false;
     for (int i = 1; i < argc; ++i) {
-        if (QString::fromLocal8Bit(argv[i]) == QLatin1String("--hidden")) startHidden = true;
+        const QString arg = QString::fromLocal8Bit(argv[i]);
+        if (arg == QLatin1String("--hidden")) startHidden = true;
+        else if (arg == QLatin1String("--software")) softwareBackend = true;
     }
 
     SingleInstance instance;
@@ -112,6 +119,23 @@ int main(int argc, char* argv[]) {
     qInfo() << "nbcore ready";
     nb::logMemory("core-ready");   // + nbcore.dll(Rust 运行时 + SQLite)
 
+    // 渲染后端:必须在**构造第一个 QQuickWindow 之前**设定(官方文档),运行期不可切换,
+    // 故为"重启生效"设置。默认硬件(D3D11);设置项或 --software 可切软件(CPU 光栅),
+    // 后者省掉场景图 + RHI 设备/交换链/着色器(实测约 70MB 工作集,见 docs/progress.md)。
+    // 命令行 --software 作为临时覆盖(优先级高于设置)。
+    bool softwareFromSettings = false;
+    {
+        const QJsonObject s = core.call("get_settings").value("data").toObject();
+        softwareFromSettings = s.value("softwareRender").toBool(false);
+    }
+    if (softwareBackend || softwareFromSettings) {
+        QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
+        qInfo() << "Qt Quick graphics API = Software"
+                << (softwareBackend ? "(--software 覆盖)" : "(设置项)");
+    } else {
+        qInfo() << "Qt Quick graphics API = Hardware (default/D3D11)";
+    }
+
     // 2. QML 装配(类型/单例注册)→ 主面板
     nb::setupQmlEnvironment();
     nb::logMemory("qml-env");      // + Qt Quick Controls 风格与全局字体
@@ -125,24 +149,35 @@ int main(int argc, char* argv[]) {
 
     // 翻译已并入主面板,做成「整窗模式切换」(不再是独立顶层窗口)。
     // 三条打开链路(面板按钮 / 条目右键 / 全局热键)统一走 translatePrefill →
-    // panel.showTranslate,于是不再有第二个 QQmlEngine 与它自己的场景图/渲染栈 ——
-    // 这是本轮内存收口的主要收益(见 docs/progress.md)。
+    // panel.showTranslate(跟随光标);托盘链路走 translatePrefillCentered(居中屏幕)。
+    // 于是不再有第二个 QQmlEngine 与它自己的场景图/渲染栈 —— 这是内存收口的主要收益。
     QObject::connect(&nb::CoreFacade::instance(), &nb::CoreFacade::translatePrefill,
-                     &panel, [&panel](const QString& text) { panel.showTranslate(text); });
+                     &panel, [&panel](const QString& text) {
+        panel.showTranslate(text, nb::PanelWindow::Orientation::AtCursor);
+    });
+    QObject::connect(&nb::CoreFacade::instance(), &nb::CoreFacade::translatePrefillCentered,
+                     &panel, [&panel](const QString& text) {
+        panel.showTranslate(text, nb::PanelWindow::Orientation::ScreenCenter);
+    });
 
     // --screenshot <path>:启动后延时自截(grab 渲染结果),自动化验收用。
     // --query <text>:与 --screenshot 联动,先注入搜索词再截图(验收搜索链路)。
+    // --settings:与 --screenshot 联动,先打开设置抽屉再截图(验收懒构建链路)。
     QString shotPath, queryText;
+    bool openSettings = false;
     for (int i = 1; i < argc; ++i) {
         const QString arg = QString::fromLocal8Bit(argv[i]);
         if (arg == QLatin1String("--screenshot") && i + 1 < argc)
             shotPath = QString::fromLocal8Bit(argv[++i]);
         else if (arg == QLatin1String("--query") && i + 1 < argc)
             queryText = QString::fromLocal8Bit(argv[++i]);
+        else if (arg == QLatin1String("--settings"))
+            openSettings = true;
     }
     if (!shotPath.isEmpty()) {
-        QTimer::singleShot(5000, &panel, [path = shotPath, queryText, &panel] {
+        QTimer::singleShot(5000, &panel, [path = shotPath, queryText, openSettings, &panel] {
             if (!queryText.isEmpty()) panel.applySearchText(queryText);
+            if (openSettings) panel.openSettingsPanel();
             // 再给一拍防抖 + 刷新时间
             QTimer::singleShot(800, &panel, [path, &panel] {
                 qInfo() << "self-screenshot ->" << path;

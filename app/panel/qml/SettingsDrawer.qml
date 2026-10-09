@@ -28,6 +28,9 @@ AppDrawer {
     /// 数据目录是否被改过(改动需重启生效,保存后要显式提示,不能混入静默自动保存)。
     property bool dataDirDirty: false
 
+    /// 渲染后端是否被改过(同样重启生效;与数据目录分开提示,便于合并文案)。
+    property bool renderDirty: false
+
     /// 改动去抖后自动落盘(不再有底部「保存」按钮)。
     /// 各控件只接**用户操作**信号(valueModified / clicked / textEdited / activated),
     /// 因此加载时回填值不会误触发保存,也就不需要 loading 守卫。
@@ -277,8 +280,10 @@ AppDrawer {
                          ? 600 : s.overlayIdleSecs
         overlayIdle.value = Math.round(idleSecs / 60)
         themeCombo.currentIndex = s.theme === "light" ? 1 : s.theme === "dark" ? 2 : 0
+        softwareRenderCheck.checked = s.softwareRender === true
         dataDirInput.text = s.dataDir || ""
         root.dataDirDirty = false
+        root.renderDirty = false
 
         pinOpacity.value = s.pinDefaultOpacity > 0 ? s.pinDefaultOpacity : 100
         pinDoubleClick.checked = s.pinDoubleclickClose === true
@@ -356,6 +361,7 @@ AppDrawer {
         s.captureDelaySecs = captureDelay.value
         s.overlayIdleSecs = overlayIdle.value * 60
         s.theme = ["system", "light", "dark"][themeCombo.currentIndex]
+        s.softwareRender = softwareRenderCheck.checked
         s.dataDir = dataDirInput.text.trim()
 
         s.pinDefaultOpacity = pinOpacity.value
@@ -426,6 +432,11 @@ AppDrawer {
                 statusLabel.text = "已保存。数据目录将在下次启动时生效(数据库与图片自动迁移)"
                 statusLabel.isError = false
                 root.dataDirDirty = false
+            }
+            if (root.renderDirty) {
+                statusLabel.text = "已保存。渲染后端**重启后**生效"
+                statusLabel.isError = false
+                root.renderDirty = false
             }
             Core.applyTheme(s.theme)   // 幂等:主题没变时不会重刷
             // 只有快捷键真的改过才重新注册 —— 每次自动保存都注销/重注册一遍会留下
@@ -607,6 +618,19 @@ AppDrawer {
 
             SectionDivider {}
             SectionTitle { text: "数据" }
+            // 渲染后端(重启生效):软件(CPU 光栅)可省掉 GPU 场景图/RHI 设备约 70MB,
+            // 代价是渲染改由 CPU 承担 —— 供显卡受限/内存紧张的用户选用。
+            ReadableCheckBox {
+                id: softwareRenderCheck
+                text: "软件渲染(省内存,重启生效)"
+                onClicked: {
+                    root.renderDirty = true
+                    root.scheduleSave()
+                }
+            }
+            HintLabel {
+                text: "用 CPU 光栅替代 GPU(D3D11)渲染,约省 70MB 内存;滚动/动画更吃 CPU。重启后生效。"
+            }
             ReadableCheckBox {
                 id: autoStartCheck
                 text: "开机自启(写入当前用户注册表 Run 键)"

@@ -73,6 +73,13 @@ pub struct Settings {
     /// 若用户触发截图后离开，底图会无限期占着内存；超过本时长无任何鼠标/键盘
     /// 操作即自动取消会话并释放。取 0 可关闭该行为（不推荐）。
     pub overlay_idle_secs: i64,
+    /// Qt Quick 渲染后端是否使用**软件（CPU 光栅）**。默认 `false` = 硬件（D3D11）。
+    ///
+    /// 动机（内存）：硬件后端的场景图 + RHI(D3D11) 设备/交换链/着色器实测约占
+    /// 70MB 工作集，软件后端为 0；代价是渲染改由 CPU 光栅，含大图的列表滚动与
+    /// 动画可能更吃 CPU。**重启生效** —— 渲染后端必须在创建第一个 QQuickWindow
+    /// 之前设定，运行期无法切换。
+    pub software_render: bool,
     /// OCR 语言：`auto`（默认，按 zh-Hans-CN → en-US → 用户配置语言）/ 指定语言标签如 `en-US`。
     pub ocr_language: String,
     /// OCR 后端：`system`（默认，Windows 内置离线引擎）/ `tesseract`（需自行安装并保证在 PATH）。
@@ -371,6 +378,8 @@ impl Default for Settings {
             region_skip_editor: true,
             capture_delay_secs: 3,
             overlay_idle_secs: 600,
+            // 默认硬件渲染（D3D11）：观感/CPU 占用同既有行为，软件后端为可选项
+            software_render: false,
             ocr_language: "auto".into(),
             ocr_backend: "system".into(),
             // 放大 2 倍：实测对 12px 代码截图明显改善且耗时可控（docs/phase6.md §3.6）
@@ -1310,6 +1319,10 @@ mod tests {
         assert_eq!(
             settings.overlay_idle_secs, 600,
             "遮罩空闲超时默认 10 分钟（0 = 不自动取消）"
+        );
+        assert!(
+            !settings.software_render,
+            "默认硬件渲染（D3D11）；软件后端为可选项"
         );
         assert_eq!(settings.ocr_language, "auto", "OCR 默认自动选语言");
         assert_eq!(settings.ocr_backend, "system", "OCR 默认用系统内置引擎");

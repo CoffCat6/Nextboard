@@ -110,6 +110,11 @@ public:
     /// 「热键 / 面板按钮」与「截图翻译完成后回填」两条链路。
     Q_INVOKABLE void openTranslate() { emit translatePrefill(QString()); }
 
+    /// 同上,但要求**居中于屏幕**打开 —— 供托盘菜单「打开翻译」用(此时鼠标常在
+    /// 任务栏角落,跟随光标会把窗口顶到边缘)。其余链路(热键/面板按钮/截图翻译)
+    /// 仍是跟随光标。
+    Q_INVOKABLE void openTranslateCentered() { emit translatePrefillCentered(QString()); }
+
     /// 用指定原文进入翻译页(条目右键「翻译」入口)。
     Q_INVOKABLE void openTranslateWith(const QString& text) { emit translatePrefill(text); }
 
@@ -132,6 +137,8 @@ signals:
     void hotkeysChanged();
     /// 请求打开翻译窗口并预填原文(截图翻译链路 F25)。
     void translatePrefill(const QString& text);
+    /// 同 translatePrefill,但要求居中显示(托盘链路)。
+    void translatePrefillCentered(const QString& text);
     void themeChanged();
 
 public:

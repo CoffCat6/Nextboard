@@ -38,6 +38,16 @@ Rectangle {
     /// 关闭菜单的那一次点击不应顺带触发复制/收起面板。
     property bool menuOpenElsewhere: false
 
+    /// ⚠️ 列表开了 `reuseItems`(见 Main.qml):委托被回收进池、之后**复用**到别的行,
+    /// 而不是销毁重建。模型角色(entryId/kind/text…)会在复用时被 ListView 自动刷新,
+    /// 但委托里的**内部状态不会**。不重置就会串味:上一条文本卡的"展开"状态会被带进
+    /// 复用的下一条(截图/长文时最明显);挂起的双击判定计时器也可能残留并误触发复制。
+    /// 这里在复用回池/取出时把这两项显式复位。
+    ListView.onReused: {
+        root.textExpanded = false
+        fileCopyTimer.stop()
+    }
+
     /// 卡片元信息行的操作按钮:小胶囊 + 悬停换底(§34,100~140ms)。
     component CardAction: Rectangle {
         id: action

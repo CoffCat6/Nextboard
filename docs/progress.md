@@ -2253,3 +2253,169 @@ topLeft.setY(qBound(avail.top(),  topLeft.y(),  qMax(avail.top(),  avail.bottom(
 ① 列表页开设置抽屉 → 触发翻译页 → **抽屉已收起**,翻译页正常;
 ② 翻译页打开历史抽屉 → 切回列表 → 再进翻译页 → 历史抽屉**不再自动弹出**;
 ③ 列表页开右键菜单 → 触发翻译页 → 菜单不残留。
+
+---
+
+## 2026-10-09(五)内存收口 P0:设置抽屉懒构建 + 列表委托回收复用
+
+**动机**:上一轮把"尚未做的杠杆"排了序(P0 两项为低风险、不改交互),本轮落地。
+两项都只动主面板自身的构建/回收策略,不碰任何交互语义。
+
+### 1. `SettingsDrawer` 改 `Loader` 懒构建
+
+`SettingsDrawer { id: settingsDrawer }` 原先是 `Main.qml` 的**直接子项**,启动即整棵
+实例化(1200+ 行、6 组设置、多个自绘 `component`、Repeater),哪怕从不打开。改为
+`Loader { active: false }`,首次点「设置」才构建,之后常驻(再次打开省去重建)。
+
+| 位置 | 改动 |
+| --- | --- |
+| `Main.qml` | `SettingsDrawer` → `Loader{ id: settingsDrawerLoader; active:false }`;`openAndLoad()` 包装为"置 active 后转调 item.openAndLoad()" |
+| `Main.qml` | 4 处引用改经 `settingsDrawerLoader.item` 并判空(Esc 分层 / 快捷键守卫 / 按钮 / `dismissListOverlays`) |
+| `Main.qml` | `openSettings()` 自动化入口(见下) |
+
+⚠️ **尺寸必须对齐面板根**:`AppDrawer` 用 `parent.width * 0.52` / `parent.height` 给自己
+定尺寸,经 `Loader` 构建后它的 `parent` 就是 Loader —— 故 Loader 显式
+`width: root.width; height: root.height`,否则抽屉会拿到 0×0 而不可见。
+
+### 2. 列表 `reuseItems` + 限制 `cacheBuffer`
+
+`ListView` 原先未设 `reuseItems`(默认 false)且 `cacheBuffer` 取"平台相关且通常 >0"的
+默认值 —— 滚动时委托销毁重建、图片反复解码,是滚动期内存/CPU 反复抖动的来源。
+现设 `reuseItems: true`、`cacheBuffer: 240`(约上下各一块卡片高度)。
+
+⚠️ **复用会保留委托内部状态**,`EntryCard.qml` 补 `ListView.onReused` 复位两项:
+`textExpanded = false`(否则上一条的"展开"会带进复用的下一条)、`fileCopyTimer.stop()`
+(否则挂起的双击判定可能残留)。模型角色(entryId/kind/…)由 ListView 自动刷新,无需处理。
+
+### 3. 验收设施
+
+新增 `--settings`(与 `--screenshot` 联动):启动后先调 `PanelWindow::openSettingsPanel()`
+→ QML `openSettings()`,等价点「设置」按钮,用于验证懒构建链路与抽屉尺寸。
+
+### 验证与限制
+
+- core `cargo build --release` 通过(本轮未改 Rust);app 编译链接通过、**无编译警告**;
+  `qmllint` 无新增告警类别(仅多一条 `Loader.item` 的 `missing-property` 误报,与既有的
+  `dismissTopLayer` 同属静态分析能力边界);
+- 实测(真机,`--screenshot` 自截):
+  | 时点 | 改前 | 改后 |
+  | --- | --- | --- |
+  | `mem[panel-built]`(工作集) | 119.5 MB | **108.4 MB** |
+  | `mem[panel-built]`(私有) | 62.9 MB | **56.3 MB** |
+  | `mem[startup]`(工作集) | 205.5 MB | **187.1 MB** |
+  → **`SettingsDrawer` 的常驻成本(约 11 MB 工作集 / 6.6 MB 私有)从启动路径移除**;
+- 自截确认:列表页渲染正常(卡片/图片/分类计数齐全);`--settings` 自截确认设置抽屉
+  **正确打开**(占右侧 52%、全高,尺寸修正生效)且内容回填;
+- ⚠️ 仍需真机确认的交互:
+  1. 点「设置」→ 抽屉首次打开正常、字段回填;关闭再开 → 保留上次滚动位置;
+  2. 列表**滚动**多屏(尤其含图片条目)→ 卡片内容不串味("展开"状态不跨行、无异常复制);
+  3. Esc:抽屉打开时先关抽屉,再按才收起面板;
+  4. 列表页开抽屉 → 触发翻译页 → 抽屉仍被收起(既有行为不回归)。
+
+**下一步**:P1 —— 折叠卡片的展开体改二次 `Loader`;面板隐藏超时后卸载 QML 子树(带快路径)。
+
+---
+
+## 2026-10-09(五)内存收口调研:Qt Quick 渲染后端对内存的影响(`--software`)
+
+**动机**:回答"把主面板从 QML/Quick 改写成 QWidget,内存能降多少"。改写量巨大
+(14 个 QML 文件),故先用**零改写的等价实验**量出"GPU 渲染路径"这一块到底占多少 ——
+它正是 QWidget + QPainter(CPU 光栅)不需要的部分。
+
+### 做法:新增 `--software` 启动开关
+
+```
+nextboard.exe --software --screenshot <path>
+```
+
+- `main.cpp`:`QQuickWindow::setGraphicsApi(QSGRendererInterface::Software)`。
+  ⚠️ 必须在**构造第一个 QQuickWindow 之前**调用(官方文档明确"before constructing the
+  first QQuickWindow"),故放在 `qInstallMessageHandler` 之后、`PanelWindow` 构造之前
+  —— 既满足时序,又能让日志落盘(放在日志处理器之前会丢这条 INFO)。
+- 开关而非硬编码:同一份构建里 `--software` ⇄ 默认(硬件)可反复对比。
+
+### 实测(真机,`--screenshot` 自截,同一构建)
+
+| 时点 | 硬件(D3D11) | 软件(CPU 光栅) | 差 |
+| --- | --- | --- | --- |
+| `mem[panel-built]` 工作集 | 108.5 MB | 108.5 MB | **0** |
+| `mem[panel-show]` 工作集 | 188.7 MB | 119.0 MB | **−69.7** |
+| `mem[startup]` 工作集 | 190.1 MB | 120.3 MB | **−69.8** |
+| `mem[startup]` 私有 | 129.6 MB | 64.7 MB | **−64.9** |
+
+**结论**:
+
+1. `panel-built` 两者**完全相等** → QML 对象树本身不吃这一块差;
+2. 差额**全在"首次渲染"这一步** → 场景图 GPU 资源 + RHI(D3D11)设备/驱动 + 交换链
+   + 着色器,合计约 **70MB 工作集 / 65MB 私有**;
+3. 软件后端渲染画面**正确**(自截确认列表/图片/分类计数齐全);
+4. 因此 QWidget 重写的"上限收益"主要是这 ~70MB(Qt 运行时 ~25MB 不变,
+   QML 对象树换成 QWidget 可再省,但量级小得多);**而"软件后端 + 保留 QML"能拿到
+   其中绝大部分,且不改 UI**。
+
+### 与 QWidget 改写对比(判据)
+
+- 改 QWidget 的收益 ≈ 上述 ~70MB + (QML 树 − QWidget 树,估计 20~40MB),粗略落在
+  **60~100MB 工作集**;代价是整层 UI 重写 + 观感/手感回归风险(见下文待测)。
+- 渐进迁移**不可取**:只要还剩一个 `QQuickWidget`,QtQuick/Qml 与 QQmlEngine 就无法
+  卸载,中途会同时背负两套 UI 栈,内存可能不降反升。
+
+### 待测(决定要不要改写的前提)
+
+软件后端的**流畅度**是否可接受,重点两项:
+
+1. **含大图的列表滚动**(缩略图较多时,CPU 光栅是否有掉帧/卡顿);
+2. **设置抽屉滑入 / 卡片 hover / 新条目淡入**等动画是否顺滑。
+
+两者过关 → 建议保留 QML 架构、默认软件后端,不启动 QWidget 重写。
+
+---
+
+## 2026-10-09(五)设置项:渲染后端可切换(重启生效)+ 托盘入口居中显示
+
+### 1. 渲染后端设置项(重启生效)
+
+把 `--software` 从"命令行临时开关"提升为**设置项**,供日常切换:
+
+| 层 | 改动 |
+| --- | --- |
+| `core/settings.rs` | 新增 `software_render: bool`(默认 `false` = 硬件 D3D11);`Default` 补值;默认值用例补断言 |
+| `app/main.cpp` | 启动时读 `get_settings().softwareRender`,为真则 `QQuickWindow::setGraphicsApi(Software)`;`--software` 仍作临时覆盖(优先级更高)。**必须在构造第一个 QQuickWindow 前设定**,故为"重启生效" |
+| `SettingsDrawer.qml` | 「数据」区新增勾选框「软件渲染(省内存,重启生效)」+ 说明;`openAndLoad`/`save` 接入;新增 `renderDirty` 标记,保存后提示"渲染后端**重启后**生效" |
+
+说明文案:用 CPU 光栅替代 GPU(D3D11),约省 70MB 内存;滚动/动画更吃 CPU。
+
+### 2. 托盘入口改为"当前屏居中"(热键仍跟随光标)
+
+先前把面板/翻译统一改成"跟随光标",但托盘操作时鼠标常停在任务栏角落,跟随光标会把
+窗口顶到屏幕边缘。按入口区分摆放方式:
+
+| 入口 | 摆放 |
+| --- | --- |
+| 全局热键(呼出面板 / 打开翻译) | **跟随光标**(`placeAtCursor`,不变) |
+| 截图链路(面板按钮/条目右键/截图翻译回填) | 跟随光标(不变) |
+| **托盘**:菜单「打开主面板」/「打开翻译」、图标左键/双击 | **当前屏居中**(`placeScreenCenter`) |
+
+| 层 | 改动 |
+| --- | --- |
+| `panel_window.{hpp,cpp}` | 新增 `Orientation{AtCursor,ScreenCenter}` 与 `showCentered()` / `placeScreenCenter()`;`showTranslate(text, orientation=AtCursor)` |
+| `main.cpp` | 连接 `translatePrefill`(光标) 与新增的 `translatePrefillCentered`(居中) 两条信号 |
+| `core_facade.hpp` | 新增 `openTranslateCentered()` + 信号 `translatePrefillCentered`(供托盘用) |
+| `tray.cpp` | 三处入口改用居中入口;`setStyleSheet` 加 `QMenu#nbTrayMenu` 限定 |
+
+⚠️ 顺带修一处与"重启"相关的隐患:托盘菜单的浅色 QSS 原先无 selector,而样式表作用于
+**目标窗口及其子窗口**——深色主题下若未打开过设置抽屉(无人重置 QSS),这段浅色规则会
+残留并套到后续弹出的子菜单上。现限定为 `#nbTrayMenu`。
+
+### 验证与限制
+
+- core `cargo test`:**178 项**通过;app 编译链接通过、无编译警告;`qmllint` 无新增告警类别;
+- 自截确认设置抽屉出现新勾选框(位于「数据」区),主题/其余字段正常;
+- ⚠️ 需真机确认:
+  1. 勾选「软件渲染」→ 保存后提示"重启后生效" → **重启** → 日志出现
+     `Qt Quick graphics API = Software (设置项)`,`mem[startup]` 约 120MB;
+  2. 取消勾选 → 重启 → 回到硬件(D3D11,约 190MB);
+  3. 托盘菜单「打开主面板」/「打开翻译」→ **居中于当前屏**;热键呼出仍**跟随光标**。
+
+**注**:本机沙箱不允许写 `%LOCALAPPDATA%`(设置文件位置),故"勾选→保存→重启"的
+运行期读写闭环未能由我实测,代码路径已核实(默认值/取值/分支)。

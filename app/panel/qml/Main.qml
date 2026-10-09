@@ -27,6 +27,10 @@ Rectangle {
         Entries.setQuery(text)
     }
 
+    // 自动化验收入口:C++ openSettingsPanel 直调(等价点「设置」按钮)。
+    // 设置抽屉已改 Loader 懒构建,这条链路同时验证"首次构建 + 尺寸对齐面板根"。
+    function openSettings() { settingsDrawerLoader.openAndLoad() }
+
     // ---- 右键菜单:全面板**唯一实例** ----
     // 原先每个 EntryCard 各自持有一个 Menu,存在两个问题:
     //   ① 委托被 ListView 回收/重建时,菜单与卡片的绑定可能失效;
@@ -52,7 +56,9 @@ Rectangle {
     /// 它永远盖在所有普通 Item 之上,与"谁先声明"无关。所以切到翻译页时若不清掉,
     /// 它会**浮在翻译页上面**,而且此时焦点已交给翻译页,抽屉自己的 Esc 也收不到。
     function dismissListOverlays() {
-        if (settingsDrawer.opened) settingsDrawer.close()
+        // 设置抽屉已改 Loader 懒构建:item 为空 = 从未打开过,自然没有浮层要收
+        if (settingsDrawerLoader.item && settingsDrawerLoader.item.opened)
+            settingsDrawerLoader.item.close()
         if (root.menuTarget !== null) root.closeEntryMenu()
         if (root.tagEditId !== "") root.tagEditId = ""
     }
@@ -134,8 +140,8 @@ Rectangle {
         // 分层处理,一次 Esc 只消费一层(自上而下):
         //   设置抽屉 → 翻译页自己的浮层 → 收起面板
         // 翻译页的 Esc 语义与 ✕ 一致:**直接收起**,不再顺带切回列表页。
-        if (settingsDrawer.opened) {
-            settingsDrawer.close()
+        if (settingsDrawerLoader.item && settingsDrawerLoader.item.opened) {
+            settingsDrawerLoader.item.close()
             return
         }
         if (panelWindow.mode === "translate") {
@@ -156,7 +162,7 @@ Rectangle {
             return
         }
         if ((event.modifiers & Qt.ControlModifier)
-                && !settingsDrawer.opened
+                && !(settingsDrawerLoader.item && settingsDrawerLoader.item.opened)
                 && panelWindow.mode !== "translate"
                 && event.key >= Qt.Key_1 && event.key <= Qt.Key_9) {
             const resp = Entries.copyByIndex(event.key - Qt.Key_1)
@@ -335,7 +341,7 @@ Rectangle {
                     iconName: "settings"
                     text: "设置"
                     Layout.alignment: Qt.AlignVCenter
-                    onClicked: settingsDrawer.openAndLoad()
+                    onClicked: settingsDrawerLoader.openAndLoad()
                 }
                 // 固定:开启后点其它地方不会自动隐藏(选中态用 accent 底反馈)
                 ThemedButton {
@@ -491,6 +497,18 @@ Rectangle {
             clip: true
             spacing: 6
             model: Entries
+
+            // ---- 内存收口:委托回收复用 + 限制预建缓冲 ----
+            // ① reuseItems:委托滚出视野后进复用池,而不是销毁重建。原先每次滚动都
+            //    重新实例化 EntryCard(含 Loader/CardAction 等子对象)并重解码图片,
+            //    是滚动期内存/CPU 反复抖动的来源。复用后这层开销只在首屏付一次。
+            //    代价:委托内部状态会跨行保留 —— 已在 EntryCard 的 ListView.onReused
+            //    里复位 textExpanded 与双击计时器(见该文件)。
+            // ② cacheBuffer:显式压到 240px。默认值是"平台相关且通常大于零",会预建
+            //    较多视野外委托(图片条目下每张都带解码图,内存代价高)。240px 约等于
+            //    上下各一块卡片高度,足够平滑预取,又不去缓存整屏之外的委托。
+            reuseItems: true
+            cacheBuffer: 240
 
             ScrollBar.vertical: ScrollBar {
                 policy: ScrollBar.AsNeeded
@@ -673,7 +691,28 @@ Rectangle {
     }
 
     // ---- 抽屉(设置仍留在面板内;翻译已并入面板为"整窗模式切换") ----
-    SettingsDrawer { id: settingsDrawer }
+    // 懒构建:SettingsDrawer 是一个 1200+ 行的重表单(6 组设置 + 多个自绘控件),
+    // 原先作为 Main.qml 的直接子项**启动即整棵实例化**,哪怕从不打开 —— 它单独
+    // 吃掉数 MB 的常驻(含委托/控件对象)。这里改为首次点「设置」才构建,之后常驻
+    // (再次打开省去重建,且保留上次的滚动位置)。
+    //
+    // item 为空 = 从未打开:调用方据此判空(opened 之类属性经 item 访问)。
+    // openAndLoad() 供 Header 的设置按钮调用:先建后开,再拉取设置回填。
+    Loader {
+        id: settingsDrawerLoader
+        active: false
+        // ⚠️ 尺寸必须对齐面板根:AppDrawer 用 `parent.width * 0.52` / `parent.height`
+        // 给自己定尺寸,而经 Loader 构建后它的 `parent` 就是**本 Loader** ——
+        // 不设尺寸会让抽屉拿不到宽高(0×0),打开时不可见。对齐后行为与原先
+        // `SettingsDrawer` 直接挂在 root 下完全一致。
+        width: root.width
+        height: root.height
+        sourceComponent: Component { SettingsDrawer { } }
+        function openAndLoad() {
+            active = true                 // 构建是同步的,置位后 item 立即可用
+            item.openAndLoad()
+        }
+    }
 
     // ---- Core 信号订阅 ----
     Connections {

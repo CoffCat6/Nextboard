@@ -97,12 +97,13 @@ void PanelWindow::applyModeSize(Mode mode) {
     move(topLeft);
 }
 
-void PanelWindow::showTranslate(const QString& text) {
+void PanelWindow::showTranslate(const QString& text, Orientation orientation) {
     const bool wasHidden = !isVisible();
     setMode(Mode::Translate);   // 尺寸/停留策略随形态切换
-    // 原本隐藏(托盘/热键链路)→ 按光标摆位,与列表页同一套手感;
+    // 原本隐藏(托盘/热键链路)→ 按调用方给的 orientation 摆位;
     // 已经显示着(从列表点「翻译」)→ 保持原位,只换内容与尺寸。
-    if (wasHidden) placeAtCursor();
+    if (wasHidden) (orientation == Orientation::ScreenCenter) ? placeScreenCenter()
+                                                              : placeAtCursor();
     if (wasHidden || !isActiveWindow()) {
         show();
         raise();
@@ -173,6 +174,27 @@ void PanelWindow::showAtCursor() {
     activateWindow();
 }
 
+/// 把窗口摆在**光标所在屏的中央**(再夹回该屏可用区)。
+/// 用于托盘菜单等入口:此时鼠标常在任务栏角落,跟随光标会把面板顶到屏幕边缘,
+/// 居中更符合"从托盘打开一个窗口"的预期。热键链路仍走 placeAtCursor(跟随光标)。
+void PanelWindow::placeScreenCenter() {
+    const QPoint cursor = QCursor::pos();
+    QScreen* screen = QGuiApplication::screenAt(cursor);
+    if (!screen) screen = QGuiApplication::primaryScreen();
+    if (!screen) return;
+    const QRect avail = screen->availableGeometry();
+    move(avail.center() - rect().center());
+}
+
+void PanelWindow::showCentered() {
+    // 与 showAtCursor 相同的语义(切回列表页 + 前置),仅摆放方式不同。
+    setMode(Mode::List);
+    placeScreenCenter();
+    show();
+    raise();
+    activateWindow();
+}
+
 HWND PanelWindow::nativeHandle() const {
     return reinterpret_cast<HWND>(winId());
 }
@@ -211,6 +233,13 @@ void PanelWindow::applySearchText(const QString& text) {
     if (m_quick && m_quick->rootObject())
         QMetaObject::invokeMethod(qobject_cast<QObject*>(m_quick->rootObject()), "setSearch",
                                   Q_ARG(QVariant, text));
+}
+
+void PanelWindow::openSettingsPanel() {
+    // 自动化验收入口:QML 侧 openSettings() 由 C++ 直调(Main.qml root 实现):
+    // 第一次调用会经 Loader 构建 SettingsDrawer,并验证其尺寸取自面板根。
+    if (m_quick && m_quick->rootObject())
+        QMetaObject::invokeMethod(qobject_cast<QObject*>(m_quick->rootObject()), "openSettings");
 }
 
 void PanelWindow::showEvent(QShowEvent* e) {

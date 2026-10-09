@@ -25,6 +25,11 @@ public:
     enum class Mode { List, Translate };
     Q_ENUM(Mode)
 
+    /// 呼出时的摆放方式:
+    /// - `AtCursor`:以光标为窗口中心(热键/单实例唤起用,鼠标在哪就在哪);
+    /// - `ScreenCenter`:居中于光标所在屏(托盘菜单等"人在别处"的入口用)。
+    enum class Orientation { AtCursor, ScreenCenter };
+
     explicit PanelWindow(CoreBridge& core, QWidget* parent = nullptr);
     ~PanelWindow() override;
 
@@ -33,9 +38,15 @@ public:
     /// 热键的语义是"呼出剪贴板历史",故会先切回列表页。
     void showAtCursor();
 
+    /// 显示在**光标所在屏的中央**并前置(托盘菜单「打开主面板」等入口)。
+    /// 与热键的区别仅在摆放方式:托盘操作时鼠标常常停在任务栏角落,跟随光标
+    /// 会把面板顶到屏幕边缘;居中更符合"从托盘打开一个窗口"的预期。
+    void showCentered();
+
     /// 切到翻译页并显示窗口 —— 三条打开链路(面板按钮/条目右键/热键)的统一入口。
     /// text 非空时预填原文并自动翻译。
-    void showTranslate(const QString& text);
+    /// orientation 决定首次显示时的摆放:热键链路传 AtCursor,托盘等传 ScreenCenter。
+    void showTranslate(const QString& text, Orientation orientation = Orientation::AtCursor);
 
     Mode mode() const { return m_mode; }
     QString modeString() const {
@@ -44,6 +55,9 @@ public:
 
     /// 自动化验收:注入搜索词(等价用户输入,走同一防抖链路)。
     void applySearchText(const QString& text);
+
+    /// 自动化验收:打开设置抽屉(等价点「设置」按钮,验证懒构建链路)。
+    void openSettingsPanel();
 
     /// QML 侧 ESC 调用(关闭抽屉后的兜底隐藏)。
     Q_INVOKABLE void hidePanel() { hide(); }
@@ -87,6 +101,8 @@ private:
     void applyModeSize(Mode mode);
     /// 把窗口摆到光标处(以光标为中心并夹回可用区)。每次呼出都调用。
     void placeAtCursor();
+    /// 把窗口摆在光标所在屏的中央(并夹回可用区)。托盘等"人在别处"的入口用。
+    void placeScreenCenter();
 
     CoreBridge& m_core;
     QQuickWidget* m_quick = nullptr;

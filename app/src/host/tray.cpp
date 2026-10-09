@@ -29,7 +29,7 @@ Tray::Tray(PanelWindow& panel, CoreBridge& core, QObject* parent)
     setContextMenu(m_menu);
     connect(this, &QSystemTrayIcon::activated, this, [this](ActivationReason reason) {
         if (reason == QSystemTrayIcon::Trigger || reason == QSystemTrayIcon::DoubleClick)
-            m_panel.showAtCursor();
+            m_panel.showCentered();
     });
     show();
 }
@@ -42,15 +42,20 @@ void Tray::buildMenu() {
     m_menu->setFont(menuFont);
     // Windows 原生菜单样式不跟随 QPalette 的深色化,深色系统下文字会变得极浅;
     // 显式 QSS 固定浅色底 + 深色字(theme.md §7 浅色配色),与系统菜单观感一致
+    //
+    // ⚠️ 限定到本菜单(`QMenu#nbTrayMenu`):样式表会作用于**目标窗口及其全部子窗口**,
+    // 而托盘菜单的弹出子菜单是其子窗口。若不加 selector,深色主题下未打开过设置抽屉时
+    // (无人重置 QSS)这段浅色规则会残留并套到后续弹出的子菜单上。
+    m_menu->setObjectName(QStringLiteral("nbTrayMenu"));
     m_menu->setStyleSheet(QStringLiteral(
-        "QMenu { background: #FFFFFF; border: 1px solid #D9E0E7; padding: 4px; }"
-        "QMenu::item { color: #17202A; padding: 6px 24px 6px 12px; border-radius: 4px; }"
-        "QMenu::item:selected { background: #E8F1FF; color: #17202A; }"
-        "QMenu::item:disabled { color: #B6BEC8; }"
-        "QMenu::separator { height: 1px; background: #D9E0E7; margin: 4px 8px; }"
-        "QMenu::indicator { width: 14px; height: 14px; }"));
-    m_menu->addAction("打开主面板", [this] { m_panel.showAtCursor(); });
-    m_menu->addAction("打开翻译", [] { CoreFacade::instance().openTranslate(); });
+        "QMenu#nbTrayMenu { background: #FFFFFF; border: 1px solid #D9E0E7; padding: 4px; }"
+        "QMenu#nbTrayMenu::item { color: #17202A; padding: 6px 24px 6px 12px; border-radius: 4px; }"
+        "QMenu#nbTrayMenu::item:selected { background: #E8F1FF; color: #17202A; }"
+        "QMenu#nbTrayMenu::item:disabled { color: #B6BEC8; }"
+        "QMenu#nbTrayMenu::separator { height: 1px; background: #D9E0E7; margin: 4px 8px; }"
+        "QMenu#nbTrayMenu::indicator { width: 14px; height: 14px; }"));
+    m_menu->addAction("打开主面板", [this] { m_panel.showCentered(); });
+    m_menu->addAction("打开翻译", [] { CoreFacade::instance().openTranslateCentered(); });
     m_menu->addSeparator();
     // 截图 / 贴图入口(对齐第一代托盘):截图前先收起面板,否则面板会被拍进画面;
     // 延时 150ms 等窗口真正消失(与热键链路 hidePanelThenCapture 同一取舍)。
