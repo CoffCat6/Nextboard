@@ -96,7 +96,8 @@ private:
     void applyPage(const QVariantMap& resp, bool append);
     /// 重新拉取标签统计(与列表同源:applyPage 后刷新)。
     void refreshTags();
-    /// 由 blob 路径拼出 file:// URL(thumb=true 时取同名 .thumb.png 缩略图)。
+    /// 由 blob 路径拼出 file:// URL(thumb=true 时取同目录 .thumb<版本>.png 缩略图,
+    /// 命名规则见 CoreBridge::thumbnailPathFor)。
     /// 静态且只依赖入参:列表重绘时**不得**再走同步 FFI 查询。
     static QString imageUrlForBlob(const QString& blobPath, bool thumb);
     static QString formatTime(qint64 ms);

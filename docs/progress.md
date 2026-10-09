@@ -2419,3 +2419,87 @@ nextboard.exe --software --screenshot <path>
 
 **注**:本机沙箱不允许写 `%LOCALAPPDATA%`(设置文件位置),故"勾选→保存→重启"的
 运行期读写闭环未能由我实测,代码路径已核实(默认值/取值/分支)。
+
+---
+
+## 2026-10-09(五)OCR 自动识别下线 + 缩略图清晰度 + OCR 峰值收口
+
+按用户拍板的三项设置(缩略图 640 / 版本化文件名 / `MAX_OCR_EDGE=4096`)一次落地。
+
+### 一、下线 OCR 自动识别(用户手动三条链全部保留)
+
+删除「图片入库时后台跑 OCR 回填 `ocr_text`」这一条旁路及其设置项:
+
+| 层 | 改动 |
+| --- | --- |
+| `clip.rs` | 删 `process()` 里的 `if settings.ocr_enabled { spawn_ocr_backfill(...) }` 与 `spawn_ocr_backfill()` 整个函数 |
+| `settings.rs` | 删 `ocr_enabled` 字段、默认值与默认值断言 |
+| `SettingsDrawer.qml` | 删「OCR 自动识别(截图文字可搜索)」勾选框及其读/写两处 |
+
+**未动**:右键「识别文字」/ 截图取字热键 / 翻译页「截图取字」三条手动链;`ocr_text` 列、
+FTS 触发器、`entry::set_ocr_text` 与 `ocr_language/backend/scale` 设置项全部保留(手动识别仍需要)。
+
+> **核对发现(与上一轮分析的一处出入)**:`set_ocr_text` 的唯一生产调用点就是刚删掉的
+> `spawn_ocr_backfill` —— 手动「识别文字」走 `ffi.rs` 的 `ocr_entry`,只 `return {"text": …}`,
+> **从不写 `ocr_text`**。即"手动识别也回填 `ocr_text` 参与搜索"此前**并不成立**。
+> 本次按批准范围只做删除(`pub fn` 不报 dead_code,schema 不动);若要"手动识别即回填、可搜索",
+> 属**新增**行为,需另行确认。
+
+兼容性:`Settings` 是 `#[serde(rename_all="camelCase", default)]` 且无 `deny_unknown_fields`,
+旧配置里的 `ocrEnabled` 被静默忽略,**无需写迁移**。收益:去掉一条会误触发的旁路(默认本就关闭)。
+
+### 二、OCR 峰值收口:自适应放大 + 去整图冗余拷贝
+
+**根因**(经逐段内存账核对):整屏 3072×1920 在 `ocr_scale=2` 下被无条件放大到
+6144×3840 —— 一份 RGBA 就是 **90MB**(原图仅 22.5MB),其后每一步都按 90MB 计。且
+5120×2880(5K)×2 = 10240 > Windows OCR 的 `MaxImageDimension`(10000),会**直接失败**。
+
+| # | 位置 | 改动 |
+| --- | --- | --- |
+| C.1 | `ocr.rs` 新增 `MAX_OCR_EDGE = 4096` + `effective_scale()` | 按"预处理后最长边 ≤ 4096"钳制实际倍数:**1080p 及以下行为不变**(仍 ×2),4K/5K 退到 ×1 |
+| C.2 | `apply_preprocess` 改收 **owned** `Vec<u8>` | 不处理时直接沿用(原先 `scale<=1` 分支会白拷整张);需要处理时才 `from_raw` |
+| C.3 | 所有权沿链串联 | `apply_preprocess` → `to_bitmap`(原地换 R/B,省 1 份整图)→ FFI `img.into_raw()` |
+| C.4 | `write_thumbnail_from_rgba` 收 owned | 入库预生成缩略图不再 `to_vec()` 整图 |
+
+**修正一处过度估计**:`SoftwareBitmap::CreateCopyFromBuffer` 函数名即 Copy,WinRT 无零拷贝
+构造 API,**这份省不掉**;故 C.3 的可省是"1 份预处理图",不是"2×90MB"。
+
+### 三、缩略图清晰度(320 → 640,版本化缓存)
+
+**根因**:列表**没有**解码原图(`ImageUrlRole` 走 `.thumb.png`),模糊来自**缩略图被放大显示**:
+卡片图片区约 533 逻辑 px、16:9 受高度上限 300 约束 → **320 的缩略图在 DPR 1.0 就被放大 1.67×、
+1.5 屏 2.5×**。"RGBA 降采样"是反向操作,只会更糊。
+
+| # | 位置 | 改动 |
+| --- | --- | --- |
+| B.1 | `clip.rs` | `THUMB_MAX_EDGE: 320 → 640`(DPR 1.0 下约 1.0×,不再放大) |
+| B.2 | `encode_thumbnail` | `DynamicImage::thumbnail`(等权盒平均,文字边缘发糊)→ `resize(…, CatmullRom)`;新增 `thumbnail_dimensions()` 自算等比尺寸(`imageops::resize` **不保持宽高比**) |
+| B.3 | `thumbnail_path` / `legacy_thumbnail_path` | 命名版本化:`xxx.png → xxx.thumb640.png`;旧无版本名 → 启动时(`spawn_thumbnail_backfill`)与删条目时(`remove_blob`)一并清理 |
+| B.3 | `core_bridge.{hpp,cpp}` | 新增 `CoreBridge::thumbnailPathFor()` + `constexpr nbThumbVersion = 640`,命名规则集中一处 |
+| B.3 | `clip_entry_model.cpp` / `bridge.cpp` | 两处 URL 拼接改调 `thumbnailPathFor`(与 core 侧对齐) |
+
+**为什么版本化**:`spawn_thumbnail_backfill` 只在目标文件不存在时才建,光改常量则**老条目永远
+停在 320**;版本号进文件名后,新名不存在 → 自动重建,自愈且无需手清缓存。
+
+**代价**:纹理 0.23MB → 0.9MB/张(列表只解码可见 + `cacheBuffer:240`,估 **+3~6MB 工作集**);
+磁盘约 **+150~300MB / 500 图**。嫌大可后续给 image crate 开 `jpeg` feature 改存 `.thumb.jpg`。
+
+### 验证与限制
+
+- core `cargo test`:**184 项**通过(178 → 新增 4 条 OCR 自适应/去拷贝 + 2 条缩略图等比与版本化);
+  `cargo build --release` 通过;
+- app 编译链接通过(`[13/13] Linking nextboard.exe`)、**无编译警告**;`qmllint` 无新增告警类别;
+- ⚠️ **本机沙箱对测试二进制有额外限制**:`cargo test` 直接运行 `core/target/debug/deps/*.exe`
+  报 `STATUS_DLL_INIT_FAILED (0xC0000142)` —— 复制到 `%TEMP%` 后**运行正常**(同样受影响的还有
+  旧构建产物,故与本次改动无关)。另 `Set-Location`/`Push-Location` 被拒,`build.ps1` 整体不可用;
+  app 构建改由 `cmd /c "vcvars64 && cd /d <build> && ninja"` 手工完成(脚本逻辑未改)。
+- ⚠️ 需真机确认:
+  1. 全屏(3072×1920)截图前后 `capture-end - capture-start` 应从 ~150MB 降到 **~50~70MB**
+     (日志出现 OCR 预处理尺寸 = 原尺寸而非 ×2);或把 `ocrScale` 设 1 复测对照;
+  2. DPR 1.25/1.5 屏上图片卡片明显更清晰;老条目缩略图被**重建**(`nextboard.log` 出现
+     `缩略图缓存升级:清理旧版缩略图 N 张` 与 `缩略图后台回填完成:新建 N 张`);
+  3. 右键「识别文字」/截图取字/翻译页取字三条链仍可用;**设置页不再有**「OCR 自动识别」项。
+
+**不做**:❌ 再降缩略图分辨率(RGBA 降采样);❌ 列表改回加载原图(4K 一张 33MB);
+❌ 把 `CreateCopyFromBuffer` 当可省。**后续项**:截图入库改走 RGBA 通道(省 base64/JSON 往返,
+现为 `QImage→PNG→base64→QString(UTF-16)→JSON`,C++ 侧瞬时约 5×PNG)。

@@ -44,7 +44,7 @@ public:
     sciter::value translateHistory();
     sciter::value clearTranslateHistory();
     sciter::value ocrEntry(const sciter::value& id);
-    // 图片条目 → file:// URL(thumb = 列表缩略图)
+    // 图片条目 → file:// URL(thumb = 列表缩略图,取 .thumb<版本>.png 缓存)
     sciter::value imageUrl(const sciter::value& id, bool thumb);
     sciter::value blobsDir();
 

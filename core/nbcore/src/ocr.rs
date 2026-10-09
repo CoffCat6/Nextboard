@@ -126,8 +126,11 @@ impl OcrOptions {
 }
 
 /// 按指定后端／语言／预处理做 OCR（命令层与对比基准共用入口）。
+///
+/// 收 **owned** RGBA：内部预处理/转换会原地复用这份缓冲（见 [`apply_preprocess`] 与
+/// `to_bitmap`），避免整图的多余拷贝；调用方传参后即不再需要该像素。
 pub fn recognize_configured(
-    rgba: &[u8],
+    rgba: Vec<u8>,
     width: u32,
     height: u32,
     options: &OcrOptions,
@@ -238,7 +241,7 @@ mod tesseract {
     }
 
     pub(super) fn recognize(
-        rgba: &[u8],
+        rgba: Vec<u8>,
         width: u32,
         height: u32,
         language: &LanguageChoice,
@@ -297,9 +300,32 @@ mod tesseract {
     }
 }
 
+/// 预处理后允许的最大边长（物理像素）：超过则**不再放大**。
+///
+/// 放大（`ocr_scale`，默认 2）是为**小字号截图**设的：12px 代码截图放大后 OCR 明显
+/// 更准（docs/phase6.md §3.6）。但它对大图是净损失：
+///   1. 内存：3072x1920 全屏 ×2 → 6144x3840，一份 RGBA 就是 90MB（原图仅 22.5MB），
+///      且其后每一步（BGRA 转换 / WinRT buffer / SoftwareBitmap / 引擎灰度）都按 90MB 计；
+///   2. 正确性：Windows OCR 的 `MaxImageDimension` 为 10000，5120x2880（5K）×2 = 10240
+///      会**直接失败**（见 `platform::recognize` 的尺寸闸），而不是多占内存。
+///
+/// 故按"预处理后最长边不超过本值"钳制实际倍数：大图退到 1（不放大），
+/// 1080p 及以下行为**完全不变**（仍是 ×2）。
+pub const MAX_OCR_EDGE: u32 = 4096;
+
+/// 把请求的放大倍数钳到"预处理后最长边 ≤ [`MAX_OCR_EDGE`]"。返回值至少为 1。
+fn effective_scale(width: u32, height: u32, requested: u32) -> u32 {
+    let longest = width.max(height).max(1);
+    let max_scale = (MAX_OCR_EDGE / longest).max(1);
+    requested.min(max_scale)
+}
+
 /// 统一预处理（两个后端共用）：放大 + 可选 Otsu 二值化。返回 (RGBA, w, h)。
+///
+/// 收 **owned** 缓冲：不处理时直接沿用（零拷贝），需要处理时也只在必要时新建 ——
+/// 调用方（`ocr_entry`）本就不再需要原始像素。
 pub(crate) fn apply_preprocess(
-    rgba: &[u8],
+    rgba: Vec<u8>,
     width: u32,
     height: u32,
     options: Preprocess,
@@ -308,23 +334,24 @@ pub(crate) fn apply_preprocess(
     if rgba.len() != expected {
         return Err(AppError::Internal("RGBA 长度与尺寸不匹配".into()));
     }
-    if options.scale <= 1 && !options.binarize {
-        return Ok((rgba.to_vec(), width, height));
+    let scale = effective_scale(width, height, options.scale);
+    if scale <= 1 && !options.binarize {
+        return Ok((rgba, width, height));
     }
-    let source = image::RgbaImage::from_raw(width, height, rgba.to_vec())
+    let source = image::RgbaImage::from_raw(width, height, rgba)
         .ok_or_else(|| AppError::Internal("图像重建失败".into()))?;
-    let scaled = if options.scale > 1 {
+    let scaled = if scale > 1 {
         // CatmullRom 在放大文本截图时比最近邻/双线性更利于笔画连续性
         image::imageops::resize(
             &source,
-            width * options.scale,
-            height * options.scale,
+            width * scale,
+            height * scale,
             image::imageops::FilterType::CatmullRom,
         )
     } else {
         source
     };
-    let (sw, sh) = (scaled.width(), scaled.height());
+    let (sw, sh) = scaled.dimensions();
     let mut raw = scaled.into_raw();
     if options.binarize {
         otsu_binarize(&mut raw);
@@ -385,7 +412,7 @@ fn luma(pixel: &[u8]) -> u32 {
 
 /// 按指定语言与预处理做 OCR（内置引擎；供命令层与对比基准使用）。
 pub fn recognize_with(
-    rgba: &[u8],
+    rgba: Vec<u8>,
     width: u32,
     height: u32,
     language: &LanguageChoice,
@@ -407,14 +434,8 @@ pub fn recognize_with(
 /// 阻塞调用（内部等待 WinRT 异步操作完成），须在非主线程执行。
 /// 生产代码走 `recognize_configured`（带设置项）；本入口供测试与内置引擎直连使用。
 #[cfg_attr(not(test), allow(dead_code))]
-pub fn recognize_rgba(rgba: &[u8], width: u32, height: u32) -> AppResult<String> {
-    recognize_with(
-        rgba,
-        width,
-        height,
-        &LanguageChoice::Auto,
-        Preprocess::default(),
-    )
+pub fn recognize_rgba(rgba: Vec<u8>, width: u32, height: u32) -> AppResult<String> {
+    recognize_with(rgba, width, height, &LanguageChoice::Auto, Preprocess::default())
 }
 
 /// 折叠 OCR 输出里**中文字符之间**的空白。
@@ -517,7 +538,7 @@ mod platform {
 
     /// 预处理：复用共享实现（放大 + 可选二值化）。
     fn preprocess(
-        rgba: &[u8],
+        rgba: Vec<u8>,
         width: u32,
         height: u32,
         options: Preprocess,
@@ -526,7 +547,7 @@ mod platform {
     }
 
     pub(super) fn recognize(
-        rgba: &[u8],
+        rgba: Vec<u8>,
         width: u32,
         height: u32,
         language: &LanguageChoice,
@@ -549,7 +570,7 @@ mod platform {
         }
         ensure_apartment();
         let engine = create_engine(language)?;
-        let bitmap = to_bitmap(&pixels, pw, ph)?;
+        let bitmap = to_bitmap(pixels, pw, ph)?;
         // join() 阻塞等待 WinRT 异步操作（本函数运行在线程池线程上，见 ocr_entry 命令）
         let result = engine.RecognizeAsync(&bitmap)?.join()?;
         let mut lines = Vec::new();
@@ -567,16 +588,18 @@ mod platform {
     }
 
     /// RGBA → SoftwareBitmap（BGRA8，OCR 要求的输入格式）。
-    fn to_bitmap(rgba: &[u8], width: u32, height: u32) -> AppResult<SoftwareBitmap> {
+    ///
+    /// 收 owned 缓冲并**原地**换 R/B：`pixels` 在预处理后已独占，OCR 也不再需要
+    /// 原始 RGBA，故无需再复制一份 BGRA（原先此处 `to_vec()` 会多占一份整图）。
+    fn to_bitmap(mut rgba: Vec<u8>, width: u32, height: u32) -> AppResult<SoftwareBitmap> {
         let expected = width as usize * height as usize * 4;
         if rgba.len() != expected {
             return Err(AppError::Internal("RGBA 长度与尺寸不匹配".into()));
         } // OCR 只接受 BGRA8：逐像素换 R/B 通道
-        let mut bgra = rgba.to_vec();
-        for i in (0..bgra.len()).step_by(4) {
-            bgra.swap(i, i + 2);
+        for i in (0..rgba.len()).step_by(4) {
+            rgba.swap(i, i + 2);
         }
-        let buffer = CryptographicBuffer::CreateFromByteArray(&bgra)?;
+        let buffer = CryptographicBuffer::CreateFromByteArray(&rgba)?;
         SoftwareBitmap::CreateCopyFromBuffer(
             &buffer,
             BitmapPixelFormat::Bgra8,
@@ -593,7 +616,7 @@ mod tests {
 
     #[test]
     fn reject_empty_dimensions() {
-        assert!(recognize_rgba(&[], 0, 0).is_err());
+        assert!(recognize_rgba(vec![], 0, 0).is_err());
     }
 
     // ---------- CJK 空白归一化（Phase 9：中文 OCR 文本可搜索） ----------
@@ -660,7 +683,7 @@ mod tests {
     #[test]
     fn reject_size_mismatch() {
         // 长度与尺寸不符：应在进入引擎前就被拒绝
-        let err = recognize_rgba(&[0u8; 16], 8, 8).unwrap_err();
+        let err = recognize_rgba(vec![0u8; 16], 8, 8).unwrap_err();
         assert!(matches!(err, AppError::Internal(_)));
     }
 
@@ -695,17 +718,60 @@ mod tests {
         let rgba = vec![
             10, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 255, 100, 110, 120, 255,
         ];
-        let (out, w, h) = apply_preprocess(&rgba, 2, 2, Preprocess::default()).unwrap();
+        let (out, w, h) = apply_preprocess(rgba.clone(), 2, 2, Preprocess::default()).unwrap();
         assert_eq!((w, h), (4, 4));
         assert_eq!(out.len(), 4 * 4 * 4);
 
         // scale=1 且不二值化：原样返回
-        let (same, w, h) = apply_preprocess(&rgba, 2, 2, super::Preprocess::NONE).unwrap();
+        let (same, w, h) =
+            apply_preprocess(rgba.clone(), 2, 2, super::Preprocess::NONE).unwrap();
         assert_eq!((w, h), (2, 2));
         assert_eq!(same, rgba);
 
         // 长度不符 → 明确报错，不进入引擎
-        assert!(apply_preprocess(&[0u8; 8], 2, 2, Preprocess::default()).is_err());
+        assert!(apply_preprocess(vec![0u8; 8], 2, 2, Preprocess::default()).is_err());
+    }
+
+    // ---------- 自适应放大（内存收口：大图不放大） ----------
+
+    #[test]
+    fn effective_scale_leaves_small_images_at_requested() {
+        // 1080p 及以下：2x 后最长边仍 ≤ MAX_OCR_EDGE，行为**完全不变**
+        assert_eq!(effective_scale(1920, 1080, 2), 2, "1080p 仍放大 2 倍");
+        assert_eq!(effective_scale(1280, 720, 2), 2, "720p 仍放大 2 倍");
+        // 边界：最长边 2048 × 2 = 4096 = MAX_OCR_EDGE，正好放得下
+        assert_eq!(effective_scale(2048, 1152, 2), 2, "2048×2 == 4096，仍在限内");
+        // 2049 × 2 = 4098 > 4096 → 退到 1
+        assert_eq!(effective_scale(2049, 1152, 2), 1, "超过 4096 则不再放大");
+    }
+
+    #[test]
+    fn effective_scale_disables_upscale_for_large_screens() {
+        // 3072x1920 全屏（本机屏）：×2 会到 6144 > 4096 → 退到 1
+        assert_eq!(effective_scale(3072, 1920, 2), 1, "4K 级全屏不放大");
+        // 5K：×2 = 10240 会超过 Windows OCR 的 MaxImageDimension(10000) 而直接失败，
+        // 退到 1 后 5120 < 10000，可正常识别（修掉现存溢出）
+        assert_eq!(effective_scale(5120, 2880, 2), 1, "5K 不放大，避免超出 OCR 上限");
+        // 用户请求 3x 时同样受钳制
+        assert_eq!(effective_scale(3072, 1920, 3), 1, "请求 3x 的大图同样退到 1");
+    }
+
+    #[test]
+    fn effective_scale_never_below_one() {
+        // 超大图：MAX_OCR_EDGE / longest 下取整为 0，必须夹到 1（不可 0，否则尺寸为 0）
+        assert_eq!(effective_scale(10000, 5000, 2), 1);
+        assert_eq!(effective_scale(20_000, 20_000, 2), 1, "超过上限也不得退到 0");
+        assert_eq!(effective_scale(0, 0, 2), 2, "非法尺寸不触发除零路径");
+    }
+
+    #[test]
+    fn apply_preprocess_does_not_upscale_large_image() {
+        // 3072x1920（> MAX_OCR_EDGE）× 2：应保持原尺寸，而不是 6144x3840
+        let (w, h) = (3072u32, 1920u32);
+        let rgba = vec![0u8; (w * h * 4) as usize];
+        let (out, ow, oh) = apply_preprocess(rgba, w, h, Preprocess::default()).unwrap();
+        assert_eq!((ow, oh), (3072, 1920), "大图不放大（内存从 90MB 降到 22.5MB）");
+        assert_eq!(out.len(), (w * h * 4) as usize);
     }
 
     /// OCR 后端探测（诊断用）：打印两种后端在本机的可用性与语言列表。
@@ -736,7 +802,8 @@ mod tests {
         let img = image::open(&path).expect("样例图读取失败");
         let rgba = img.to_rgba8();
         // 走默认入口 = 系统引擎 + 自动语言 + 放大 2 倍
-        let text = recognize_rgba(rgba.as_raw(), rgba.width(), rgba.height()).expect("OCR 失败");
+        let (w, h) = rgba.dimensions();
+        let text = recognize_rgba(rgba.into_raw(), w, h).expect("OCR 失败");
         println!("识别结果:\n{text}");
         let normalized: String = text.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(
@@ -756,7 +823,8 @@ mod tests {
             .expect("需设置 OCR_SAMPLE 指向含文字的 PNG（参见 docs/phase6.md 的验证步骤）");
         let img = image::open(&path).expect("样例图读取失败");
         let rgba = img.to_rgba8();
-        let text = recognize_rgba(rgba.as_raw(), rgba.width(), rgba.height()).expect("OCR 失败");
+        let (w, h) = rgba.dimensions();
+        let text = recognize_rgba(rgba.into_raw(), w, h).expect("OCR 失败");
         let normalized: String = text.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(
             normalized.to_uppercase().contains("OCR12345"),
@@ -812,7 +880,7 @@ mod tests {
             for (name, options, language) in &variants {
                 let started = std::time::Instant::now();
                 let text = recognize_with(
-                    rgba.as_raw(),
+                    rgba.clone().into_raw(),
                     rgba.width(),
                     rgba.height(),
                     language,

@@ -270,7 +270,6 @@ AppDrawer {
         historyLimit.value = s.historyLimit
         maxImage.value = s.maxImageMb
         monitorCheck.checked = s.monitorEnabled === true
-        ocrCheck.checked = s.ocrEnabled === true
         skipEditorCheck.checked = s.regionSkipEditor === true
         autoConfirmCheck.checked = s.regionAutoConfirm === true
         rightClickCancelCheck.checked = s.regionRightClickCancel === true
@@ -354,7 +353,6 @@ AppDrawer {
         s.historyLimit = historyLimit.value
         s.maxImageMb = maxImage.value
         s.monitorEnabled = monitorCheck.checked
-        s.ocrEnabled = ocrCheck.checked
         s.regionSkipEditor = skipEditorCheck.checked
         s.regionAutoConfirm = autoConfirmCheck.checked
         s.regionRightClickCancel = rightClickCancelCheck.checked
@@ -529,11 +527,6 @@ AppDrawer {
             ReadableCheckBox {
                 id: monitorCheck
                 text: "剪贴板监听"
-                onClicked: root.scheduleSave()
-            }
-            ReadableCheckBox {
-                id: ocrCheck
-                text: "OCR 自动识别(截图文字可搜索)"
                 onClicked: root.scheduleSave()
             }
             // 取消勾选后,框选截图会先进编辑器标注,「完成」才入库 + 写剪贴板

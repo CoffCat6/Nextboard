@@ -530,7 +530,7 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
             let (width, height) = img.dimensions();
             let settings = core.settings()?;
             let text = crate::ocr::recognize_configured(
-                img.as_raw(),
+                img.into_raw(),
                 width,
                 height,
                 &crate::ocr::OcrOptions::from_settings(&settings),

@@ -86,11 +86,6 @@ pub struct Settings {
     pub ocr_backend: String,
     /// OCR 放大倍数（1~4）：小字号截图放大后再识别可显著提升准确率，默认 2。
     pub ocr_scale: i64,
-    /// OCR 自动入库（Phase 9 F28，默认**关闭**）：图片条目入库时后台识别文字并存入
-    /// `ocr_text` 列参与全文搜索。关闭则只在用户右键「识别文字」时识别（既有行为）。
-    /// 默认关的理由：OCR 约 0.7s/条，批量导入截图时逐条跑会拖慢入库；且用户可能
-    /// 并不需要搜索截图内容。
-    pub ocr_enabled: bool,
     /// 翻译提供方：`microsoft`（默认，免密钥）/ `openai` / `custom`（Phase 7 F21~F23）。
     /// 默认取微软免授权端点，**开箱即可翻译、无需任何配置**。
     pub translate_provider: String,
@@ -384,7 +379,6 @@ impl Default for Settings {
             ocr_backend: "system".into(),
             // 放大 2 倍：实测对 12px 代码截图明显改善且耗时可控（docs/phase6.md §3.6）
             ocr_scale: 2,
-            ocr_enabled: false,
             translate_provider: "microsoft".into(),
             translate_source_lang: "auto".into(),
             translate_target_lang: "zh-Hans".into(),
@@ -1327,10 +1321,6 @@ mod tests {
         assert_eq!(settings.ocr_language, "auto", "OCR 默认自动选语言");
         assert_eq!(settings.ocr_backend, "system", "OCR 默认用系统内置引擎");
         assert_eq!(settings.ocr_scale, 2, "OCR 默认放大 2 倍");
-        assert!(
-            !settings.ocr_enabled,
-            "OCR 自动入库默认关闭（右键手动识别不受影响）"
-        );
         assert!(
             settings.pin_doubleclick_close,
             "双击关贴图默认开（既有 Snipaste 习惯，设置只让它可配置）"

@@ -195,10 +195,8 @@ QString ClipEntryModel::imageUrlForBlob(const QString& blobPath, bool thumb) {
                             : CoreBridge::blobsDirAbs() + '/' + blobPath;
     QString url = abs;
     if (thumb) {
-        // xxx.png → xxx.thumb.png(与 core 的 thumbnail_path 同一规则)
-        const int slash = url.lastIndexOf('/');
-        const int dot = url.lastIndexOf('.');
-        if (dot > slash) url.insert(dot, ".thumb");
+        // xxx.png → xxx.thumb<ver>.png(命名规则集中在 CoreBridge,与 core 侧对齐)
+        url = CoreBridge::thumbnailPathFor(abs);
     }
     return QUrl::fromLocalFile(url).toString();
 }

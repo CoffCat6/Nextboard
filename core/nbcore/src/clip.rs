@@ -378,78 +378,7 @@ fn process(core: &Core, item: ClipItem, hash: &str, settings: &Settings) -> AppR
     for blob in entry::evict(&db, settings.history_limit)? {
         remove_blob(&resolve_blob_path(&core.blobs_dir, &blob));
     }
-    // OCR 自动入库(第一代 Phase 9 F28,默认关闭):后台识别图片文字并回填 ocr_text。
-    // 必须后台跑——OCR 约 0.7s/条,在监听线程同步执行会拖慢连续复制的入库节奏。
-    if settings.ocr_enabled {
-        spawn_ocr_backfill(core, &new_entry);
-    }
     Ok(Some(new_entry))
-}
-
-/// 后台对刚入库的图片条目做 OCR 并把文本写入 `ocr_text` 列。
-/// 失败仅告警(OCR 是增强能力,失败不影响条目本身);FTS 触发器自动同步索引。
-fn spawn_ocr_backfill(core: &Core, entry: &ClipEntry) {
-    let Some(blob_path) = &entry.blob_path else {
-        return; // 非图片条目
-    };
-    let Ok(settings) = core.settings() else {
-        return;
-    };
-    let options = crate::ocr::OcrOptions::from_settings(&settings);
-    let path = resolve_blob_path(&core.blobs_dir, blob_path);
-    let entry_id = entry.id.clone();
-    let blobs_dir = core.blobs_dir.clone();
-    let spawned = std::thread::Builder::new()
-        .name("ocr-backfill".into())
-        .spawn(move || {
-            let _ = blobs_dir; // 线程名标识用;实际路径已在上面解析
-            // PNG 从磁盘读回再解码,避免在入库路径上多保存一份 RGBA 副本
-            let Ok(bytes) = std::fs::read(&path) else {
-                warn!("OCR 回填读取图片失败: {}", path.display());
-                return;
-            };
-            let decoded = match image::load_from_memory(&bytes) {
-                Ok(img) => img.to_rgba8(),
-                Err(err) => {
-                    warn!("OCR 回填解码图片失败 ({}): {err}", path.display());
-                    return;
-                }
-            };
-            let (width, height) = decoded.dimensions();
-            match crate::ocr::recognize_configured(decoded.as_raw(), width, height, &options) {
-                Ok(text) => {
-                    // 归一化:折叠中文间空白(Windows OCR 对中文常输出字间空格,
-                    // 不折叠则连续词永远搜不到);英文词间空格保留
-                    let trimmed = crate::ocr::normalize_cjk_spaces(&text).trim().to_owned();
-                    if trimmed.is_empty() {
-                        debug!("OCR 未识别到文字,ocr_text 保持 NULL (id={entry_id})");
-                        return;
-                    }
-                    let Some(core) = try_core() else {
-                        return;
-                    };
-                    match core.db.lock() {
-                        Ok(db) => {
-                            if let Err(err) =
-                                crate::store::entry::set_ocr_text(&db, &entry_id, &trimmed)
-                            {
-                                warn!("写入 OCR 文本失败 (id={entry_id}): {err}");
-                            } else {
-                                debug!(
-                                    "OCR 文本已入库 (id={entry_id}, {} 字符)",
-                                    trimmed.chars().count()
-                                );
-                            }
-                        }
-                        Err(err) => warn!("OCR 回填获取数据库锁失败 (id={entry_id}): {err}"),
-                    }
-                }
-                Err(err) => warn!("OCR 回填识别失败 (id={entry_id}): {err}"),
-            }
-        });
-    if let Err(err) = spawned {
-        warn!("启动 OCR 回填线程失败: {err}");
-    }
 }
 
 /// 应用内部来源的图片入库(第一代 Phase 5 F14):与剪贴板监听共用
@@ -585,8 +514,9 @@ fn build_entry(
             std::fs::create_dir_all(dir)?;
             std::fs::write(&path, &png)?;
             // 列表缩略图随入库一并生成(同一份 RGBA,免二次解码):
-            // 主面板列表只加载缩略图,避免为 110px 卡片解码整张 4K 原图。
-            write_thumbnail_from_rgba(&rgba, width, height, &thumbnail_path(&path));
+            // 主面板列表只加载缩略图,避免为卡片解码整张 4K 原图(约 33MB)。
+            // 编码 PNG 已完成,rgba 不再需要 —— 直接 move 进去,省一次整图拷贝。
+            write_thumbnail_from_rgba(rgba, width, height, &thumbnail_path(&path));
             Ok(Some(ClipEntry {
                 byte_size: png.len() as i64,
                 kind: EntryKind::Image,
@@ -639,13 +569,37 @@ pub fn encode_png(rgba: &[u8], width: u32, height: u32) -> AppResult<Vec<u8>> {
 
 /// 列表缩略图最大边长(物理像素)。
 ///
-/// 卡片显示上限仅 110 CSS px,2x DPR 下 ~220px 已足够清晰;取 320 留余量。
-/// 关键收益在**解码内存**:4K 截图解码为位图约 33MB,而 320px 缩略图仅约 0.3MB
+/// **为什么从 320 提到 640**:列表图片卡片实际渲染宽度约 533 逻辑 px(面板 800 − 两侧留白
+/// 24 − 卡片内边距 24,16:9 时受高度上限 300 约束),再乘屏幕 DPR。原先 320 的缩略图在
+/// DPR 1.0 屏上就被放大 1.67×、1.5 屏上 2.5× —— 这正是"缩略图发虚"的根因(不是解码/降采样)。
+/// 640 在 DPR 1.0 下约为 1.0×,不再放大;DPR 1.5 下 1.25×,可接受。
+///
+/// 仍保留**解码内存**收益:4K 截图解码为位图约 33MB,而 640px 缩略图仅约 0.9MB
 /// (第一代 docs/memory-optimization.md 的核心结论,Nextboard 继续生效)。
-pub const THUMB_MAX_EDGE: u32 = 320;
+pub const THUMB_MAX_EDGE: u32 = 640;
 
-/// 由原图 blob 路径推导缩略图缓存路径:`xxx.png` → `xxx.thumb.png`(同目录)。
+/// 缩略图文件名版本号,必须与 [`THUMB_MAX_EDGE`] 保持一致。
+///
+/// 版本号参与文件名(`xxx.thumb640.png`),于是**调大边长后旧缓存自动失效**:后台回填
+/// (见 [`spawn_thumbnail_backfill`])按新名字重新生成,无需手动清缓存、也不会读到旧尺寸
+/// 的缓存(否则老条目会永远停在 320)。宿主侧 `CoreBridge::nbThumbVersion` 必须同步。
+pub const THUMB_VERSION: u32 = THUMB_MAX_EDGE;
+
+/// 由原图 blob 路径推导缩略图缓存路径:`xxx.png` → `xxx.thumb<版本>.png`(同目录)。
 pub fn thumbnail_path(blob_path: &Path) -> PathBuf {
+    let stem = blob_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("blob");
+    blob_path.with_file_name(format!("{stem}.thumb{THUMB_VERSION}.png"))
+}
+
+/// 旧版缩略图缓存路径(无版本号后缀):`xxx.png` → `xxx.thumb.png`。
+///
+/// 只用于**启动清理**:版本化命名之前生成的缓存(尺寸偏小、还发虚)在新版本里既不会被
+/// 读取、也不会被子条目删除清理到,不主动删就会一直占着磁盘(`remove_blob` 只删当前
+/// 版本路径)。清理是幂等的,删不到即忽略。
+pub fn legacy_thumbnail_path(blob_path: &Path) -> PathBuf {
     let stem = blob_path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -671,15 +625,41 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     }
 }
 
+/// 等比缩放后的尺寸:让 (w,h) 完整含于 `max_edge × max_edge` 框内(不拉伸、最少缩到 1px)。
+///
+/// ⚠️ `image::imageops::resize` 本身**不保持宽高比**(它直接按给定尺寸拉伸),
+/// `DynamicImage::resize` 才是先算尺寸再调它;这里按后者的口径自行换算,避免变形。
+fn thumbnail_dimensions(w: u32, h: u32, max_edge: u32) -> (u32, u32) {
+    let longest = w.max(h);
+    if longest == 0 {
+        return (w, h);
+    }
+    let ratio = f64::from(max_edge) / f64::from(longest);
+    (
+        ((f64::from(w) * ratio).round() as u32).max(1),
+        ((f64::from(h) * ratio).round() as u32).max(1),
+    )
+}
+
 /// 等比缩放到 `max_edge` 内并编码为快速档 PNG(缩略图只用于展示,压缩率不重要)。
 ///
-/// **不放大小图**:`image::DynamicImage::thumbnail` 会为填满给定边界而**放大**小于边界的图
-/// (第一代实测 64x32 传入 320 会得到 320x160),故此处显式判断。
+/// **不放大小图**:小于边界的图原样保留(第一代实测 `thumbnail` 会为填满边界而**放大**
+/// 64x32 → 320x160,故先判尺寸再决定是否缩放)。
+///
+/// **用 CatmullRom 而非 `DynamicImage::thumbnail`**:后者是等权盒平均(box average),
+/// 对文字/UI 截图的高频边缘会"糊一圈";CatmullRom 边缘更利落,是"缩略图发虚"的次要成因。
+/// 仅当原图超出 `max_edge` 时才走它;目标尺寸先经 [`thumbnail_dimensions`] 保持宽高比。
 fn encode_thumbnail(img: &image::DynamicImage, max_edge: u32) -> AppResult<Vec<u8>> {
     let thumb = if img.width() <= max_edge && img.height() <= max_edge {
         img.to_rgba8()
     } else {
-        img.thumbnail(max_edge, max_edge).to_rgba8()
+        let (nw, nh) = thumbnail_dimensions(img.width(), img.height(), max_edge);
+        image::imageops::resize(
+            img,
+            nw,
+            nh,
+            image::imageops::FilterType::CatmullRom,
+        )
     };
     let mut out = std::io::Cursor::new(Vec::new());
     use image::ImageEncoder as _;
@@ -721,9 +701,13 @@ pub fn load_or_build_thumbnail(blob_path: &Path) -> AppResult<Vec<u8>> {
 }
 
 /// 入库时用同一份 RGBA 预生成缩略图(免二次解码),失败仅告警、不影响入库。
-fn write_thumbnail_from_rgba(rgba: &[u8], width: u32, height: u32, dest: &Path) {
+///
+/// 收 owned 缓冲:调用点(`build_entry`)在编码完 PNG 后本就不再需要这份 RGBA,
+/// 故直接交给 `image` 持有,省掉原先为构造 `RgbaImage` 而做的一次整图 `to_vec()`
+/// (4K 截图上是 22.5MB)。
+fn write_thumbnail_from_rgba(rgba: Vec<u8>, width: u32, height: u32, dest: &Path) {
     let result = (|| -> AppResult<()> {
-        let buffer = image::RgbaImage::from_raw(width, height, rgba.to_vec()).ok_or_else(|| {
+        let buffer = image::RgbaImage::from_raw(width, height, rgba).ok_or_else(|| {
             crate::error::AppError::Internal("RGBA 数据长度与图片尺寸不匹配".into())
         })?;
         let img = image::DynamicImage::ImageRgba8(buffer);
@@ -755,9 +739,14 @@ pub fn spawn_thumbnail_backfill(core: &'static Core) {
                 }
             };
             let mut built = 0usize;
+            let mut purged = 0usize;
             for e in entries {
                 let Some(stored) = e.blob_path else { continue };
                 let full = resolve_blob_path(&blobs_dir, &stored);
+                // 顺手清理版本化命名之前的旧缓存(不删会一直占磁盘,且永远不会被读到)
+                if std::fs::remove_file(legacy_thumbnail_path(&full)).is_ok() {
+                    purged += 1;
+                }
                 if thumbnail_path(&full).exists() {
                     continue;
                 }
@@ -767,6 +756,9 @@ pub fn spawn_thumbnail_backfill(core: &'static Core) {
             }
             if built > 0 {
                 info!("缩略图后台回填完成:新建 {built} 张");
+            }
+            if purged > 0 {
+                info!("缩略图缓存升级:清理旧版缩略图 {purged} 张");
             }
         });
     if let Err(err) = spawned {
@@ -922,6 +914,8 @@ pub fn remove_blob(path: &Path) {
     }
     // 缩略图缓存是派生数据,条目删除时一并清理,避免缓存目录随历史膨胀
     let _ = std::fs::remove_file(thumbnail_path(path));
+    // 版本化命名之前的旧缓存(若还在)也一并清掉
+    let _ = std::fs::remove_file(legacy_thumbnail_path(path));
 }
 
 #[cfg(test)]
@@ -993,21 +987,46 @@ mod tests {
     fn thumbnail_path_appends_suffix_and_keeps_dir() {
         assert_eq!(
             thumbnail_path(Path::new("C:/data/blobs/2026-10/abc.png")),
-            PathBuf::from("C:/data/blobs/2026-10/abc.thumb.png")
+            PathBuf::from("C:/data/blobs/2026-10/abc.thumb640.png")
         );
         // 无扩展名同样安全(不会把 .thumb 当成扩展名替换掉)
         assert_eq!(
             thumbnail_path(Path::new("C:/data/blobs/abc")),
-            PathBuf::from("C:/data/blobs/abc.thumb.png")
+            PathBuf::from("C:/data/blobs/abc.thumb640.png")
         );
+        // 版本号来源于 THUMB_MAX_EDGE:改边长必须让缓存文件名随之变化
+        assert_eq!(THUMB_VERSION, THUMB_MAX_EDGE);
+    }
+
+    #[test]
+    fn legacy_thumbnail_path_stays_unversioned() {
+        // 旧命名固定无版本号,供启动清理使用(与 thumbnail_path 必须指向不同文件)
+        let blob = Path::new("C:/data/blobs/2026-10/abc.png");
+        assert_eq!(
+            legacy_thumbnail_path(blob),
+            PathBuf::from("C:/data/blobs/2026-10/abc.thumb.png")
+        );
+        assert_ne!(legacy_thumbnail_path(blob), thumbnail_path(blob));
     }
 
     /// 缩略图相关单测只覆盖**内存内逻辑**(路径推导、缩放编码):
     /// 落盘缓存由真机冒烟验证。
     #[test]
+    fn thumbnail_dimensions_preserves_aspect_ratio() {
+        // 16:9 大图 → 最长边 640,另一边按比例
+        assert_eq!(thumbnail_dimensions(1920, 1080, 640), (640, 360));
+        // 竖图:按高为主边
+        assert_eq!(thumbnail_dimensions(1080, 1920, 640), (360, 640));
+        // 正方形
+        assert_eq!(thumbnail_dimensions(2000, 2000, 640), (640, 640));
+        // 极端窄条:短边至少 1px(不得因取整退化为 0)
+        assert_eq!(thumbnail_dimensions(10_000, 1, 640), (640, 1));
+    }
+
+    #[test]
     fn encode_thumbnail_downscales_within_max_edge() {
-        // 640x480(超过 THUMB_MAX_EDGE)应等比缩放到 320x240
-        let (w, h) = (640u32, 480u32);
+        // 1280x960(超过 THUMB_MAX_EDGE=640)应等比缩放到 640x480
+        let (w, h) = (1280u32, 960u32);
         let rgba: Vec<u8> = (0..(w * h * 4)).map(|i| (i % 255) as u8).collect();
         let buffer = image::RgbaImage::from_raw(w, h, rgba).unwrap();
         let img = image::DynamicImage::ImageRgba8(buffer);
@@ -1017,8 +1036,8 @@ mod tests {
         let decoded = image::load_from_memory(&png).unwrap();
         assert_eq!(
             (decoded.width(), decoded.height()),
-            (320, 240),
-            "应等比缩放到最大边 320 内"
+            (640, 480),
+            "应等比缩放到最大边 640 内"
         );
     }
 

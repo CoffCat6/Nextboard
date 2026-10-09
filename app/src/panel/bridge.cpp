@@ -177,10 +177,8 @@ value NextboardAsset::imageUrl(const value& id, bool thumb) {
     if (blob.isEmpty()) return value();
     QString abs = CoreBridge::blobsDirAbs() + "/" + blob;
     if (thumb) {
-        // xxx.png → xxx.thumb.png(与 core 缩略图缓存命名一致)
-        const int slash = abs.lastIndexOf('/');
-        const int dot = abs.lastIndexOf('.');
-        if (dot > slash) abs.insert(dot, ".thumb");
+        // xxx.png → xxx.thumb<ver>.png(命名规则集中在 CoreBridge,与 core 侧对齐)
+        abs = CoreBridge::thumbnailPathFor(abs);
     }
     return qv(QUrl::fromLocalFile(abs).toString());
 }

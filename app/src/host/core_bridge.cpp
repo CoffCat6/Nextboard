@@ -151,6 +151,17 @@ QString CoreBridge::blobsDirAbs() {
     return instance().m_effectiveDataDir + "/blobs";
 }
 
+QString CoreBridge::thumbnailPathFor(const QString& absoluteBlobPath) {
+    // 与 core 的 clip::thumbnail_path() 同一规则:xxx.png → xxx.thumb<ver>.png
+    // (在**最后一个点**前插入,无扩展名同样安全)
+    const int slash = absoluteBlobPath.lastIndexOf('/');
+    const int dot = absoluteBlobPath.lastIndexOf('.');
+    if (dot <= slash) return absoluteBlobPath;   // 无扩展名:理论上不会发生
+    QString out = absoluteBlobPath;
+    out.insert(dot, QStringLiteral(".thumb%1").arg(nbThumbVersion));
+    return out;
+}
+
 QString CoreBridge::coreVersion() const {
     if (!m_version) return {};
     // 与 nb_version() 的编码一致:major*10000 + minor*100 + patch
