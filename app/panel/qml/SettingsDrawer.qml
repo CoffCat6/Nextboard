@@ -94,8 +94,15 @@ AppDrawer {
         }
     }
 
+    /// 单行文本输入框(数据目录 / 接口地址 / API Key / Token / 模型名 /
+    /// 响应取值路径 / 代理主机与账号 / 十六进制色值…)。
+    ///
+    /// 全部是**技术字段**,所以统一用等宽字体:URL 与 JSON 里的字符
+    /// (0/O、1/l/I、{}[])在等宽下才对得齐、肉眼可核对。中文回退由 C++ 侧
+    /// app_font.hpp 的替换表钉到雅黑,不会掉宋体。
     component ReadableTextField: TextField {
         color: Theme.colors.textPrimary
+        font.family: Theme.fontMono
         placeholderTextColor: Theme.colors.textTertiary
         selectionColor: Theme.colors.accent
         selectedTextColor: Theme.colors.accentText
@@ -142,6 +149,9 @@ AppDrawer {
                 anchors.rightMargin: 8
                 verticalAlignment: Text.AlignVCenter
                 elide: Text.ElideRight
+                // 技术字段:"Ctrl+Shift+V" 这类组合键在等宽下各段严格对齐,
+                // 不同动作之间横向可比(一眼看出哪个键位冲突)
+                font.family: Theme.fontMono
                 font.pixelSize: Theme.metrics.fontCaption
                 color: hk.recording ? Theme.colors.accent
                      : hk.value === "" ? Theme.colors.textSecondary : Theme.colors.textPrimary
@@ -996,6 +1006,8 @@ AppDrawer {
                     onTextEdited: root.scheduleSave()
                     wrapMode: TextArea.WrapAnywhere
                     placeholderText: "Content-Type: application/json"
+                    // 技术字段:请求头逐行 "Name: Value",等宽才对齐
+                    font.family: Theme.fontMono
                     color: Theme.colors.textPrimary
                     placeholderTextColor: Theme.colors.textTertiary
                     selectionColor: Theme.colors.accent
@@ -1029,6 +1041,8 @@ AppDrawer {
                     onTextEdited: root.scheduleSave()
                     wrapMode: TextArea.WrapAnywhere
                     placeholderText: "{\"text\": [\"${text}\"], \"target_lang\": \"${to}\"}"
+                    // 技术字段:JSON 模板,等宽缩进与引号/括号配对最受益
+                    font.family: Theme.fontMono
                     color: Theme.colors.textPrimary
                     placeholderTextColor: Theme.colors.textTertiary
                     selectionColor: Theme.colors.accent

@@ -31,6 +31,7 @@ qt_policy(SET QTP0004 NEW)
 
 add_executable(nextboard WIN32
     src/main.cpp
+    src/app_font.cpp
     src/host/single_instance.cpp
     src/host/auto_start.cpp
     src/host/tray.cpp
@@ -62,6 +63,7 @@ qt_add_qml_module(nextboard
         panel/qml/AppMark.qml
         panel/qml/HeaderIcon.qml
         panel/qml/ReadableComboBox.qml
+        panel/qml/TextEditMenu.qml
         panel/qml/ThemedButton.qml
         panel/qml/ThemedMenu.qml
         panel/qml/ThemedMenuItem.qml

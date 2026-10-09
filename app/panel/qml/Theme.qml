@@ -11,10 +11,25 @@ import Nextboard.Core 1.0
 QtObject {
     readonly property bool dark: Core.darkTheme
 
-    /// 全局字体族(中文由 Qt 的回退链自动落到 Microsoft YaHei UI)。
-    /// 与 C++ 侧 QApplication::setFont 保持一致;QML 里显式声明族名是为了
-    /// 不依赖"应用字体是否已被设置",避免不同引擎实例表现不一致。
-    readonly property string fontFamily: "Segoe UI"
+    // ---- 字体族(与 C++ 侧 nb::uiFontFamilies() 同一份来源) ----
+    //
+    // ⚠️ 这里只能写**单个族名**,不能写 "A, B" 形式的回退链:
+    //    QML 的 font.family 底层是 QFont::setFamily,它是
+    //    `setFamilies(QStringList(family))` —— 单元素,会把应用字体的回退链
+    //    整条覆盖掉;而逗号串会被当成一个完整族名去匹配,匹配不到就由 Qt
+    //    的 font matching 随便挑一个(实测落到 Tahoma),中英混排直接错乱。
+    //    (Qt.font({families: [...]}) 也不行:QML 的 font 值类型没有 families
+    //     属性,该键被静默忽略。)
+    //    所以回退链只在 C++ 侧 app_font.hpp 表达一次,QML 只放主族名。
+    //
+    // 中文为什么不掉宋体:app_font.hpp 装了 QFont::insertSubstitution
+    // (Segoe UI / 等宽族 → 微软雅黑),缺字回退被钉死了。改族名前先看那边。
+    readonly property string fontFamily: "Microsoft YaHei UI"
+
+    /// 技术字段(URL / API Key / JSON / 请求头 / 路径 / 语种代码 / 快捷键)的
+    /// 等宽字体。Cascadia Mono 是 Windows Terminal 默认字体(Win11 自带),
+    /// Consolas 全 Windows 版本都有,中文经 C++ 替换表回退雅黑。
+    readonly property string fontMono: "Cascadia Mono"
 
     // ---- 色板(theme.md §7/§8) ----
     readonly property QtObject colors: QtObject {

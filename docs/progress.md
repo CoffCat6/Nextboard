@@ -2503,3 +2503,243 @@ FTS 触发器、`entry::set_ocr_text` 与 `ocr_language/backend/scale` 设置项
 **不做**:❌ 再降缩略图分辨率(RGBA 降采样);❌ 列表改回加载原图(4K 一张 33MB);
 ❌ 把 `CreateCopyFromBuffer` 当可省。**后续项**:截图入库改走 RGBA 通道(省 base64/JSON 往返,
 现为 `QImage→PNG→base64→QString(UTF-16)→JSON`,C++ 侧瞬时约 5×PNG)。
+
+---
+
+## 2026-10-09(五)界面字体总体收口:统一微软雅黑 + 技术字段等宽
+
+### 一、根因(先定位,再改)
+
+诉求是"主界面/设置/翻译界面字体总体改成微软雅黑"。排查后发现**不是字号问题,
+而是同一个界面里并存两种中文字体**:
+
+| 来源 | 位置 | 实际效果 |
+| --- | --- | --- |
+| C++ 应用字体(带回退链) | `qml_bootstrap.cpp` `setFamilies({Segoe UI, Microsoft YaHei UI, …})` | 拉丁 Segoe UI,中文 **微软雅黑** ✅ |
+| QML 显式族名(单值) | `Theme.qml` `fontFamily = "Segoe UI"` | 拉丁 Segoe UI,中文 **宋体** ❌ |
+
+机制:QML 的 `font.family` 底层是 `QFont::setFamily`,而 Qt 源码里它是
+`setFamilies(QStringList(family))` —— **单元素**,会把应用字体的回退链整条覆盖掉。
+中文缺字后由 Qt 的 font matching 决定落点,实测是 **SimSun**。
+
+用 `QTextLayout` glyph run + `QRawFont::familyName()` 取证:
+
+```
+改前  setFamily("Segoe UI")                 中文 -> SimSun              ❌
+改后  setFamily("Segoe UI")  + 替换表        中文 -> Microsoft YaHei UI ✅
+```
+
+于是凡显式写了 `font.family: Theme.fontFamily` 的 **35 处**(Main.qml 12、
+TranslateView.qml 18、ThemedButton 1、ThemedMenuItem 1、SettingsDrawer 的
+SectionTitle/FieldLabel/HintLabel 3)中文全是宋体;而**没写** `font.family` 的
+(EntryCard 9 个文本项、KeyCap、SettingsDrawer 大部分内联 Label)继承应用字体,
+中文是雅黑。最直观的一例:搜索框(设了 family)中文是宋体,而它下方的列表卡片
+(未设 family)中文是雅黑 —— 两者相邻。
+
+### 二、改动
+
+| # | 位置 | 改动 |
+| --- | --- | --- |
+| 1 | **新增 `app/src/app_font.{hpp,cpp}`** | 字体族名的**唯一来源**:`uiFontFamilies()` / `monoFontFamilies()` / `installFontSubstitutions()` / `installApplicationFont()` / `uiFont()` / `monoFont()` |
+| 2 | `CMakeLists.txt` | 注册 `src/app_font.cpp` |
+| 3 | `qml_bootstrap.cpp` | 删掉本地字体块,改调 `installApplicationFont()`;并提到 `QQuickStyle::setStyle()` **之前**(替换表必须在任何 QFont 解析前生效) |
+| 4 | `Theme.qml` | `fontFamily: "Segoe UI"` → `"Microsoft YaHei UI"`;新增 `fontMono: "Cascadia Mono"`;修正原注释里"中文自动回退到 YaHei UI"的错误说法 |
+| 5 | `SettingsDrawer.qml` | `ReadableTextField` 组件加 `font.family: Theme.fontMono`(**一处覆盖 17 个技术字段**:接口地址/API Key/Token/模型名/数据目录/hex 色值/代理主机账号…);`cuHeaders`/`cuBody` 两个 TextArea、`HotkeyField` 内文本同样等宽 |
+| 6 | `TranslateView.qml` | `targetCode` 语种代码框等宽 |
+| 7 | `EntryCard.qml` | `collapsedText` / `fullEdit` 按 `kind === "file"` 切等宽(文件条目正文就是路径) |
+| 8 | `pin_window.cpp` | `renderText` 的硬编码 `QFont("Microsoft YaHei")` 改 `nb::uiFont(style.fontSize)` —— 原来位图用经典雅黑、工具条按钮继承应用字体(雅黑 UI),两处不同族 |
+| 9 | `tray.cpp` | 删掉 `if (pointSizeF() <= 0.0) setPointSizeF(9.0)`(见下方"托盘菜单字号"一节) |
+| 10 | `main.cpp` | 新增 `--translate <text>` 自截钩子(与既有 `--query`/`--settings` 同约定),否则翻译页永远无法纳入自截回归 |
+| 11 | `docs/theme.md` §39 | 重写为"默认微软雅黑 UI + 等宽令牌",并新增 §39.1 记录三条 Qt 约束 |
+| 12 | `app/panel/main.htm` | Sciter 时代死代码(CMake 已不部署、无代码引用、依赖 `<input\|search>` 与 `NB.listEntries`):加显式废弃标记,字体同步为新策略 |
+
+**顺带修掉一个从未生效的回退名**:原 `setFamilies` 链末位是 `Noto Sans CJK SC`,
+而 Qt 字体库里实际只有 `Noto Sans SC` —— 那条回退从来没起作用过(静默失效)。
+
+### 三、两个 Qt 限制(决定了改法)
+
+1. **QML 无法表达回退链。** `font.family` 单值;`"A, B"` 逗号串会被当成一个完整
+   族名去匹配,匹配不到由 Qt 随便挑(实测落 **Tahoma**);`Qt.font({families:[…]})`
+   也不行 —— QML 的 font 值类型没有 `families` 属性,该键被静默忽略
+   (只给 `families` 会直接报 `no valid font subproperties specified`)。
+   → 回退链只在 C++ 侧表达一次,QML 只放主族名。
+2. **等宽字体不含中文字形。** Cascadia Mono / Consolas 的 SC 支持均为 N。
+   技术字段里的中文(中文数据目录、JSON 里的中文、`targetCode` 的占位"语种代码")
+   若不处理会掉宋体。→ 用 `QFont::insertSubstitution` 把
+   `Segoe UI` / `Cascadia Mono` / `Consolas` 的缺字回退钉到雅黑。
+
+### 四、验证
+
+**A. 构建**:cmake + ninja 全通过(43 步,QML 缓存生成 + C++ 编译链接),无警告。
+
+**B. 三界面自截**(`--screenshot` + `--settings` + `--translate`):主界面/设置/翻译
+三页中文均为雅黑,无宋体混入;翻译页 `targetCode` 显示等宽 `en`,翻译链路正常
+(自截时 `--translate "剪贴板字体收口验证 Nextboard 123"` 成功返回英文译文)。
+
+**C. 令牌落点探针**(链接**生产代码** `app_font.cpp`,调 `installApplicationFont()`
+后按 QML 的 `font.family` 写法构造 QFont,报告 glyph run 实际命中字体):
+
+```
+Theme.fontFamily = "Microsoft YaHei UI"
+  中文占位 / 中文目录 / JSON / 中英混排 / 纯英文  -> Microsoft YaHei UI   ✅
+Theme.fontMono = "Cascadia Mono"
+  中文占位"语种代码"     -> Microsoft YaHei UI            ✅(回退雅黑,非宋体)
+  中文数据目录           -> Microsoft YaHei UI + Cascadia Mono  ✅
+  纯英文 "Nextboard"    -> Cascadia Mono                  ✅(拉丁仍是等宽)
+对照:替换表外的 Lucida Console + 中文 -> SimSun            ❌(证明替换表必需)
+符号 ✓✕↻✎⧉             -> Segoe UI Symbol + MS UI Gothic + YaHei UI  ✅(仍有字形)
+```
+
+**D. 布局回归**:雅黑比 Segoe UI 拉丁宽约 8~9%(实测 `"Nextboard"@18px`
+81.2→88.1、URL@14px 155.1→169.0)、行高紧 1px(14px 下 19→18)。三张自截里
+头部按钮行、搜索框、设置抽屉均无溢出/省略号异常。
+
+### 四.1 托盘菜单收窄(两轮)
+
+**背景**:上面第 9 条改动把托盘菜单字体改成 `nb::uiFont()`(=界面正文 14px),
+而它此前实际是 9pt(≈12px)—— 菜单变大,用户两次反馈"太大 / 还是太宽"。
+
+**归因**:菜单尺寸 ≈ 边框 + 菜单内边距 + **勾选列** + 左内边距 + 最宽文案 + 右内边距。
+逐项量测后,发现两个"白占"的来源:
+
+1. **勾选列 18px(最大单项)**。`QMenu` 只要存在**任何一个**可勾选项,就会给
+   **所有**条目预留一列勾选列宽。而"暂停监听"的状态本来就用文案表达
+   (`暂停监听` ⇄ `恢复监听`),勾选标记是**冗余**的 → 去掉 `setCheckable`
+   (同时 `toggled` 改 `triggered`,状态改为从设置现读)。
+2. **右内边距 24px** 是给**子菜单箭头**留的,而本菜单没有子菜单 → 纯空占。
+
+**逐项边际收益**(sizeHint 逻辑像素,12px 字号):
+
+```
+右内边距 20→12   -8      勾选列 18px 去掉   -18
+右内边距 20→6    -14     左内边距 10→8      -2
+菜单内边距 3→2    -2     文案换半角括号     -16(未采用,见下)
+```
+
+**最终改动**:
+
+| 项 | 值 | 说明 |
+| --- | --- | --- |
+| 字号 | `kTrayMenuFontPixelSize = 12`(`app_font.hpp`) | **显式**写死;此前字号由 `if (pointSizeF() <= 0) setPointSizeF(9.0)` 这条**必然触发**的兜底意外决定 |
+| 勾选态 | **去掉**(`setCheckable` → 无) | 状态已由文案表达;这一刀省 18px |
+| 内存项 | **移除**(用户要求) | 原为验收期便利,不是常规功能;顺带省一行 |
+| 条目内边距 | `6px 24px 6px 12px` → `4px 8px` | 右 24→8(无子菜单)、左 12→8(无勾选列);改**等宽**(不对称原本只为让出勾选列) |
+| 菜单内边距 | `4px` → `2px` | |
+| `::indicator` 规则 | 删除 | 已无可勾选项,规则无用。⚠️ **若日后加回可勾选项必须补回**,否则勾选标记走默认样式,深色下可能看不清 |
+| 分隔线 | `margin: 4px 8px` 不动 | 不是宽度主因,动它会让量测数字失真 |
+
+**未采用**:把两条最长文案的**全角括号改半角**(`贴图（最近内容）`→`贴图(最近内容)`)
+还能再省 16px(→ 102px),但中文排版惯例用全角括号,属**文案/排版取舍**,留给用户定。
+
+**尺寸对照**(sizeHint 逻辑像素):
+
+```
+最初(14px 6/24/12+4 有勾选 有内存)   176x316
+上一版返工(12px 4/20/10+3 有勾选)     152x251
+本次(12px 4px 8px+2 无勾选 无内存)    118x217    ← 宽 -34 / 高 -34(较上一版)
+```
+
+**⚠️ 一处度量纠错**:上一轮我报的"F 方案 133x219"是**错的** —— 我把 `grab()`
+的物理像素按 `DPI=2` 换算,而实测 `devicePixelRatio = 1.75`,且 `grab()` 宽度
+与 `sizeHint()` 还对不齐。本轮**统一改用 `sizeHint()`(逻辑像素,与 DPR 无关)**,
+并打印 DPR 核对,上面的数字以此为准。教训:跨 DPI 换算必须**读** DPR,不能假定。
+
+**验证方式**:链接生产代码 `app_font.cpp`,QSS 与 `tray.cpp` 逐字相同,离屏构造
+菜单取 `sizeHint()`;并逐项验证"发布的 padding/字号/勾选态"与"量测程序用的一致"。
+上一轮还用过"勾选/未勾选两图逐像素做差定位勾选标记"的像素分析法(本轮勾选列已
+删除,该风险随之消失)。
+
+### 四.2 翻译页输入/输出框的右键菜单(风格统一 + 调小)
+
+**问题**:翻译页的原文/译文用的是 `TextArea`,其右键菜单由 **Basic 风格**
+自动挂载(Basic 的 `TextArea.qml:27` `ContextMenu.menu: TextEditingContextMenu
+{ control: control }`)。三处不合预期:
+
+1. **风格不统一** —— 那是 Basic 原生 `Menu`/`MenuItem`,不走本项目的
+   `ThemedMenu`/`ThemedMenuItem` 令牌,与条目右键菜单不是一套;
+2. **偏大** —— 用应用字体(14px)与 Basic 默认行高;
+3. **标签是英文** —— 它用 `QtQuick.Controls.impl` 的 `CutAction`/`CopyAction`/
+   `PasteAction`/`DeleteAction`/`SelectAllAction`(`qsTr("Cut")` 等),而本应用
+   `windeployqt` 带 `--no-translations`,**翻译不会被加载** → 中文界面里冒出
+   英文菜单项(实测 `Cut Copy Paste Delete — Select All`)。
+
+**做法**:用 `ContextMenu` 附加属性(`QtQuick.Controls.Basic/ContextMenu 6.9`)
+整体替换默认菜单,新建 `app/panel/qml/TextEditMenu.qml`:
+
+| 项 | 值 |
+| --- | --- |
+| 基类 | `ThemedMenu`(项目主题化菜单,与条目右键菜单同源) |
+| 条目 | `ThemedMenuItem { compact: true }` + `ThemedMenuSeparator` |
+| 宽度 | `minWidth: 100`(托盘菜单 118 同量级) |
+| 条目 | 撤销 / 重做 / ─ / 剪切 / 复制 / 粘贴 / 删除 / ─ / 全选 |
+| 只读框 | 复制 / ─ / 全选(不摆一排置灰项) |
+| enabled | 撤销 `canUndo`、重做 `canRedo`、粘贴 `canPaste`(TextEdit 监听剪贴板维护)、剪切/复制/删除 看有无选中 |
+| 重建时机 | `onAboutToShow: rebuild()`(与 Main.qml 条目菜单同套路) |
+
+配套给共享组件加了两个**向后兼容**的开关(默认值不变,不影响条目右键菜单):
+
+| 文件 | 新增 | 作用 |
+| --- | --- | --- |
+| `ThemedMenu.qml` | `property int minWidth: 200` | 背景 `implicitWidth` 由写死 200 改为 `control.minWidth` —— 那是菜单宽度的**下限**,不开口子则紧凑菜单被强行撑到 200px |
+| `ThemedMenuItem.qml` | `property bool compact: false` | 高度 30→24、字号 13→12、内边距 10/18→12/12、放开 180px 宽度下限 |
+| `ThemedMenuSeparator.qml` | **删掉** `implicitWidth: 160` | `QQuickMenuPrivate::resizeItem()` 会把条目拉伸到菜单内容宽(`qquickmenu.cpp:912`),分隔线自然铺满;写死 160 是无意的宽度地板 |
+
+**尺寸前后对照**(探针实测,Window 内真实 open,`sizeHint` 取隐式尺寸):
+
+```
+Basic 默认菜单: 200x283  6 条:Cut Copy Paste Delete -- Select All   首条目 200x54
+新建 TextEditMenu: 100x194  9 条:撤销 重做 -- 剪切 复制 粘贴 删除 -- 全选  首条目 48x24 px=12
+```
+
+即宽度 **-50%**、条目高 **54→24**、字号 **14→12**,标签由英文改为中文,
+配色改走 Theme 令牌。
+
+### ⚠️ 两个踩坑(都有明确报错特征,便于日后识别)
+
+1. **函数名不能叫 `addItem`**。`Menu` 自身有 C++ 方法 `addItem(item)`,
+   QML 里再定义同名函数会互相遮蔽 —— 函数体内 `addItem(...)` 变成递归调用
+   自己,表现为 `createObject` 拿到的对象不可用并报
+   `Could not set initial property text` + `Function.prototype.connect: target
+   is not a function`,菜单最终 **count=0(全空)**。改名 `addAction` 即好
+   (Main.qml 的条目菜单本来就叫 `addAction`,是同一条经验)。
+2. **`ContextMenu.menu` 赋的 Menu 不能带 id**。Qt 文档明说会破坏
+   该附加属性"首次请求时才创建菜单"的懒加载优化。用**独立组件文件**挂
+   (`ContextMenu.menu: TextEditMenu { target: input }`)则组件内部的 id 无妨 ——
+   与 Basic 自带的 `TextEditingContextMenu` 同构。
+
+另(探针经验,非产品代码):QML 的 `addImplicitImport` 让**同目录兄弟组件**
+可直接解析;`.impl` 子目录里的类型(如 `Basic.impl.TextEditingContextMenu`)
+在探针里是显式 `import QtQuick.Controls.Basic.impl as BasicImpl` 后才用上的,
+是否必须显式 import 未单独验证。
+
+**验证**:
+- 构建通过(moc/rcc/qmlcachegen + C++ 编译链接),`qmllint` 除既有的
+  `Theme.*` 解析噪声外无新增(仅剩 `createObject` 返回 `QObject` 的类型推断
+  误报,与 Main.qml 同类);
+- 探针(Theme 存根 + 组件逐字副本)实际 open 菜单,确认:可编辑框 **9 条**、
+  只读框 **3 条**、enabled 随选中态正确变化、`compact` 生效(24px / 12px /
+  Microsoft YaHei UI)、宽度 100 不再被 200 撑住;
+- **回归**:`minWidth` 默认 200 下条目右键菜单仍是 200 宽、条目 `width=192`
+  (未被裁切)—— 确认收紧分隔线与背景宽度**没有**波及既有菜单;
+- 真机运行 `--screenshot --translate` 增译一页,`nextboard.log` 中
+  `TextEditMenu` / `Could not set initial property` / `target is not a function`
+  出现次数均为 **0**。
+
+### 五、限制与后续
+
+- ⚠️ 设置页**下方**的技术字段(请求头/请求体 TextArea、自定义 HTTP 段)未进自截
+  画面:抽屉内容可滚动,而自截链路没有滚动钩子。其字体落点已由探针 C 覆盖
+  (`font.family = "Cascadia Mono"` 的 QFont 构造路径与 QML 完全一致),
+  但**肉眼确认仍需人工滚到底部看一眼**。
+- ⚠️ 贴图位图(`renderText`)未真机截图验证:需先复制文本再按热键,无自截钩子。
+  代码路径已核实(统一走 `nb::uiFont()`)。
+- ⚠️ 托盘菜单尺寸是**离屏量测**的,不是从真实托盘弹出的截图。字体、QSS、条目集合
+  三者都取自生产代码,但 Windows 原生菜单可能有额外系统度量参与;
+  **建议真机右键托盘图标确认一次观感** —— 尤其是右内边距收到 8px 后是否偏紧。
+- ⚠️ **移除内存项是可观测性损失**:此前"验收内存不必另开任务管理器",现在要看得靠
+  日志 `mem[...]`(`nextboard.log`)。`memorySummary()` 仍在 `memory_probe` 里,
+  需要时可恢复。
+- **后续项**:① 若希望设置页技术字段也可由用户自选字体,可在 `Theme` 上加
+  `fontMono` 的设置化(需动 core `Settings`);② `docs/theme.md` §39 的字号表
+  (20/16/14/13/12)与 `Theme.metrics`(18/15/14/13/12/11)仍未对齐,改动前先定以哪份为准。
+

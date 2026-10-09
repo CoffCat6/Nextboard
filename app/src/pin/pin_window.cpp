@@ -1,5 +1,7 @@
 #include "pin_window.hpp"
 
+#include "../app_font.hpp"
+
 #include <QClipboard>
 #include <QContextMenuEvent>
 #include <QCursor>
@@ -89,8 +91,10 @@ protected:
 } // namespace
 
 QImage PinWindow::renderText(const QString& text, const PinTextStyle& style) {
-    QFont font(QStringLiteral("Microsoft YaHei"));
-    font.setPixelSize(style.fontSize);
+    // 与界面/工具条同一份字体来源(app_font.hpp):以前这里硬编码
+    // "Microsoft YaHei"(经典雅黑),而工具条按钮继承应用字体(雅黑 UI 变体),
+    // 两者行高/字重不同,贴出来的图和工具条看着不是一套字。现在统一走 uiFont()。
+    QFont font = nb::uiFont(style.fontSize);
     const int maxWidth = qMax(kTextMinWidth, style.maxWidth);
     const QFontMetrics metrics(font);
     // 先按最大宽度做换行排版测量,再定画布尺寸

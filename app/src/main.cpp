@@ -163,7 +163,9 @@ int main(int argc, char* argv[]) {
     // --screenshot <path>:启动后延时自截(grab 渲染结果),自动化验收用。
     // --query <text>:与 --screenshot 联动,先注入搜索词再截图(验收搜索链路)。
     // --settings:与 --screenshot 联动,先打开设置抽屉再截图(验收懒构建链路)。
-    QString shotPath, queryText;
+    // --translate <text>:与 --screenshot 联动,切到翻译页并预填原文再截图
+    //   (验收翻译页;原文非空会自动翻译,顺带覆盖译文区)。
+    QString shotPath, queryText, translateText;
     bool openSettings = false;
     for (int i = 1; i < argc; ++i) {
         const QString arg = QString::fromLocal8Bit(argv[i]);
@@ -171,13 +173,20 @@ int main(int argc, char* argv[]) {
             shotPath = QString::fromLocal8Bit(argv[++i]);
         else if (arg == QLatin1String("--query") && i + 1 < argc)
             queryText = QString::fromLocal8Bit(argv[++i]);
+        else if (arg == QLatin1String("--translate") && i + 1 < argc)
+            translateText = QString::fromLocal8Bit(argv[++i]);
         else if (arg == QLatin1String("--settings"))
             openSettings = true;
     }
     if (!shotPath.isEmpty()) {
-        QTimer::singleShot(5000, &panel, [path = shotPath, queryText, openSettings, &panel] {
+        QTimer::singleShot(5000, &panel, [path = shotPath, queryText, openSettings,
+                                          translateText, &panel] {
             if (!queryText.isEmpty()) panel.applySearchText(queryText);
             if (openSettings) panel.openSettingsPanel();
+            if (!translateText.isEmpty()) {
+                // 翻译页要"停留"(失焦不隐藏),居中摆放也让自截位置确定
+                panel.showTranslate(translateText, nb::PanelWindow::Orientation::ScreenCenter);
+            }
             // 再给一拍防抖 + 刷新时间
             QTimer::singleShot(800, &panel, [path, &panel] {
                 qInfo() << "self-screenshot ->" << path;

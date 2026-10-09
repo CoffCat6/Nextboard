@@ -1,5 +1,7 @@
 #include "qml_bootstrap.hpp"
 
+#include "../app_font.hpp"
+
 #include "core_facade.hpp"
 #include "clip_entry_model.hpp"
 #include "panel_window.hpp"
@@ -23,21 +25,19 @@ namespace nb {
 static ClipEntryModel* s_entries = nullptr;
 
 void setupQmlEnvironment() {
+    // ⚠️ 字体必须**最先**装,且必须在 QQuickStyle 之前:
+    //   ① 缺字回退替换表要在任何 QFont 解析前生效(QFont 文档:替换后需重建
+    //      QFont 才生效),晚一步装,已解析过的控件字体仍是旧的;
+    //   ② Basic 控件的默认 font 取自应用字体,QApplication::setFont 晚装
+    //      会让控件带着旧字体进场景图。
+    // 字体族名的唯一来源是 app_font.hpp —— 详见那里关于"QML 的 font.family
+    // 是单值、会覆盖应用字体的回退链,导致中文掉到宋体"的说明。
+    installApplicationFont();
+
     // Basic 风格:控件(Button/ComboBox/SpinBox…)的配色跟随 QPalette,
     // 而 QPalette 现在由 CoreFacade::applyTheme 按设置注入(亮/暗两套),
     // 这里不再写死暗色。
     QQuickStyle::setStyle("Basic");
-
-    // 全局字体:统一 UI 字体族并开启抗锯齿。中文由 Qt 的回退链落到
-    // "Microsoft YaHei UI"(显式列出,避免某些精简系统上回退到宋体)。
-    // 未显式指定 family 的 QML Text / 各类控件都继承这里,是"字体显示"
-    // 问题的唯一收敛点。
-    QFont uiFont = QApplication::font();
-    uiFont.setFamilies({QStringLiteral("Segoe UI"), QStringLiteral("Microsoft YaHei UI"),
-                        QStringLiteral("Microsoft YaHei"), QStringLiteral("Noto Sans CJK SC")});
-    uiFont.setPixelSize(14);
-    uiFont.setStyleStrategy(QFont::PreferAntialias);
-    QApplication::setFont(uiFont);
 
     // ---- 单例注册(必须跨引擎可用) ----
     //

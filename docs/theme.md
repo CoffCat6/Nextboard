@@ -1235,17 +1235,21 @@ Outline
 
 # 39. Typography
 
-默认：
+默认（UI 正文）：
 
-Segoe UI
+Microsoft YaHei UI
 
 中文：
 
-Microsoft YaHei
+（与默认同族，不再单独指定——见下方"Qt 的分脚本限制"）
 
 Fallback：
 
-Noto Sans CJK SC
+Microsoft YaHei → Noto Sans SC
+
+等宽（技术字段）：
+
+Cascadia Mono（Win11 自带）→ Consolas（全 Windows 版本）→ Microsoft YaHei UI
 
 字号：
 
@@ -1272,6 +1276,50 @@ Caption：
 Shortcut：
 
 12px
+
+---
+
+## 39.1 Qt 的分脚本限制（改动字体前必读）
+
+本项目字体族名的**唯一来源**是 `app/src/app_font.hpp`，QML 侧只放两个令牌：
+
+| 令牌 | 值 | 用途 |
+| --- | --- | --- |
+| `Theme.fontFamily` | `Microsoft YaHei UI` | 全部界面正文 |
+| `Theme.fontMono` | `Cascadia Mono` | 技术字段（URL / API Key / JSON / 请求头 / 路径 / 语种代码 / 快捷键） |
+
+三条硬约束，都是踩过的坑：
+
+1. **QML 的 `font.family` 只能写单个族名。** 它底层是 `QFont::setFamily`，
+   而 `setFamily` 内部是 `setFamilies(QStringList(family))`——单元素，会把
+   `QApplication::setFont` 设的回退链**整条覆盖掉**。于是"中文缺字回退到哪"
+   改由 Qt 的 font matching 决定，实测落到**宋体（SimSun）**。
+   本项目曾经的写法是 `Theme.fontFamily = "Segoe UI"`，结果凡显式写了
+   `font.family` 的 35 处（Main / TranslateView / ThemedButton / ThemedMenuItem /
+   SettingsDrawer 的 SectionTitle·FieldLabel·HintLabel）中文全是宋体，而没写
+   `font.family` 的（EntryCard、KeyCap、大部分 Label）继承应用字体是雅黑
+   ——**同一个界面里两种中文字体**，这才是"字体乱"的真因（不是字号问题）。
+2. **不要用逗号串当回退链。** `font.family: "A, B"` 会被当成一个完整族名去
+   匹配，匹配不到就由 Qt 随便挑（实测落到 Tahoma），中英混排直接错乱。
+   `Qt.font({families: [...]})` 同样无效：QML 的 font 值类型没有 `families`
+   属性，该键被静默忽略。回退链**只在 C++ 侧表达一次**。
+3. **回退链里的族名写错是静默失效的。** 本项目曾写 `Noto Sans CJK SC`，
+   而 Qt 字体库里实际只有 `Noto Sans SC`，等于那条回退从来没起作用过。
+   改族名前先用 `QFontDatabase::families()` 核对名字。
+
+中文为什么不掉宋体：`app_font.hpp` 用 `QFont::insertSubstitution` 把
+`Segoe UI` / `Cascadia Mono` / `Consolas` 的缺字回退钉到雅黑。**替换表必须在
+任何 QFont 解析之前安装**（QFont 文档：替换后需重建 QFont 才生效），
+因此 `installApplicationFont()` 被放在 `setupQmlEnvironment()` 的最前面、
+`QQuickStyle::setStyle()` 之前。
+
+等宽字体（Cascadia Mono / Consolas）都不含中文字形，技术字段里的中文
+（如中文数据目录、JSON 里的中文）靠同一条替换表回退雅黑；否则会掉宋体，
+与同一输入框里的拉丁等宽字体明显不同族。
+
+> 注：上表字号是设计稿值。`Theme.metrics` 的实现值为
+> PageTitle 18 / Section 15 / Body 14 / Secondary 13 / Caption 12 / Micro 11
+> （早期按 1.75x 高 DPI 收紧过一档）。两者尚未对齐，改动前先确认以哪份为准。
 
 ---
 

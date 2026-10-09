@@ -1,12 +1,11 @@
 #include "tray.hpp"
 #include "capture/capture_session.hpp"
-#include "host/memory_probe.hpp"
+#include "../app_font.hpp"
 #include "panel/core_facade.hpp"
 #include "panel/panel_window.hpp"
 
 #include <QApplication>
 #include <QDebug>
-#include <QFont>
 #include <QMenu>
 #include <QStyle>
 #include <QTimer>
@@ -36,24 +35,36 @@ Tray::Tray(PanelWindow& panel, CoreBridge& core, QObject* parent)
 
 void Tray::buildMenu() {
     m_menu = new QMenu();
-    QFont menuFont = QApplication::font();
-    if (menuFont.pointSizeF() <= 0.0)
-        menuFont.setPointSizeF(9.0);
-    m_menu->setFont(menuFont);
+    // 托盘菜单用**独立的、更小的**字号(见 app_font.hpp 的 kTrayMenuFontPixelSize):
+    // 它是系统级弹层,与桌面其它右键菜单并排,用界面正文的 14px 会明显偏大。
+    //
+    // ⚠️ 原先这里写的是 `if (pointSizeF() <= 0.0) setPointSizeF(9.0)`,靠
+    //    "应用字体没有磅值"兜底 —— 而应用字体是 setPixelSize 设的,pointSizeF()
+    //    恒为 -1,该分支**必然触发**,字号实际由这条隐式路径决定。现在字号显式,
+    //    不再依赖意外行为。
+    m_menu->setFont(nb::uiFont(kTrayMenuFontPixelSize));
     // Windows 原生菜单样式不跟随 QPalette 的深色化,深色系统下文字会变得极浅;
     // 显式 QSS 固定浅色底 + 深色字(theme.md §7 浅色配色),与系统菜单观感一致
     //
     // ⚠️ 限定到本菜单(`QMenu#nbTrayMenu`):样式表会作用于**目标窗口及其全部子窗口**,
     // 而托盘菜单的弹出子菜单是其子窗口。若不加 selector,深色主题下未打开过设置抽屉时
     // (无人重置 QSS)这段浅色规则会残留并套到后续弹出的子菜单上。
+    //
+    // 内边距:条目 4px 上下 / 左右各 8px,菜单 2px。
+    // 收紧过程是量测驱动的(见 docs/progress.md「四.2」):
+    //   · 右内边距原 24px 是给**子菜单箭头**留的,而本菜单没有子菜单 → 纯空占;
+    //   · 左内边距原 12px 是给**勾选列**留的,勾选列已随 setCheckable 一起去掉;
+    //   · 左右改成等宽:不对称原本只为让出勾选列,现在没有理由,等宽更稳。
+    // ⚠️ 随之删掉了 `::indicator { width: 14px; height: 14px; }` 规则 ——
+    //    本菜单已无可勾选项,该规则无用。**若日后又加回可勾选项**,必须同时
+    //    补回 indicator 规则,否则勾选标记会走 QSS 默认样式,深色下可能看不清。
     m_menu->setObjectName(QStringLiteral("nbTrayMenu"));
     m_menu->setStyleSheet(QStringLiteral(
-        "QMenu#nbTrayMenu { background: #FFFFFF; border: 1px solid #D9E0E7; padding: 4px; }"
-        "QMenu#nbTrayMenu::item { color: #17202A; padding: 6px 24px 6px 12px; border-radius: 4px; }"
+        "QMenu#nbTrayMenu { background: #FFFFFF; border: 1px solid #D9E0E7; padding: 2px; }"
+        "QMenu#nbTrayMenu::item { color: #17202A; padding: 4px 8px; border-radius: 4px; }"
         "QMenu#nbTrayMenu::item:selected { background: #E8F1FF; color: #17202A; }"
         "QMenu#nbTrayMenu::item:disabled { color: #B6BEC8; }"
-        "QMenu#nbTrayMenu::separator { height: 1px; background: #D9E0E7; margin: 4px 8px; }"
-        "QMenu#nbTrayMenu::indicator { width: 14px; height: 14px; }"));
+        "QMenu#nbTrayMenu::separator { height: 1px; background: #D9E0E7; margin: 4px 8px; }"));
     m_menu->addAction("打开主面板", [this] { m_panel.showCentered(); });
     m_menu->addAction("打开翻译", [] { CoreFacade::instance().openTranslateCentered(); });
     m_menu->addSeparator();
@@ -78,31 +89,32 @@ void Tray::buildMenu() {
     connect(m_menu, &QMenu::aboutToShow, this, [this] {
         m_delayAction->setText(
             QStringLiteral("延时截图（%1 秒）").arg(captureDelaySeconds()));
-        m_memoryAction->setText(QStringLiteral("内存 %1").arg(memorySummary()));
     });
     // 口径与热键一致(默认"最近复制",可在设置里切换为"图片优先")
     m_menu->addAction("贴图（最近内容）", [] { CoreFacade::instance().pinLatest(); });
     m_menu->addSeparator();
-    m_pauseAction = m_menu->addAction("暂停监听");
-    m_pauseAction->setCheckable(true);
+    m_pauseAction = m_menu->addAction(QStringLiteral("暂停监听"));
+    // ⚠️ 刻意**不设** setCheckable:暂停/恢复的状态已由文案本身表达
+    //    ("暂停监听" ⇄ "恢复监听"),勾选标记是冗余的 —— 而 QMenu 只要存在
+    //    任何一个可勾选项,就会给**所有**条目预留一列勾选列宽(实测 18px),
+    //    这是本菜单偏宽的最大单项。去掉后整菜单立减 18px。
     const QJsonObject currentSettings = m_core.call("get_settings").value("data").toObject();
     const bool monitoring = currentSettings.value("monitorEnabled").toBool(true);
-    m_pauseAction->setChecked(!monitoring);
-    m_pauseAction->setText(monitoring ? "暂停监听" : "恢复监听");
-    connect(m_pauseAction, &QAction::toggled, this, [this](bool paused) {
-        // 监听开关持久化在 nbcore 设置里;这里读-改-写
+    m_pauseAction->setText(monitoring ? QStringLiteral("暂停监听")
+                                     : QStringLiteral("恢复监听"));
+    connect(m_pauseAction, &QAction::triggered, this, [this] {
+        // 监听开关持久化在 nbcore 设置里;这里读-改-写。
+        // 状态从设置现读,不再依赖 QAction 的勾选态(已不用勾选表达状态)。
         const QJsonObject resp = m_core.call("get_settings");
         QJsonObject settings = resp.value("data").toObject();
-        settings.insert("monitorEnabled", !paused);
+        const bool nowMonitoring = settings.value("monitorEnabled").toBool(true);
+        settings.insert("monitorEnabled", !nowMonitoring);
         m_core.call("save_settings", settings);
-        m_pauseAction->setText(paused ? "恢复监听" : "暂停监听");
+        m_pauseAction->setText(nowMonitoring ? QStringLiteral("恢复监听")
+                                             : QStringLiteral("暂停监听"));
     });
     m_menu->addSeparator();
-    // 内存读数(只读):验收内存时不必另开任务管理器。与日志 mem[...] 同一口径。
-    m_memoryAction = m_menu->addAction(QStringLiteral("内存 --"));
-    m_memoryAction->setEnabled(false);
-    m_menu->addSeparator();
-    m_menu->addAction("退出", [] {
+    m_menu->addAction(QStringLiteral("退出"), [] {
         QApplication::quit();
     });
 }

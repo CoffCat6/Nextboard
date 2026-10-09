@@ -1,3 +1,15 @@
+<!--
+  ⚠️⚠️ 已废弃,请勿以此为界面依据 ⚠️⚠️
+
+  本文件是 v0.2 之前 Sciter 时代的面板实现,现已**完全不参与构建**:
+    - CMakeLists.txt 的 "Sciter 时代的 panel HTML 目录拷贝已移除";
+    - 代码中无任何地方引用 main.htm;
+    - 它依赖的 <input|search> 语法、NB.listEntries 桥、Window.this.xcall
+      在 Qt Quick 方案里都不存在。
+
+  现行界面是 app/panel/qml/*.qml(Main.qml 为主),设计规范见 docs/theme.md。
+  字体策略见 docs/theme.md §39.1 —— 本文件保留仅为历史参考,可随时删除。
+-->
 <html>
 <head>
   <meta charset="utf-8">
@@ -9,7 +21,8 @@
       --pin: #e8b339;
     }
     html, body { margin: 0; height: 100%%; background: var(--bg); color: var(--text);
-                 font-family: "Segoe UI", "Microsoft YaHei"; font-size: 13px;
+                 font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC";
+                 font-size: 13px;
                  overflow: hidden; user-select: none; }
     body { flow: vertical; }
     header { display: flex; padding: 10px 14px; gap: 10px; align-items: center;

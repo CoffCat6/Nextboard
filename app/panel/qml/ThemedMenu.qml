@@ -9,10 +9,17 @@ import Nextboard.panel
 Menu {
     id: control
 
+    /// 菜单最小宽度(像素)。
+    /// 背景的 implicitWidth 是菜单宽度的**下限** —— 不放开这个口子,任何
+    /// 比它窄的菜单(如文本编辑右键菜单那种 2 字标签的紧凑菜单)都会被强行
+    /// 撑到这个值。默认 200 保持条目右键菜单的既有观感;紧凑菜单传 0,
+    /// 让宽度跟随最宽条目。
+    property int minWidth: 200
+
     padding: 4
 
     background: Rectangle {
-        implicitWidth: 200
+        implicitWidth: control.minWidth
         implicitHeight: 40
         color: Theme.colors.surface
         border.color: Theme.colors.borderStrong

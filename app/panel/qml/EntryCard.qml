@@ -263,6 +263,10 @@ Rectangle {
                 width: parent.width
                 text: root.text || root.preview || ""
                 color: Theme.colors.textPrimary
+                // 文件条目的正文就是**路径**(反斜杠、扩展名、中文目录名混排),
+                // 等宽下才逐字符可读、也与「复制路径」取到的字符串形态一致;
+                // 文本/图片条目是自然语言内容,保持界面正文字体。
+                font.family: root.kind === "file" ? Theme.fontMono : Theme.fontFamily
                 font.pixelSize: Theme.metrics.fontBody
                 wrapMode: Text.WrapAnywhere
                 maximumLineCount: 4
@@ -290,6 +294,8 @@ Rectangle {
                     readOnly: true
                     wrapMode: TextEdit.WrapAnywhere
                     color: Theme.colors.textPrimary
+                    // 与折叠态同一口径:文件条目按等宽渲染路径(见 collapsedText)
+                    font.family: root.kind === "file" ? Theme.fontMono : Theme.fontFamily
                     font.pixelSize: Theme.metrics.fontBody
                     selectByMouse: true
                     selectionColor: Theme.colors.accentSoft

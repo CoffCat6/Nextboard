@@ -291,6 +291,10 @@ Item {
                         background: null
                         selectionColor: Theme.colors.accent
                         selectedTextColor: Theme.colors.accentText
+                        // 右键菜单:整体替换 Basic 风格默认的 TextEditingContextMenu
+                        // (英文标签 + 应用字体 14px + Basic 原生样式)。
+                        // ⚠️ 菜单不能带 id,否则破坏 ContextMenu 的懒加载。
+                        ContextMenu.menu: TextEditMenu { target: input }
                         // Esc 不在此处理:让它冒泡到 Main.qml 的根,由那里的分层逻辑
                         // 统一决定(先关本页浮层 → 再退出翻译页 → 再收起面板)。
                         Keys.onPressed: function(event) {
@@ -354,7 +358,9 @@ Item {
                     Layout.preferredHeight: Theme.metrics.controlHeight
                     placeholderText: "语种代码"
                     horizontalAlignment: TextInput.AlignHCenter
-                    font.family: Theme.fontFamily
+                    // 技术字段:语言代码(zh-Hans / ZH / en)是服务商标识符,
+                    // 等宽下字符可逐一核对;长度固定也便于横向对齐
+                    font.family: Theme.fontMono
                     font.pixelSize: Theme.metrics.fontCaption
                     color: Theme.colors.textPrimary
                     placeholderTextColor: Theme.colors.textTertiary
@@ -476,6 +482,8 @@ Item {
                         background: null
                         selectionColor: Theme.colors.accentSoft
                         selectedTextColor: Theme.colors.textPrimary
+                        // 只读框:右键菜单只给「复制 / 全选」(TextEditMenu 按 readOnly 分流)
+                        ContextMenu.menu: TextEditMenu { target: output }
                     }
                 }
 

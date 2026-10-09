@@ -13,13 +13,24 @@ MenuItem {
     /// 危险操作(删除):文字恒为 error 色。
     property bool danger: false
 
-    leftPadding: 10
-    rightPadding: 18
+    /// 紧凑模式:用于文本编辑右键菜单这类"小而密"的菜单。
+    ///   · 高度 30 → 24
+    ///   · 字号降一档:Secondary(13) → Caption(12),与界面 Caption 档、
+    ///     托盘菜单(12px)取同一基准
+    ///   · 左右内边距收紧:10/18 → 12/12
+    ///   · 放开 180px 的最小宽度 —— 否则紧凑菜单仍被撑宽(见 ThemedMenu.minWidth)
+    /// ⚠️ compact 项必须与 ThemedMenu 的 minWidth 配合:2 字中文标签
+    ///    (剪切/复制/全选)自身只有 ~48px,不给菜单一个确定宽度会显得过窄。
+    property bool compact: false
+
+    leftPadding: compact ? 12 : 10
+    rightPadding: compact ? 12 : 18
     topPadding: 0
     bottomPadding: 0
 
-    implicitWidth: Math.max(180, itemText.implicitWidth + control.leftPadding + control.rightPadding)
-    implicitHeight: 30
+    implicitWidth: Math.max(compact ? 0 : 180,
+                            itemText.implicitWidth + control.leftPadding + control.rightPadding)
+    implicitHeight: compact ? 24 : 30
 
     background: Rectangle {
         x: 4
@@ -35,7 +46,7 @@ MenuItem {
         id: itemText
         text: control.text
         font.family: Theme.fontFamily
-        font.pixelSize: Theme.metrics.fontSecondary
+        font.pixelSize: compact ? Theme.metrics.fontCaption : Theme.metrics.fontSecondary
         verticalAlignment: Text.AlignVCenter
         color: !control.enabled ? Theme.colors.textDisabled
              : control.danger ? Theme.colors.error
