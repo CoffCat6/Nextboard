@@ -100,12 +100,13 @@ bool handleQmlLoadFailure(QQuickWidget* quick, QBoxLayout* layout) {
 }
 
 namespace {
-class ShowRefresher : public QObject {
+/// 面板显隐 → 列表释放/重拉(内存收口 S6.1/S6.3)。
+/// 隐藏时清空行,委托与图片纹理随之释放;显示时在首帧前重拉,不留空白。
+class PanelListLifecycle : public QObject {
 public:
-    ShowRefresher(ClipEntryModel* m, QObject* parent) : QObject(parent), m_model(m) {}
+    PanelListLifecycle(ClipEntryModel* m, QObject* parent) : QObject(parent), m_model(m) {}
     bool eventFilter(QObject* obj, QEvent* e) override {
-        if (e->type() == QEvent::Show)
-            m_model->refreshNow();
+        if (e->type() == QEvent::Show) m_model->acquire();
         return QObject::eventFilter(obj, e);
     }
     ClipEntryModel* m_model;
@@ -125,8 +126,11 @@ void qmlAttachPanel(PanelWindow* panel) {    if (!panel) return;
     QObject::connect(&facade, &CoreFacade::clipChanged, &facade, [model] {
         model->refresh();
     });
-    // 面板显示后立即重拉一次(隐藏期间积累的变化一次到位)
-    panel->installEventFilter(new ShowRefresher(s_entries, panel));
+    // 面板隐藏 → 释放列表(委托/纹理下线);显示 → 重拉(见 PanelListLifecycle)
+    QObject::connect(panel, &PanelWindow::panelHidden, panel, [model] {
+        model->release();
+    });
+    panel->installEventFilter(new PanelListLifecycle(s_entries, panel));
 }
 
 } // namespace nb

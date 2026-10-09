@@ -4,6 +4,7 @@
 #include "editor/editor_window.hpp"
 #include "host/auto_start.hpp"
 #include "host/core_bridge.hpp"
+#include "host/memory_probe.hpp"
 #include "pin/pin_window.hpp"
 
 #include <QJsonDocument>
@@ -357,6 +358,13 @@ PinContent contentForEntry(const QVariantMap& entry, const PinTextStyle& style) 
 /// 贴图窗口软上限(架构 §3.1:贴图 3–10MB/张,数量软上限 10 张,超限淘汰最旧)。
 constexpr int kPinSoftLimit = 10;
 
+/// 贴图**字节**预算(架构 §3.1 的"3–10MB/张 × 10 张"上限)。
+///
+/// 为什么数量上限不够:贴图持有的是**全分辨率原图**,而预算按小图估的 ——
+/// 一张 4K 截图 RGBA 就是 33MB,10 张 = 332MB,单这一项就能吃掉整个内存预算。
+/// 故在数量之外再加字节上限,两者取先触发者。
+constexpr qint64 kPinByteBudget = 96LL * 1024 * 1024;
+
 /// 按创建顺序记录存活的贴图窗口 —— 超限时据此淘汰"最旧"的一张。
 /// 用 QPointer:窗口经 WA_DeleteOnClose 销毁后自动置空,无需手工反注册。
 QList<QPointer<PinWindow>>& pinRegistry() {
@@ -365,7 +373,7 @@ QList<QPointer<PinWindow>>& pinRegistry() {
 }
 
 /// 把内容贴成置顶窗口;初始透明度/双击关闭取自设置。
-/// 超出软上限时关闭最旧的一张,并在新贴图上提示(架构 §3.1 内存预算)。
+/// 超出软上限(张数或字节)时关闭最旧的一张,并在新贴图上提示(架构 §3.1 内存预算)。
 void showPinWindow(const PinContent& content) {
     if (content.image.isNull()) return;
     PinOptions options;
@@ -380,17 +388,23 @@ void showPinWindow(const PinContent& content) {
     // 先剔除已销毁/已关闭的窗口,再按"最旧"淘汰到上限之内
     QList<QPointer<PinWindow>>& pins = pinRegistry();
     pins.removeIf([](const QPointer<PinWindow>& p) { return p.isNull() || !p->isVisible(); });
+    qint64 totalBytes = 0;
+    for (const QPointer<PinWindow>& pin : pins) totalBytes += pin->imageBytes();
+    const qint64 incoming = content.image.sizeInBytes();
     bool evicted = false;
-    while (pins.size() >= kPinSoftLimit) {
+    // 张数或字节任一超限就继续淘汰最旧的一张;至少保留 1 张(否则永远贴不出来)
+    while (!pins.isEmpty() &&
+           (pins.size() >= kPinSoftLimit || totalBytes + incoming > kPinByteBudget)) {
         QPointer<PinWindow> victim = pins.takeFirst();
-        if (victim) {
-            victim->close();
-            evicted = true;
-        }
+        if (!victim) continue;
+        totalBytes -= victim->imageBytes();
+        victim->close();
+        evicted = true;
     }
 
     auto* pin = new PinWindow(content, options);
     pin->setAttribute(Qt::WA_DeleteOnClose);
+    logMemory(evicted ? "pin-add(evicted)" : "pin-add");
     // 工具条「编辑」:用贴图**当前**内容(含已做的旋转)开编辑器;「完成」后走与
     // 历史条目编辑同一条通道(入库 + 写剪贴板),并把合成结果回写贴图 ——
     // 否则贴图会停留在编辑前的画面。
@@ -415,8 +429,9 @@ void showPinWindow(const PinContent& content) {
     pins.append(pin);
     pin->show();
     if (evicted)
-        pin->showNotice(
-            QStringLiteral("已达贴图上限(%1 张),最旧的一张已关闭").arg(kPinSoftLimit));
+        pin->showNotice(QStringLiteral("贴图已达上限(最多 %1 张 / 约 %2 MB),最旧的一张已关闭")
+                            .arg(kPinSoftLimit)
+                            .arg(kPinByteBudget / (1024 * 1024)));
 }
 
 } // namespace

@@ -1,6 +1,7 @@
 #include "panel_window.hpp"
 
 #include "host/window_effects.hpp"
+#include "host/memory_probe.hpp"
 #include "panel/qml_bootstrap.hpp"
 
 #include <QCursor>
@@ -12,6 +13,7 @@
 #include <QQmlEngine>
 #include <QQuickItem>
 #include <QQuickWidget>
+#include <QQuickWindow>
 #include <QScreen>
 #include <QTimer>
 #include <QUrl>
@@ -56,6 +58,13 @@ void PanelWindow::setupUi() {
     m_quick = new QQuickWidget(this);
     m_quick->setResizeMode(QQuickWidget::ResizeMode::SizeRootObjectToView);
     m_quick->setClearColor(palette().window().color());
+    // 面板绝大部分时间是隐藏的(托盘常驻 + 失焦即隐),但 Qt 默认「持久场景图」:
+    // 隐藏后场景节点与纹理仍继续驻留。这是 QQuickWidget 文档
+    // "Scene Graph and Context Persistency" 一节明确支持的开关 —— 关掉它,
+    // 隐藏即释放场景相关资源、显示时重建,常驻水位因此明显下降。
+    // 代价:每次呼出要重建场景,首次显示略有延迟(需真机确认可接受)。
+    if (QQuickWindow* window = m_quick->quickWindow())
+        window->setPersistentSceneGraph(false);
     // 把本窗口注入 QML 根上下文:Main.qml 的 ESC 处理要调 panelWindow.hidePanel()。
     // 必须在 setSource 之前注册——QML 组件在 setSource 时即编译/实例化。
     if (QQmlEngine* engine = m_quick->engine())
@@ -126,6 +135,7 @@ void PanelWindow::applySearchText(const QString& text) {
 
 void PanelWindow::showEvent(QShowEvent* e) {
     QWidget::showEvent(e);
+    logMemory("panel-show");
     // 无边框窗口在 Windows 11 上取系统圆角(Win10 上无副作用,退化为直角)
     applyRoundedCorners(this);
     m_blurTimer->stop();
@@ -179,6 +189,7 @@ bool PanelWindow::event(QEvent* e) {
     } else if (e->type() == QEvent::Hide) {
         // 面板收起 → 通知 QML 收掉瞬时 UI(右键菜单/屏障),避免下次呼出时残留
         emit panelHidden();
+        logMemory("panel-hide");
     }
     return QWidget::event(e);
 }

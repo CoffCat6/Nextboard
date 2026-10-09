@@ -1,6 +1,7 @@
 #include "translate_window.hpp"
 
 #include "host/window_effects.hpp"
+#include "host/memory_probe.hpp"
 #include "panel/qml_bootstrap.hpp"
 
 #include <QCursor>
@@ -12,6 +13,7 @@
 #include <QQuickItem>
 #include <QQuickWidget>
 #include <QScreen>
+#include <QTimer>
 #include <QUrl>
 #include <QVariant>
 #include <QWindow>
@@ -20,18 +22,32 @@ namespace nb {
 namespace {
 constexpr int TRANSLATE_W = 520;
 constexpr int TRANSLATE_H = 660;
+
+/// 上次关闭时的窗口位置。窗口**关闭即销毁**(省下一个 QML 引擎),但位置必须延续 ——
+/// 否则每次打开都跳回屏幕中央,用户拖到的顺手位置白拖:销毁只该省内存,不该改体验。
+QPoint g_lastPos;
+bool g_hasLastPos = false;
 } // namespace
 
 TranslateWindow::TranslateWindow(QWidget* parent)
     : QWidget(parent, Qt::Window | Qt::FramelessWindowHint) {
     setWindowTitle(QStringLiteral("Nextboard 翻译"));
+    // 关闭即销毁:见 hideWindow() 的说明(常驻一个 QML 引擎不划算)
+    setAttribute(Qt::WA_DeleteOnClose);
     // 可缩放下限:低于此宽度双栏信息会挤成一团
     setMinimumSize(420, 500);
     resize(TRANSLATE_W, TRANSLATE_H);
     setupUi();
 }
 
-TranslateWindow::~TranslateWindow() = default;
+TranslateWindow::~TranslateWindow() {
+    // 记下位置,供下次重建的实例沿用(见 showWindow)
+    g_lastPos = pos();
+    g_hasLastPos = true;
+    // 析构体执行时 QQuickWidget 成员尚未释放,此刻读数是"还没回收"的水位;
+    // 延后一拍(成员都已析构)再读,才是关闭翻译窗口后的真实回落值。
+    QTimer::singleShot(0, qApp, [] { logMemory("translate-closed"); });
+}
 
 void TranslateWindow::setupUi() {
     auto* layout = new QHBoxLayout(this);
@@ -52,12 +68,24 @@ void TranslateWindow::setupUi() {
 }
 
 void TranslateWindow::showWindow() {
-    if (!m_placed) {
+    if (g_hasLastPos) {
+        // 沿用上次关闭时的位置;显示器布局可能已变,夹回屏幕可用区
+        QScreen* screen = QGuiApplication::screenAt(g_lastPos);
+        if (!screen) screen = QGuiApplication::primaryScreen();
+        if (screen) {
+            const QRect avail = screen->availableGeometry();
+            const QSize size = rect().size();
+            move(qBound(avail.left(), g_lastPos.x(),
+                        qMax(avail.left(), avail.right() - size.width() + 1)),
+                 qBound(avail.top(), g_lastPos.y(),
+                        qMax(avail.top(), avail.bottom() - size.height() + 1)));
+        }
+    } else {
+        // 首次打开:定位到光标所在屏中央
         const QPoint cursor = QCursor::pos();
         QScreen* screen = QGuiApplication::screenAt(cursor);
         if (!screen) screen = QGuiApplication::primaryScreen();
         if (screen) move(screen->availableGeometry().center() - rect().center());
-        m_placed = true;
     }
     // 主题可能在两次打开之间被切换,QQuickWidget 的清屏色(窗口圆角外的底色)
     // 必须跟着走,否则圆角处会露出旧主题的底色。

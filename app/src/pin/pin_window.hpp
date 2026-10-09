@@ -57,6 +57,9 @@ public:
     /// 主面板隐藏时应用级 toast 不可见,故贴图相关反馈走这里。
     void showNotice(const QString& text);
 
+    /// 当前显示位图占用的字节数(贴图淘汰的字节预算据此计算)。
+    qint64 imageBytes() const { return m_image.sizeInBytes(); }
+
     /// 用新的位图替换贴图内容(编辑结果回写):保持当前缩放,并让画面中心不动。
     void setImage(const QImage& image);
 

@@ -67,6 +67,12 @@ pub struct Settings {
     /// 延时截图等待秒数（托盘「延时截图」入口用；1~10，默认 3）。
     /// 用途：先按下入口，再去展开菜单/等悬浮提示出现，倒计时结束才开始框选。
     pub capture_delay_secs: i64,
+    /// 截图遮罩的**空闲超时**秒数（默认 600 = 10 分钟；0 = 不自动取消）。
+    ///
+    /// 动机（内存）：框选遮罩持有该屏的整屏冻结底图（4K 约 33MB），会话期常驻。
+    /// 若用户触发截图后离开，底图会无限期占着内存；超过本时长无任何鼠标/键盘
+    /// 操作即自动取消会话并释放。取 0 可关闭该行为（不推荐）。
+    pub overlay_idle_secs: i64,
     /// OCR 语言：`auto`（默认，按 zh-Hans-CN → en-US → 用户配置语言）/ 指定语言标签如 `en-US`。
     pub ocr_language: String,
     /// OCR 后端：`system`（默认，Windows 内置离线引擎）/ `tesseract`（需自行安装并保证在 PATH）。
@@ -364,6 +370,7 @@ impl Default for Settings {
             // 默认"松手即复制"：截图后立刻可粘贴，不经过编辑器
             region_skip_editor: true,
             capture_delay_secs: 3,
+            overlay_idle_secs: 600,
             ocr_language: "auto".into(),
             ocr_backend: "system".into(),
             // 放大 2 倍：实测对 12px 代码截图明显改善且耗时可控（docs/phase6.md §3.6）
@@ -403,6 +410,12 @@ impl Settings {
         if !(1..=10).contains(&self.capture_delay_secs) {
             return Err(AppError::InvalidInput(
                 "延时截图等待须在 1 ~ 10 秒之间".into(),
+            ));
+        }
+        // 0 = 不自动取消；上限 1 小时（再长等于没有保护）
+        if !(0..=3600).contains(&self.overlay_idle_secs) {
+            return Err(AppError::InvalidInput(
+                "遮罩空闲超时须在 0 ~ 3600 秒之间（0 = 不自动取消）".into(),
             ));
         }
         // 快捷键：**允许留空**（空 = 不绑定该动作，用户可只绑自己需要的几个）；
@@ -1294,6 +1307,10 @@ mod tests {
         assert!(settings.region_auto_confirm, "默认框选即确认");
         assert!(settings.region_skip_editor, "默认直通剪贴板、不进编辑器");
         assert_eq!(settings.capture_delay_secs, 3, "延时截图默认等待 3 秒");
+        assert_eq!(
+            settings.overlay_idle_secs, 600,
+            "遮罩空闲超时默认 10 分钟（0 = 不自动取消）"
+        );
         assert_eq!(settings.ocr_language, "auto", "OCR 默认自动选语言");
         assert_eq!(settings.ocr_backend, "system", "OCR 默认用系统内置引擎");
         assert_eq!(settings.ocr_scale, 2, "OCR 默认放大 2 倍");
@@ -1658,6 +1675,19 @@ mod tests {
         );
         let back: Settings = serde_json::from_value(value).unwrap();
         assert!(back.pin_prefer_image);
+    }
+
+    #[test]
+    fn validate_bounds_overlay_idle_timeout() {
+        let with_idle = |secs: i64| Settings {
+            overlay_idle_secs: secs,
+            ..Default::default()
+        };
+        assert!(with_idle(0).validate().is_ok(), "0 = 不自动取消,合法");
+        assert!(with_idle(600).validate().is_ok());
+        assert!(with_idle(3600).validate().is_ok(), "上限 1 小时");
+        assert!(with_idle(-1).validate().is_err(), "负值非法");
+        assert!(with_idle(3601).validate().is_err(), "超过 1 小时非法");
     }
 
     #[test]

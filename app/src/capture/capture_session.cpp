@@ -1,6 +1,7 @@
 #include "capture_session.hpp"
 #include "editor/editor_window.hpp"
 #include "host/core_bridge.hpp"
+#include "host/memory_probe.hpp"
 
 #include <QBuffer>
 #include <QCursor>
@@ -34,6 +35,10 @@ bool pruneOverlays() {
     return !g_overlays.isEmpty();
 }
 
+/// 会话空闲超时计时器(S6.1)。一次会话只有一组遮罩,共用同一个计时器:
+/// 任一遮罩上报 activity 就重置;超时则自动取消会话。
+QTimer* g_idleTimer = nullptr;
+
 /// 收起本次会话的全部遮罩。
 ///
 /// 先把列表清空再逐个 close():close() 触发 WA_DeleteOnClose → deleteLater(),
@@ -43,8 +48,28 @@ void closeAllOverlays() {
     const QList<QPointer<OverlayWidget>> overlays = g_overlays;
     g_overlays.clear();
     g_onCaptured = {};
+    // 会话结束即停表:遮罩已释放,不再需要空闲保护
+    if (g_idleTimer) g_idleTimer->stop();
+    if (overlays.isEmpty()) return;
+
+    // 内存读数必须等**最后一块遮罩真正销毁**之后再取:close() 只是 deleteLater,
+    // 此刻整屏底图还没回收(实测会读成"没释放",与下一次 start 的读数自相矛盾)。
+    // 又因为本函数可能正处在某块遮罩的信号栈上(regionConfirmed),不能强制跑
+    // deleteLater —— 那会在其事件处理中途析构它。故用 destroyed 信号计数。
+    auto* pending = new int(overlays.size());
+    const auto countdown = [pending] {
+        if (--*pending == 0) {
+            delete pending;
+            logMemory("capture-end");
+        }
+    };
     for (const QPointer<OverlayWidget>& overlay : overlays) {
-        if (overlay) overlay->close();
+        if (!overlay) {
+            countdown();   // 已销毁的不会再发 destroyed,直接记账
+            continue;
+        }
+        QObject::connect(overlay, &QObject::destroyed, overlay, countdown);
+        overlay->close();
     }
 }
 
@@ -172,6 +197,7 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured, bool allo
         return;
     }
     g_onCaptured = onCaptured;
+    logMemory("capture-start");
 
     const QList<QScreen*> screens = QGuiApplication::screens();
     if (screens.isEmpty()) return;
@@ -196,6 +222,7 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured, bool allo
             const CaptureDone done = g_onCaptured;
             g_onCaptured = {};
             finishCapture(shot, done);
+            logMemory("capture-end");   // 全屏直通没有遮罩,closeAllOverlays 不会走
         }
         return;
     }
@@ -207,6 +234,17 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured, bool allo
         settings.value("ok").toBool() ? settings.value("data").toObject() : QJsonObject{};
     const bool autoConfirm = data.value("regionAutoConfirm").toBool(true);
     const bool rightClickCancel = data.value("regionRightClickCancel").toBool(true);
+    // 空闲超时(S6.1):遮罩持有整屏冻结底图(4K 约 33MB),用户触发后离开会无限期占着。
+    // 0 = 不自动取消;会话内任何鼠标/键盘动作都会重置计时。
+    const int idleSecs = qBound(0, data.value("overlayIdleSecs").toInt(600), 3600);
+    if (idleSecs > 0 && !g_idleTimer) {
+        g_idleTimer = new QTimer(qApp);
+        g_idleTimer->setSingleShot(true);
+        QObject::connect(g_idleTimer, &QTimer::timeout, [] {
+            qInfo() << "截图会话空闲超时,自动取消并释放遮罩";
+            closeAllOverlays();
+        });
+    }
     for (int i = 0; i < screens.size(); ++i) {
         QScreen* screen = screens[i];
         const QImage frozen = core.captureMonitor(static_cast<unsigned>(i));
@@ -217,6 +255,13 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured, bool allo
         auto* overlay = new OverlayWidget(frozen, i, screen, autoConfirm, rightClickCancel);
         overlay->setAttribute(Qt::WA_DeleteOnClose);
         g_overlays.append(overlay);
+
+        // 任一屏上的动作都重置空闲计时(start() 无参 = 沿用当前 interval)
+        if (idleSecs > 0) {
+            QObject::connect(overlay, &OverlayWidget::activity, overlay, [] {
+                if (g_idleTimer && g_idleTimer->isActive()) g_idleTimer->start();
+            });
+        }
 
         // 冻结底图已在宿主侧(QImage 隐式共享,lambda 捕获代价为 0);
         // 裁剪仍走核心 RGBA 通道 nb_capture_crop,保持"有逻辑的归 Rust"。
@@ -258,6 +303,8 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured, bool allo
     }
 
     if (g_overlays.isEmpty()) return;
+    // 计时从会话真正建立(至少有一块遮罩)开始;此前不计,避免多屏采集耗时被算进去
+    if (idleSecs > 0 && g_idleTimer) g_idleTimer->start(idleSecs * 1000);
     // 让最后一块遮罩拿到键盘焦点,Esc 才有接收者;点击其它屏时 Windows 会自动
     // 激活被点的窗口,所以任意屏上的 Esc 都能取消整个会话。
     if (OverlayWidget* last = g_overlays.last().data()) {
@@ -461,6 +508,7 @@ void OverlayWidget::paintEvent(QPaintEvent*) {
 }
 
 void OverlayWidget::mousePressEvent(QMouseEvent* e) {
+    emit activity();
     // 右键取消(可在设置里关掉)
     if (e->button() == Qt::RightButton) {
         if (m_rightClickCancel) emit cancelled();
@@ -488,6 +536,7 @@ void OverlayWidget::mousePressEvent(QMouseEvent* e) {
 }
 
 void OverlayWidget::mouseMoveEvent(QMouseEvent* e) {
+    emit activity();
     if (m_selecting) {
         m_selection = QRect(m_origin, e->pos()).normalized();
         update();
@@ -505,6 +554,7 @@ void OverlayWidget::mouseMoveEvent(QMouseEvent* e) {
 }
 
 void OverlayWidget::mouseReleaseEvent(QMouseEvent* e) {
+    emit activity();
     if (e->button() != Qt::LeftButton) return;
 
     if (m_adjusting) {
@@ -535,6 +585,7 @@ void OverlayWidget::mouseDoubleClickEvent(QMouseEvent* e) {
 }
 
 void OverlayWidget::keyPressEvent(QKeyEvent* e) {
+    emit activity();
     if (e->key() == Qt::Key_Escape) {
         emit cancelled();
         return;

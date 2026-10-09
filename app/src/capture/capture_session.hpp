@@ -63,6 +63,8 @@ signals:
     /// 选区确认:**本屏物理像素**坐标,相对该屏左上角(直接供 nb_capture_crop)。
     void regionConfirmed(const QRect& physicalRect);
     void cancelled();
+    /// 用户在本遮罩上有鼠标/键盘动作 —— 会话据此重置空闲超时(S6.1)。
+    void activity();
 
 protected:
     void paintEvent(QPaintEvent* e) override;

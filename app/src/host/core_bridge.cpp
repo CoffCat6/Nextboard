@@ -9,6 +9,27 @@
 #include <windows.h>
 
 namespace nb {
+namespace {
+
+/// 核心缓冲的托管信息:交给 QImage 的清理回调保管。
+///
+/// 动机(内存):`nb_capture_monitor` 返回的整屏 RGBA 由核心分配(4K 约 33MB)。
+/// 早先的写法是先 `image.copy()` 深拷贝一份再释放原缓冲 —— 峰值因此翻倍。
+/// 改为让 QImage **直接沿用**核心缓冲,最后一份引用析构时经本结构交还 `nb_free_buffer`。
+struct CoreBuffer {
+    unsigned char* data;
+    unsigned long long size;
+    NbFreeBuffer free;
+};
+
+/// QImageCleanupFunction:不带上下文,故指针与长度经 CoreBuffer 传递。
+void releaseCoreBuffer(void* info) {
+    auto* buffer = static_cast<CoreBuffer*>(info);
+    if (buffer->free && buffer->data) buffer->free(buffer->data, buffer->size);
+    delete buffer;
+}
+
+} // namespace
 
 CoreBridge& CoreBridge::instance() {
     static CoreBridge bridge;
@@ -148,11 +169,14 @@ QImage CoreBridge::captureMonitor(unsigned index) {
         if (rgba) m_freeBuffer(rgba, 0);
         return {};
     }
-    // QImage 构造拷贝像素,随后立即释放核心缓冲
-    QImage image(rgba, w, h, QImage::Format_RGBA8888);
-    QImage copy = image.copy();
-    m_freeBuffer(rgba, static_cast<unsigned long long>(w) * h * 4);
-    return copy;
+    // 零拷贝:像素直接沿用核心缓冲,不 copy()。QImage 只在最后一份引用析构时
+    // 回调 releaseCoreBuffer 交还 nb_free_buffer —— 峰值因此少一份整屏(4K 约 33MB)。
+    // 生命周期:遮罩持有冻结底图直到会话结束,期间缓冲一直有效;进程退出时
+    // CoreBridge::shutdown() **不 FreeLibrary**(见其注释),故回调指针始终可调用。
+    auto* buffer = new CoreBuffer{
+        rgba, static_cast<unsigned long long>(w) * h * 4, m_freeBuffer};
+    return QImage(rgba, static_cast<int>(w), static_cast<int>(h), QImage::Format_RGBA8888,
+                  &releaseCoreBuffer, buffer);
 }
 
 QImage CoreBridge::captureCrop(const QImage& screen, const QRect& rect) {

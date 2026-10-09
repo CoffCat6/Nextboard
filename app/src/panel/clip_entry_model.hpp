@@ -76,6 +76,11 @@ public:
     Q_INVOKABLE void setTag(const QString& tag);
     /// 覆盖设置条目的标签(S5.2);成功后重拉列表与标签统计。
     Q_INVOKABLE void saveTags(const QString& id, const QStringList& tags);
+    /// 面板**隐藏**时调用:清空全部行 —— QML 侧委托随之销毁,图片纹理一并释放;
+    /// 期间拒绝一切刷新,避免隐藏时又被剪贴板通知填满(内存收口 S6.1/S6.3)。
+    Q_INVOKABLE void release();
+    /// 面板**显示**时调用:解除拒绝并立即重拉(列表在显示前填好,首帧不留空白)。
+    Q_INVOKABLE void acquire();
 
 signals:
     void totalChanged();
@@ -120,6 +125,8 @@ private:
     int m_total = 0;
     int m_limit = 50;
     bool m_loading = false;
+    /// 已释放(面板隐藏):行已清空且拒绝刷新,直到 acquire()。
+    bool m_released = false;
     QTimer m_debounce;   // 刷新/搜索共用:200ms 去抖
 };
 

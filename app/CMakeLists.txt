@@ -36,6 +36,7 @@ add_executable(nextboard WIN32
     src/host/tray.cpp
     src/host/hotkeys.cpp
     src/host/core_bridge.cpp
+    src/host/memory_probe.cpp
     src/panel/panel_window.cpp
     src/panel/qml_bootstrap.cpp
     src/panel/core_facade.cpp
@@ -103,6 +104,8 @@ target_link_libraries(nextboard PRIVATE
     Qt6::QuickControls2
     Qt6::QuickWidgets
     dwmapi.lib
+    # GetProcessMemoryInfo 的兜底依赖(PSAPI_VERSION>=2 时由 kernel32 提供,写上无副作用)
+    psapi.lib
 )
 # nbcore 走纯显式加载(LoadLibrary + GetProcAddress,见 core_bridge.cpp):
 # 隐式链接 nbcore.dll.lib 时,Rust cdylib 的 CRT/线程局部状态与 Qt 静态初始化

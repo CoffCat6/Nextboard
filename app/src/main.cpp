@@ -9,6 +9,7 @@
 #include <QFile>
 #include <QIcon>
 #include <QMessageBox>
+#include <QPointer>
 #include <QTimer>
 #include <QDebug>
 
@@ -31,6 +32,7 @@ static void fileMessageHandler(QtMsgType type, const QMessageLogContext& ctx, co
 
 #include "host/single_instance.hpp"
 #include "host/core_bridge.hpp"
+#include "host/memory_probe.hpp"
 #include "host/tray.hpp"
 #include "host/hotkeys.hpp"
 #include "panel/core_facade.hpp"
@@ -97,6 +99,9 @@ int main(int argc, char* argv[]) {
     ::SetUnhandledExceptionFilter(unhandledExceptionFilter);
     std::set_terminate(onTerminate);
     qInfo() << "Nextboard starting, appDir =" << QCoreApplication::applicationDirPath();
+    // 启动分段读数:基线高时据此定位是"Qt 运行时 / nbcore / QML 装配 / 面板 QML 树"
+    // 哪一段吃掉的,而不是靠猜。
+    nb::logMemory("app-init");   // Qt 运行时 + 平台插件,尚未加载任何 QML
 
     // 1. nbcore 初始化(数据目录、通知窗口稍后由面板提供;先 0 = 仅全局通知)。
     nb::CoreBridge& core = nb::CoreBridge::instance();
@@ -107,23 +112,34 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     qInfo() << "nbcore ready";
+    nb::logMemory("core-ready");   // + nbcore.dll(Rust 运行时 + SQLite)
 
     // 2. QML 装配(类型/单例注册)→ 主面板
     nb::setupQmlEnvironment();
+    nb::logMemory("qml-env");      // + Qt Quick Controls 风格与全局字体
     nb::PanelWindow panel(core);
+    nb::logMemory("panel-built");  // + 主面板 QQuickWidget 与整棵 QML 树(含列表)
     nb::qmlAttachPanel(&panel);
     panel.showAtCursor();
     if (startHidden) panel.hide();
+    // 内存基线:此后每个关键事件都有一条读数,便于做前后对比(S6.5 验收)
+    nb::logMemory("startup");
 
-    // 翻译窗口:独立于主面板的顶层窗口(不随面板失焦隐藏,可独立移动)。
-    // 三条打开链路(面板按钮 / 条目右键 / 全局热键)统一走 translatePrefill;
-    // 截图翻译完成后回填也走同一条信号。
-    nb::TranslateWindow translate;
+    // 翻译窗口:独立顶层窗口,但**按需创建、关闭即销毁**(架构 D12)。
+    // 它自带一个 QQuickWidget,即第二个 QQmlEngine + 场景图 —— 只要它存在就要多付
+    // 一份 QML 运行时(具体数值看 mem[translate-open] 与 mem[translate-closed] 的差)。
+    // 翻译是低频操作,重建成本远小于常驻代价。
+    // 三条打开链路(面板按钮 / 条目右键 / 全局热键)统一走 translatePrefill。
+    QPointer<nb::TranslateWindow> translate;
     QObject::connect(&nb::CoreFacade::instance(), &nb::CoreFacade::translatePrefill,
-                     &translate, [&panel, &translate](const QString& text) {
+                     &panel, [&panel, &translate](const QString& text) {
                          // 两个窗口不并存:打开翻译即收起面板,避免互相遮挡
                          panel.hide();
-                         translate.openWith(text);
+                         if (!translate) {
+                             translate = new nb::TranslateWindow();
+                             nb::logMemory("translate-open");   // 量化第二个 QML 引擎的代价
+                         }
+                         translate->openWith(text);
                      });
 
     // --screenshot <path>:启动后延时自截(grab 渲染结果),自动化验收用。

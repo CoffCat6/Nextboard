@@ -1879,3 +1879,177 @@ Basic ComboBox 的 `implicitWidth` 由 `displayText` 宽度推出,语言名长�
   2. 设置 → 翻译选「彩云小译」→ Token 已预填测试 Token,点「测试连接」返回可用;
   3. 用彩云翻译中英双向:选「简体中文」→ 英文出中文;把语言代码改成 `en` → 中文出英文;
   4. Token 改成乱码 → 报「鉴权失败(HTTP 401): Invalid token」而不是静默失败。
+
+---
+
+## 2026-10-09(五)内存收口 Tier 1:遮罩空闲超时 + 截图零拷贝 + 内存埋点
+
+**动机**:路线图 S6.1「遮罩空闲超时销毁」一直未做;且经代码核对,本应用的大内存
+持有者是**贴图(全分辨率原图 ×≤10)**、**翻译窗口的第二个 QML 引擎**、**截图遮罩**
+与**编辑器(5 份全尺寸副本)**。本轮先做三项**低风险、可量化**的改动,建立实测基线。
+（口径:4K 全屏 RGBA ≈ 33MB/份。）
+
+### 1. 遮罩空闲超时(S6.1)
+
+| 层 | 改动 |
+| --- | --- |
+| `settings.rs` | 新增 `overlay_idle_secs`(默认 **600 = 10 分钟**;`0` = 不自动取消;校验 0~3600) |
+| `capture_session.{hpp,cpp}` | `OverlayWidget` 新增 `activity()` 信号(鼠标按下/移动/松开、按键均上报);会话级单例 `QTimer` 计时,任一遮罩有动作即重置,超时 → `closeAllOverlays()` 释放整屏底图 |
+| `SettingsDrawer.qml` | 截图区新增「遮罩空闲超时(分钟,0=不自动取消)」 |
+
+原缺口:触发框选后离开,33MB×屏数 的冻结底图会**无限期驻留**。
+
+### 2. 截图缓冲零拷贝
+
+`CoreBridge::captureMonitor` 原先 `image.copy()` 深拷贝一份整屏(4K 约 33MB),只为
+在拷贝后释放核心缓冲。改为用 `QImage` 的 `cleanupFunction` 托管核心缓冲:最后一份
+引用析构时回调 `releaseCoreBuffer` → `nb_free_buffer`。**峰值少一份整屏**。
+生命周期依赖:`shutdown()` 不 `FreeLibrary`(既有约定),故回调指针始终可调用。
+
+### 3. 内存埋点
+
+新增 `app/src/host/memory_probe.{hpp,cpp}`:`GetProcessMemoryInfo` 取工作集/私有/峰值;
+`logMemory(tag)` 在关键事件各写一条 `mem[...]` 日志;托盘菜单新增只读「内存 …」项
+(菜单展开时刷新,与日志同一口径)。
+
+埋点位置:启动 / 面板显隐 / 截图会话始末 / 贴图新增(含淘汰) / 编辑器开关。
+
+**读数时机**:`close()` 与编辑器析构都走 `deleteLater`,在关闭处立即读会得到
+"尚未回收"的水位,故 `capture-end` 与 `editor-closed` 都**延后一拍**再读。
+
+### 验证与限制
+
+- core `cargo test`:**178 项**通过(新增 `validate_bounds_overlay_idle_timeout`;
+  默认值用例补 `overlay_idle_secs == 600`);
+- app 编译链接通过、**无编译警告**;`qmllint` 无新增告警类别;
+- ⚠️ **本轮必须真机实测**才能定后续档位:
+  1. 触发框选后放着不动 → 10 分钟自动取消;`nextboard.log` 出现
+     `截图会话空闲超时,自动取消并释放遮罩` 与 `mem[capture-end]`;
+  2. 框选期间持续移动鼠标 → **不**超时;
+  3. 设置里把超时改为 0 → 不再自动取消;
+  4. 托盘菜单出现「内存 工作集 X MB · 私有 Y MB」,展开即刷新;
+  5. 日志读基线:`mem[startup]` → `mem[capture-start]`(应 +屏数×33MB)→
+     `mem[capture-end]`(应回落);编辑器同理看 `mem[editor-open]` / `mem[editor-closed]`。
+
+**下一步(待基线数据)**:Tier 2 —— 翻译窗口「关闭即销毁」/共享引擎、面板隐藏释放
+场景图、贴图淘汰改「数量 + 字节」双上限。
+
+---
+
+## 2026-10-09(五)内存收口 Tier 2:实测定位 + 翻译窗口/面板/贴图三项
+
+### 实测基线(真机日志,4K 屏)
+
+| 时点 | 工作集 | 私有 |
+| --- | --- | --- |
+| `startup` | **190.2 MB** | 131.5 MB |
+| `panel-hide`(用过一轮后) | 258.3 MB | 209.3 MB |
+| `panel-show` | **331.6 MB** | 284.9 MB |
+| `capture-end`(会话峰值) | **691.7 MB** | 576.2 MB |
+
+**结论**:①启动基线 190MB 已超 140MB 预算;②面板反复显隐把它推到 330MB;
+③截图会话峰值 692MB。原先估的三个大头里,**「面板 + 第二个 QML 引擎」才是主因**,
+贴图那一项本轮没被触发(日志无 `pin-add`),故暂按预算风险处理。
+
+### 0. 先修埋点:读数时机(否则后面全是错数据)
+
+`capture-end` 原先用 `QTimer::singleShot(0)` 延后一拍,但**仍早于 deleteLater** ——
+日志里 597.7MB → 下一次 `capture-start` 立刻回落到 339.3MB,自相矛盾即是证据。
+改为等**最后一块遮罩真正销毁**(`destroyed` 信号 + 计数)再读。
+不能在信号栈上强制跑 deleteLater:那会在该遮罩自己的事件处理中途析构它。
+
+### 1. 翻译窗口:懒创建 + 关闭即销毁(攻启动基线)
+
+`main.cpp` 原先启动时就构造 `TranslateWindow` 并常驻 —— 它自带一个 QQuickWidget,
+即**第二个 QQmlEngine + 场景图**(实测约占 40~60MB)。改为首次打开才创建、
+`hideWindow()` 改 `close()`(WA_DeleteOnClose),恢复架构 D12 的取舍。
+
+配套:`~TranslateWindow()` 记下窗口位置,下次重建沿用并夹回屏幕可用区 ——
+销毁只该省内存,不该把用户拖到的顺手位置也一起丢掉。
+
+### 2. 面板隐藏时释放列表(攻 190→331 的增长)
+
+增长来自列表条目的 QML 委托与图片纹理;且**隐藏期间剪贴板通知仍在刷新模型**,
+所以内存一直不回落。
+
+| 位置 | 改动 |
+| --- | --- |
+| `ClipEntryModel` | 新增 `release()`(清空全部行 → 委托销毁、纹理下线;打断待执行的防抖刷新)/ `acquire()`(解除拒绝并立即重拉) |
+| 同上 | `reload()` / `refresh()` / `refreshNow()` / `fetchMore()` / `canFetchMore()` 在已释放时一律拒绝 |
+| `qml_bootstrap.cpp` | `ShowRefresher` 改为 `PanelListLifecycle`:面板 `panelHidden` → `release()`;`QEvent::Show` → `acquire()`(首帧前重拉,不留空白) |
+
+### 3. 贴图改「张数 + 字节」双上限
+
+数量上限 10 张对**全分辨率原图**没有约束力:4K 截图 33MB/张 → 最坏 332MB。
+新增 `kPinByteBudget = 96MB`(即架构 §3.1 的「3–10MB/张 × 10 张」),与张数取先触发者;
+淘汰提示同步改为「最多 N 张 / 约 96 MB」。
+
+### 验证与限制
+
+- core `cargo test` **178 项**通过;app 编译链接通过、**无编译警告**;
+  `qmllint` 无新增告警类别;
+- ⚠️ 需真机复测(重点这三条):
+  1. **启动基线**:未打开过翻译窗口时 `mem[startup]` 应明显低于 190MB;
+     打开翻译 → 关闭后托盘「内存」应回落(窗口已销毁);
+  2. **面板显隐**:反复呼出/收起,`mem[panel-hide]` 不应再逐轮爬升;
+     收起再呼出时列表正常(不空白、不闪);搜索/标签筛选在重开后仍生效;
+  3. **贴图**:连贴多张 4K 截图,应在到 10 张之前先因字节超限淘汰,提示文案正确;
+  4. `capture-end` 读数不再与下一次 `capture-start` 自相矛盾。
+
+---
+
+## 2026-10-09(五)基线内存:先纠正一处误判 + 面板隐藏释放场景图
+
+### 纠正:上轮"启动基线含翻译窗口"的说法是错的
+
+`mem[startup]` 的埋点位于 `panel.showAtCursor()` 之后、`TranslateWindow` 构造**之前**
+(见 main.cpp),所以 190/202MB **从来没有包含过翻译窗口**。上一轮把它列为
+"抬高启动基线"的元凶属于误判 —— 那个改动的真实收益是**打开翻译期间**少一份 QML 运行时,
+对启动数字没有影响。两轮实测(190.2 / 202.2MB)基本一致即是佐证。
+
+### 那 190MB 到底是什么
+
+按代码结构看,基线由四块构成,**没有一块是"那个小翻译页"**:
+
+| 段 | 内容 |
+| --- | --- |
+| Qt 运行时 + 平台插件 | Qt Widgets / Quick / QuickControls2 / QuickWidgets 的静态初始化 |
+| Qt Quick 引擎 | QQmlEngine、场景图、渲染线程、RHI(D3D11)设备与着色器 |
+| 主面板 QQuickWidget | 整棵 Main.qml 对象树(含 1244 行的 SettingsDrawer —— 它是 Main.qml 的
+**直接子项,启动即整棵构建**,哪怕从不打开)+ 列表委托与缩略图 |
+| nbcore | Rust 运行时 + SQLite |
+
+即:这是一个 **Qt Quick 应用的运行时地板**,而不是某个页面的开销。故本轮做了两件事:
+把可释放的部分放掉,并加上**分段埋点**以便用数据而不是推测来定位。
+
+### 1. 面板隐藏时释放场景图(S6.3)
+
+QQuickWidget 文档 *"Scene Graph and Context Persistency"* 明确说明:它 **honors**
+`QQuickWindow::isPersistentSceneGraph()`,默认持久 —— 即面板隐藏后场景节点与
+纹理**继续驻留**。而本应用的面板绝大多数时间都是隐藏的(托盘常驻 + 失焦即隐),
+这笔驻留纯属浪费。
+
+```cpp
+if (QQuickWindow* window = m_quick->quickWindow())
+    window->setPersistentSceneGraph(false);
+```
+
+代价:每次呼出要重建场景,首次显示略有延迟(需真机确认可接受)。
+注意文档的另一条:`QQuickWidget` 的 OpenGL 上下文**始终**持久,该开关只放场景资源。
+
+### 2. 启动分段埋点
+
+`main.cpp` 新增 `mem[app-init]` / `mem[core-ready]` / `mem[qml-env]` / `mem[panel-built]`,
+翻译窗口新增 `mem[translate-open]` / `mem[translate-closed]` —— 基线偏高时可直接看出
+是哪一段吃掉的,同时能量化"第二个 QML 引擎"到底值多少。
+
+### 待定:尚未做的杠杆
+
+| 杠杆 | 预期收益 | 代价 |
+| --- | --- | --- |
+| `SettingsDrawer` 改 `Loader` 延迟实例化(1244 行,启动即整棵构建) | 数 MB | 低(需给 4 处引用加空判) |
+| 面板长期隐藏后**卸载整棵 QML**(`setSource(QUrl())`,下次呼出重建) | 数十 MB | 中:呼出需重建,且丢失搜索词/滚动位置 |
+| 结构性:主面板脱离 Qt Quick | 最大 | 不可行(等于重写 UI 层) |
+
+真机复测:看 `mem[app-init] → core-ready → qml-env → panel-built` 四段各占多少,
+以及 `mem[panel-hide]` 是否明显低于改动前的 258MB。

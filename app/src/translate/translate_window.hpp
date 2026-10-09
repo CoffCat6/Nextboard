@@ -27,8 +27,12 @@ public:
     /// QML 侧调用:拖动标题栏移动窗口(交给系统,避免自实现的跟手抖动)。
     Q_INVOKABLE void startSystemMove();
 
-    /// QML 侧调用:关闭窗口(隐藏而非销毁,下次打开保留位置)。
-    Q_INVOKABLE void hideWindow() { hide(); }
+    /// QML 侧调用:关闭窗口。
+    ///
+    /// **关闭即销毁**(架构 D12):本窗口自带一个 QQuickWidget,即第二个
+    /// QQmlEngine + 场景图(常驻约 40~60MB)。翻译是低频操作,重建成本(几十毫秒)
+    /// 远小于常驻代价,故关闭即销毁、下次打开时由调用方重建。
+    Q_INVOKABLE void hideWindow() { close(); }
 
 protected:
     void showEvent(QShowEvent* e) override;
@@ -38,8 +42,6 @@ private:
     void setupUi();
 
     QQuickWidget* m_quick = nullptr;
-    /// 是否已定位过(只定位一次,不覆盖用户拖动后的位置)。
-    bool m_placed = false;
     /// nativeEvent 用的 HWND 缓存(该回调内禁止 winId(),会递归创建窗口)。
     HWND m_cachedHwnd = nullptr;
 };

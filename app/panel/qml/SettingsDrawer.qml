@@ -272,6 +272,10 @@ AppDrawer {
         autoConfirmCheck.checked = s.regionAutoConfirm === true
         rightClickCancelCheck.checked = s.regionRightClickCancel === true
         captureDelay.value = s.captureDelaySecs > 0 ? s.captureDelaySecs : 3
+        // 0 = 不自动取消,必须原样保留;缺失时按默认 10 分钟
+        const idleSecs = (s.overlayIdleSecs === undefined || s.overlayIdleSecs === null)
+                         ? 600 : s.overlayIdleSecs
+        overlayIdle.value = Math.round(idleSecs / 60)
         themeCombo.currentIndex = s.theme === "light" ? 1 : s.theme === "dark" ? 2 : 0
         dataDirInput.text = s.dataDir || ""
         root.dataDirDirty = false
@@ -350,6 +354,7 @@ AppDrawer {
         s.regionAutoConfirm = autoConfirmCheck.checked
         s.regionRightClickCancel = rightClickCancelCheck.checked
         s.captureDelaySecs = captureDelay.value
+        s.overlayIdleSecs = overlayIdle.value * 60
         s.theme = ["system", "light", "dark"][themeCombo.currentIndex]
         s.dataDir = dataDirInput.text.trim()
 
@@ -544,6 +549,17 @@ AppDrawer {
                 id: captureDelay
                 Layout.fillWidth: true
                 from: 1; to: 10
+                editable: true
+                onValueModified: root.scheduleSave()
+            }
+
+            // 内存收口(S6.1):框选遮罩持有该屏的整屏冻结底图(4K 约 33MB),
+            // 用户触发截图后离开会一直占着 —— 超时无任何鼠标/键盘操作即自动取消。
+            Label { text: "遮罩空闲超时(分钟,0=不自动取消)"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
+            ReadableSpinBox {
+                id: overlayIdle
+                Layout.fillWidth: true
+                from: 0; to: 60
                 editable: true
                 onValueModified: root.scheduleSave()
             }

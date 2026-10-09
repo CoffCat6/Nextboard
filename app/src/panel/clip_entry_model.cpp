@@ -58,11 +58,11 @@ QHash<int, QByteArray> ClipEntryModel::roleNames() const {
 }
 
 bool ClipEntryModel::canFetchMore(const QModelIndex& parent) const {
-    return !parent.isValid() && m_rows.size() < m_total;
+    return !m_released && !parent.isValid() && m_rows.size() < m_total;
 }
 
 void ClipEntryModel::fetchMore(const QModelIndex& parent) {
-    if (parent.isValid() || m_loading) return;
+    if (parent.isValid() || m_loading || m_released) return;
     m_loading = true;
     emit loadingChanged();
     // 追加下一页;query/kind/pinned 语义与首屏一致
@@ -92,14 +92,36 @@ void ClipEntryModel::setQuery(const QString& query) {
 }
 
 void ClipEntryModel::refresh() {
+    if (m_released) return;              // 隐藏期间不填列表(否则释放白做)
     if (m_debounce.isActive()) return;   // 已有待执行的刷新/查询
     m_debounce.start();
 }
 
 void ClipEntryModel::refreshNow() {
+    if (m_released) return;               // 同上:acquire() 会先解除再调用
     m_debounce.stop();                    // 打断待执行的合并刷新,立即重拉
     m_query = m_pendingQuery;
     reload(m_limit);
+}
+
+void ClipEntryModel::release() {
+    if (m_released) return;
+    m_released = true;
+    m_debounce.stop();   // 打断待执行的防抖刷新,否则释放后又被补一次
+    if (m_rows.isEmpty()) return;
+    // 整表重置:QML 委托被销毁 → 图片纹理随之下线
+    beginResetModel();
+    m_rows.clear();
+    m_total = 0;
+    endResetModel();
+    emit totalChanged();
+    emit countChanged();
+    emit hasMoreChanged();
+}
+
+void ClipEntryModel::acquire() {
+    m_released = false;
+    refreshNow();
 }
 
 void ClipEntryModel::fetchMoreRequest() {
@@ -195,6 +217,7 @@ QString ClipEntryModel::formatSize(qint64 n) {
 
 void ClipEntryModel::reload(int limit) {
     m_limit = limit;
+    if (m_released) return;                          // 已释放:等 acquire() 再拉
     if (m_loading) { m_debounce.start(); return; }  // 进行中:稍后重试
     m_loading = true;
     emit loadingChanged();

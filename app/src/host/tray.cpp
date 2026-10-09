@@ -1,5 +1,6 @@
 #include "tray.hpp"
 #include "capture/capture_session.hpp"
+#include "host/memory_probe.hpp"
 #include "panel/core_facade.hpp"
 #include "panel/panel_window.hpp"
 
@@ -72,6 +73,7 @@ void Tray::buildMenu() {
     connect(m_menu, &QMenu::aboutToShow, this, [this] {
         m_delayAction->setText(
             QStringLiteral("延时截图（%1 秒）").arg(captureDelaySeconds()));
+        m_memoryAction->setText(QStringLiteral("内存 %1").arg(memorySummary()));
     });
     // 口径与热键一致(默认"最近复制",可在设置里切换为"图片优先")
     m_menu->addAction("贴图（最近内容）", [] { CoreFacade::instance().pinLatest(); });
@@ -90,6 +92,10 @@ void Tray::buildMenu() {
         m_core.call("save_settings", settings);
         m_pauseAction->setText(paused ? "恢复监听" : "暂停监听");
     });
+    m_menu->addSeparator();
+    // 内存读数(只读):验收内存时不必另开任务管理器。与日志 mem[...] 同一口径。
+    m_memoryAction = m_menu->addAction(QStringLiteral("内存 --"));
+    m_memoryAction->setEnabled(false);
     m_menu->addSeparator();
     m_menu->addAction("退出", [] {
         QApplication::quit();

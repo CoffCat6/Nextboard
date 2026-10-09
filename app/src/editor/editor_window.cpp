@@ -1,5 +1,7 @@
 #include "editor_window.hpp"
 
+#include "host/memory_probe.hpp"
+
 #include <QAction>
 #include <QActionGroup>
 #include <QCursor>
@@ -30,6 +32,7 @@
 #include <QScreen>
 #include <QStandardPaths>
 #include <QToolBar>
+#include <QTimer>
 #include <QUndoCommand>
 #include <QUndoStack>
 #include <QVBoxLayout>
@@ -226,6 +229,9 @@ EditorWindow::EditorWindow(QImage base, QWidget* parent) : QWidget(parent), m_ba
     auto* background = new QGraphicsPixmapItem(QPixmap::fromImage(m_base));
     background->setPos(0, 0);
     m_scene->addItem(background);
+    // 编辑器是本应用单点内存峰值(底图 + 背景位图 + 马赛克/模糊纹理 + 合成输出,
+    // 每份都是整图尺寸),开关各记一条读数以便评估瘦身效果。
+    logMemory("editor-open");
 
     // 马赛克底图:先缩到 1/kMosaicBlock 再放大回来 = 像素化(FastTransformation
     // 保证取整不插值),作为马赛克图元的纹理刷子按路径"揭示"。
@@ -285,6 +291,9 @@ EditorWindow::~EditorWindow() {
     if (m_view) m_view->setScene(nullptr);
     delete m_undo;
     m_undo = nullptr;
+    // 析构体执行时成员(底图/纹理)尚未释放,此刻读数是"还没回收"的水位;
+    // 延后一拍(此时对象与成员都已析构)再读,才是编辑器的真实回落值。
+    QTimer::singleShot(0, qApp, [] { logMemory("editor-closed"); });
 }
 
 void EditorWindow::buildToolBar() {
