@@ -267,7 +267,8 @@ void CoreFacade::processCapture(const QString& id, const QString& mode) {
             return;
         }
         if (mode == QLatin1String("translate")) {
-            // 交回订阅方(TranslateWindow):打开翻译窗口、预填原文并自动翻译(截图翻译 F25)
+            // 交回订阅方(PanelWindow::showTranslate):切到面板的翻译页、预填原文
+            // 并自动翻译(截图翻译 F25)
             emit translatePrefill(text);
             return;
         }

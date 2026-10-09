@@ -1,21 +1,20 @@
-// 独立翻译窗口(theme.md §22/§23):原文(Source)与译文(Target)两块 Panel,
+// 翻译视图(theme.md §22/§23):原文(Source)与译文(Target)两块 Panel,
 // 中置语言栏与主操作,底部为取内容/清空快捷动作。
 //
-// 这是**独立窗口**,不是主面板的抽屉:
-// - 不随主面板失焦隐藏,输入长文时不会因为切走焦点而消失;
-// - 可拖动标题栏移动(translateWindow.startSystemMove,交给系统处理);
-// - 打开时由 C++ 侧收起主面板,两者不并存(见 main.cpp 的 translatePrefill 接线)。
+// 这是**主面板窗口内的一页**,不是独立窗口、也不是抽屉(见 Main.qml 的 mode 切换):
+// - 与剪贴板列表互斥显示:同一窗口、同一 QQuickWidget、同一 QQmlEngine,
+//   因此不再需要第二个 QML 引擎与它自己的场景图/渲染栈;
+// - 进入本页时 C++ 侧会把窗口尺寸切到翻译尺寸并**自动固定**(失焦不隐藏),
+//   保住"输入长文时不会因为切走焦点而消失"的原有体验;
+// - 标题栏拖动走 panelWindow.startSystemMove()(同一个窗口)。
 import QtQuick
 import QtQuick.Controls.Basic
 import QtQuick.Layouts
 import Nextboard.Core 1.0
 import Nextboard.panel
 
-Rectangle {
+Item {
     id: root
-    color: Theme.colors.background
-    border.width: Theme.metrics.borderWidth
-    border.color: Theme.colors.border
     focus: true
 
     /// 翻译进行中:结果区显示细进度条,主按钮进入等待态(§35,不用大 Spinner)。
@@ -70,7 +69,7 @@ Rectangle {
         historyOverlay.visible = false
     }
 
-    /// C++ TranslateWindow::openWith 调用:预填原文(空 = 手动输入)并按需自动翻译。
+    /// C++ 侧进入本页时调用:预填原文(空 = 手动输入)并按需自动翻译。
     function openWith(text) {
         reset()
         loadTargetLang()
@@ -141,31 +140,31 @@ Rectangle {
                                : "保存失败:" + (resp.error ? resp.error.message : ""))
     }
 
-    Keys.onEscapePressed: {
-        // 历史抽屉优先关闭,再退到关窗
-        if (historyOverlay.visible) historyOverlay.visible = false
-        else translateWindow.hideWindow()
+    /// Esc 分层由 Main.qml 统一排队(只有它知道当前是列表页还是翻译页):
+    /// 本函数只关本页最上层的浮层,返回**是否消费掉**这次 Esc。
+    function dismissTopLayer() {
+        if (historyOverlay.visible) {
+            historyOverlay.visible = false
+            return true
+        }
+        return false
     }
+
+    /// 被隐藏(切回列表页 / 收起面板)时收掉自己的浮层 ——
+    /// 否则下次进翻译页,历史抽屉会毫无征兆地又冒出来。
+    onVisibleChanged: if (!visible) dismissTopLayer()
 
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
 
         // ---- 标题栏(§16:48px;整条可拖动,关闭按钮浮于其上) ----
+        // 圆角与描边由主面板的窗口壳提供(本页铺满整个窗口),故这里不再自带 radius。
         Rectangle {
             Layout.fillWidth: true
             Layout.preferredHeight: Theme.metrics.headerHeight
             color: Theme.colors.surface
-            radius: Theme.metrics.radiusWindow
 
-            // 只圆上面两角:用一块覆盖底边的矩形把下方圆角抹平,与内容区衔接
-            Rectangle {
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.bottom: parent.bottom
-                height: parent.radius
-                color: Theme.colors.surface
-            }
             Rectangle {
                 anchors.left: parent.left
                 anchors.right: parent.right
@@ -177,7 +176,13 @@ Rectangle {
             DragHandler {
                 // §42:拖动交给系统(startSystemMove),不做逐帧 setPosition 跟手。
                 // 带拖动阈值,不会因为"点一下"就把窗口挪走。
-                onActiveChanged: if (active) translateWindow.startSystemMove()
+                //
+                // ⚠️ `target: null` 不能省:PointerHandler 的 target **默认就是声明它的父项**,
+                // 于是 DragHandler 会去改这个标题栏 Rectangle 的 x/y —— 布局下次重排才弹回,
+                // 拖动过程中整条标题栏(连同里面的标题与 ✕)就被挪走了(实测症状)。
+                // 置 null 即"不操作任何 Item",只保留 active 信号。
+                target: null
+                onActiveChanged: if (active) panelWindow.startSystemMove()
             }
             HoverHandler { cursorShape: Qt.SizeAllCursor }
 
@@ -206,7 +211,9 @@ Rectangle {
                     square: true
                     text: "✕"
                     Layout.alignment: Qt.AlignVCenter
-                    onClicked: translateWindow.hideWindow()
+                    // 直接收起整个面板(而不是切回列表页):关闭翻译就到此为止,
+                    // 不再顺带把主界面顶出来。
+                    onClicked: panelWindow.hidePanel()
                 }
             }
         }
@@ -284,7 +291,8 @@ Rectangle {
                         background: null
                         selectionColor: Theme.colors.accent
                         selectedTextColor: Theme.colors.accentText
-                        Keys.onEscapePressed: translateWindow.hideWindow()
+                        // Esc 不在此处理:让它冒泡到 Main.qml 的根,由那里的分层逻辑
+                        // 统一决定(先关本页浮层 → 再退出翻译页 → 再收起面板)。
                         Keys.onPressed: function(event) {
                             if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
                                     && (event.modifiers & Qt.ControlModifier)) {
@@ -501,8 +509,8 @@ Rectangle {
                     variant: "secondary"
                     text: "截图取字"
                     onClicked: {
-                        // 先收起本窗口,再框选;否则会被拍进画面
-                        translateWindow.hideWindow()
+                        // 先收起整个面板(本页在面板窗口内,不收起来会被拍进画面)
+                        panelWindow.hidePanel()
                         Core.captureOcr()
                     }
                 }

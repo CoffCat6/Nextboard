@@ -9,7 +9,6 @@
 #include <QFile>
 #include <QIcon>
 #include <QMessageBox>
-#include <QPointer>
 #include <QTimer>
 #include <QDebug>
 
@@ -38,7 +37,6 @@ static void fileMessageHandler(QtMsgType type, const QMessageLogContext& ctx, co
 #include "panel/core_facade.hpp"
 #include "panel/panel_window.hpp"
 #include "panel/qml_bootstrap.hpp"
-#include "translate/translate_window.hpp"
 
 // ---- 崩溃兜底 ----
 //
@@ -125,22 +123,12 @@ int main(int argc, char* argv[]) {
     // 内存基线:此后每个关键事件都有一条读数,便于做前后对比(S6.5 验收)
     nb::logMemory("startup");
 
-    // 翻译窗口:独立顶层窗口,但**按需创建、关闭即销毁**(架构 D12)。
-    // 它自带一个 QQuickWidget,即第二个 QQmlEngine + 场景图 —— 只要它存在就要多付
-    // 一份 QML 运行时(具体数值看 mem[translate-open] 与 mem[translate-closed] 的差)。
-    // 翻译是低频操作,重建成本远小于常驻代价。
-    // 三条打开链路(面板按钮 / 条目右键 / 全局热键)统一走 translatePrefill。
-    QPointer<nb::TranslateWindow> translate;
+    // 翻译已并入主面板,做成「整窗模式切换」(不再是独立顶层窗口)。
+    // 三条打开链路(面板按钮 / 条目右键 / 全局热键)统一走 translatePrefill →
+    // panel.showTranslate,于是不再有第二个 QQmlEngine 与它自己的场景图/渲染栈 ——
+    // 这是本轮内存收口的主要收益(见 docs/progress.md)。
     QObject::connect(&nb::CoreFacade::instance(), &nb::CoreFacade::translatePrefill,
-                     &panel, [&panel, &translate](const QString& text) {
-                         // 两个窗口不并存:打开翻译即收起面板,避免互相遮挡
-                         panel.hide();
-                         if (!translate) {
-                             translate = new nb::TranslateWindow();
-                             nb::logMemory("translate-open");   // 量化第二个 QML 引擎的代价
-                         }
-                         translate->openWith(text);
-                     });
+                     &panel, [&panel](const QString& text) { panel.showTranslate(text); });
 
     // --screenshot <path>:启动后延时自截(grab 渲染结果),自动化验收用。
     // --query <text>:与 --screenshot 联动,先注入搜索词再截图(验收搜索链路)。

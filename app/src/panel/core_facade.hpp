@@ -105,12 +105,12 @@ public:
     /// 用系统默认程序打开文件条目(左键点击文件的默认行为,对齐第一代 open)。
     Q_INVOKABLE void openEntry(const QString& id);
 
-    /// 请求打开独立翻译窗口(空文本 = 手动输入)。订阅方(TranslateWindow)在
-    /// translatePrefill 里完成"收起面板 + 显示窗口 + 预填",因此它同时服务
+    /// 请求进入面板的翻译页(空文本 = 手动输入)。订阅方(PanelWindow::showTranslate)
+    /// 在 translatePrefill 里完成"切形态 + 调窗口尺寸 + 预填",因此它同时服务
     /// 「热键 / 面板按钮」与「截图翻译完成后回填」两条链路。
     Q_INVOKABLE void openTranslate() { emit translatePrefill(QString()); }
 
-    /// 用指定原文打开翻译窗口(条目右键「翻译」入口)。
+    /// 用指定原文进入翻译页(条目右键「翻译」入口)。
     Q_INVOKABLE void openTranslateWith(const QString& text) { emit translatePrefill(text); }
 
     /// 请求重新注册全局快捷键(设置里改完热键后调用)。

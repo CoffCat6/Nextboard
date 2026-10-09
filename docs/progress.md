@@ -2053,3 +2053,203 @@ if (QQuickWindow* window = m_quick->quickWindow())
 
 真机复测:看 `mem[app-init] → core-ready → qml-env → panel-built` 四段各占多少,
 以及 `mem[panel-hide]` 是否明显低于改动前的 258MB。
+
+---
+
+## 2026-10-09(五)翻译并入主面板:整窗模式切换(去掉第二个 QML 引擎)
+
+**动机**:上一轮分段实测显示基线 188.6MB 里 **Qt 运行时只占 25.5MB**,其余 160MB
+全是主面板自己(QML 树 +92MB、首次渲染 +68MB)。翻译作为**独立顶层窗口**还要再叠
+一份同量级开销(第二个 `QQmlEngine` + 它自己的场景图/渲染栈)。而两者本来就互斥
+(打开翻译即收起面板),所以"独立窗口"没换来任何功能,只换来内存。
+
+**不采用抽屉**:抽屉只占一侧、滑入滑出动画廉价、还要来回开关。改为**整窗模式切换** ——
+同一窗口、同一 `QQuickWidget`、同一 `QQmlEngine`,内容整体换掉(0ms 切换,无位移动画)。
+翻译区还因此比原来的 520×660 更大。
+
+### 结构
+
+| 层 | 改动 |
+| --- | --- |
+| `panel/qml/TranslateWindow.qml` | → **`TranslateView.qml`**:根对象 `Rectangle`→`Item`(窗口壳归面板)、去掉自带圆角/描边、5 处 `translateWindow.*` 改为面板接口、新增 `exitRequested` 信号与 `dismissTopLayer()`(Esc 分层交回面板统一排队) |
+| `panel/qml/Main.qml` | 新增 `translatePageBuilt` 与 `openTranslate(text)`;列表页 `visible: mode === "list"`;其后插入 `Loader` 延迟构建翻译页(`active: translatePageBuilt`,之后常驻 → 切走再回来内容还在);Esc 改为四层排队(设置抽屉 → 翻译页浮层 → 退出翻译页 → 收起面板) |
+| `panel/panel_window.{hpp,cpp}` | 新增 `Mode{List,Translate}` + `mode` 属性 + `setMode` + `showTranslate(text)` + `exitTranslateMode()`;两套尺寸/下限 + `applyModeSize()`(先设下限再 resize、保持窗口中心、夹回屏幕可用区);新增 `m_holdOpen` —— 翻译页只**抑制失焦隐藏**,不动用户的固定状态、也不置顶 |
+| `panel/qml_bootstrap.cpp` | `PanelListLifecycle` 改为"**可见 且 停在列表页**"才算在线:进翻译页 → `Entries.release()`,回列表页 → `acquire()` |
+| `main.cpp` | 删掉懒创建 `TranslateWindow` 的 lambda;`translatePrefill` 改接 `panel.showTranslate(text)` |
+| `translate/translate_window.{hpp,cpp}` | **整对删除**(目录一并移除) |
+| `CMakeLists.txt` / `tray.cpp` / `hotkeys.cpp` / `core_facade.*` | 源列表与 QML 条目更新;文案与注释同步 |
+
+`CoreFacade` 的三个入口(`openTranslate` / `openTranslateWith` / `translatePrefill`)
+**未改**,所以面板按钮、条目右键、全局热键三条链路**一处调用点都没动**。
+
+### 两套尺寸(由 C++ 独占,QML 不碰)
+
+| 模式 | 尺寸 | 下限 |
+| --- | --- | --- |
+| List | 800 × 600 | 620 × 380 |
+| Translate | 520 × 660 | 420 × 500 |
+
+⚠️ 切换顺序必须**先设新下限、再 resize**:520 < 620,反过来会被旧下限顶成 620 宽。
+
+### 验证与限制
+
+- app 编译链接通过、**无编译警告**;`qmllint` 无新增告警类别;
+- ⚠️ 需真机确认:
+  1. 热键/托盘「打开翻译」→ 窗口**原地变成翻译页**(尺寸切到 520×660、位置不跳);
+  2. 翻译页里 Esc → 先关历史抽屉、再退回列表页(**不**收起窗口);列表页 Esc 才收起;
+  3. 翻译页输入时点其它窗口 → **不**自动隐藏;退出翻译页后恢复"失焦即隐";
+  4. 面板「固定」按钮行为不受影响(翻译页不改变用户的固定状态,也不置顶);
+  5. 切走再回翻译页 → 原文/译文还在;
+  6. 「截图取字」→ 面板先收起再框选,截出的图里不含面板;
+  7. 内存:进翻译页看 `mem[mode-translate]`、退出看 `mem[mode-list]` ——
+     两者应基本相等(翻译页多一棵 QML 树,列表已 release)。
+
+### 已知取舍
+
+- 面板是 `Qt::Tool`(不占任务栏),原翻译窗口是 `Qt::Window`(占)——
+  合并后**翻译不再有独立任务栏按钮**。
+- 热键语义定为"呼出剪贴板历史",故 `showAtCursor()` 一律切回列表页;
+  停在翻译页时按热键会回到列表(翻译内容仍在,再点「翻译」即可回去)。
+
+---
+
+## 2026-10-09(五)翻译页两处修正:关闭即收起 + 拖动标题栏不再挪动控件
+
+### 1. 关闭翻译页 = 直接收起面板(不再顺带切回列表)
+
+原先 ✕/Esc 是"退回列表页(窗口保持打开)",实际用起来像"关掉翻译又硬塞一个主界面"。
+改为与关闭语义一致:**直接收起整个面板**。
+
+| 位置 | 改动 |
+| --- | --- |
+| `TranslateView.qml` | 标题栏 ✕ → `panelWindow.hidePanel()`;删掉已无用的 `exitRequested` 信号 |
+| `Main.qml` | Esc 分层由"退出翻译页"改为"收起面板"(先关翻译页自己的浮层,如历史抽屉) |
+| `panel_window.hpp` | 删掉随之变成死代码的 `exitTranslateMode()` |
+
+**回列表的路径仍然通**:按面板热键(Ctrl+Shift+V)会走 `showAtCursor()` → `setMode(List)`,
+一步回到列表且窗口保持打开。
+
+### 2. 拖动标题栏时控件被挪走(实测截图可见标题被右移、✕ 被挤出)
+
+**根因**(Qt 源码 + 文档确认,非推测):
+
+> `PointerHandler::target` — The Item which this handler will manipulate.
+> **By default, it is the same as the `parent`**, the Item within which the handler is
+> declared. … or to `null`, to disable the default behavior and do something else instead.
+
+`DragHandler` 未设 `target` 时,它操作的是**声明它的父项**。翻译页标题栏的
+`DragHandler` 声明在标题栏 `Rectangle` 内,于是拖动窗口时它在改那个 Rectangle 的
+`x/y` —— 该 Rectangle 归 `ColumnLayout` 管,布局要等下次重排才把它拉回来,
+拖动过程中整条标题栏(连同标题与 ✕)就被挪走了。
+
+**修复**:两处 `DragHandler` 都补上 `target: null`(只保留 `active` 信号,
+真正的移动交给 `panelWindow.startSystemMove()`):
+
+- `TranslateView.qml` 标题栏(用户报的这一处);
+- `Main.qml` 底部 `DragGrip`(同一个坑,只是手柄小、之前没被察觉)。
+
+**验证**:app 编译链接通过、无编译警告;`qmllint` 无新增告警类别。
+真机确认:① 拖翻译页标题栏 → 窗口移动、**标题与 ✕ 原地不动**;
+② 拖面板底部手柄 → 同样只动窗口;③ 翻译页 ✕/Esc → **面板直接收起**,不再弹出列表。
+
+---
+
+## 2026-10-09(五)主界面头部也可拖动窗口(限定在"品牌+标题"展示区)
+
+**背景**:主界面此前**故意**不在头部挂拖动 —— 早先把整个头部做成拖动区时,
+在搜索框里按住拖选文字、指针一旦移出搜索框 `DragHandler` 就被激活,窗口跟着跑。
+窗口移动只能靠底部状态栏左侧的 `DragGrip`。
+
+**做法**:拖动只挂在头部里**唯一不参与交互**的那块 —— "品牌标记 + 标题" RowLayout
+(`id: headerDragArea`)。头部其余部分是搜索框(占满剩余宽度)与四个动作按钮,
+都不碰。搜索框里拖选文字的手势因此完全到不了这个 handler(命中区就是那块本身)。
+
+```qml
+RowLayout {
+    id: headerDragArea
+    Layout.fillHeight: true          // 命中区撑满头部高度,好按
+    HoverHandler { cursorShape: Qt.SizeAllCursor }
+    DragHandler {
+        target: null                 // ⚠️ 不置 null 会去拖父项(见上一条记录)
+        onActiveChanged: if (active) panelWindow.startSystemMove()
+    }
+}
+```
+
+底部 `DragGrip` **保留**,两个把手并存(不删是为了不动既有的使用习惯)。
+
+**验证**:app 编译链接通过、无编译警告;`qmllint` 无新增告警类别。
+真机确认:① 拖头部"Nextboard"字样区域 → 窗口移动、控件不动;
+② 在搜索框里按住拖选文字(含指针移出搜索框)→ **窗口不跟着跑**(这是当初失败的场景);
+③ 拖底部手柄 → 照旧可用。
+
+**补记**:头部把手可用后,底部状态栏的 `DragGrip`(六个圆点 + "拖动移动"文字 + 前置分隔线)
+与 `component DragGrip` 定义**已一并移除** —— 窗口移动现在只有头部「品牌+标题」这一个入口。
+(上一条里"两个把手并存"的说法作废。)
+
+---
+
+## 2026-10-09(五)主面板改为**跟随光标**弹出(原先只居中于光标所在屏)
+
+**问题**:`showAtCursor()` 名为"AtCursor",实际做的是"居中于**光标所在屏**" ——
+`move(avail.center() - rect().center())`。单屏下就是"永远弹在屏幕正中",
+每次都得把鼠标从工作区挪过去。
+
+**改动**:新增 `PanelWindow::placeAtCursor()` —— 以**光标为窗口中心**摆放,
+再夹回该屏可用区;`showAtCursor()` 与 `showTranslate()`(原本隐藏时)都走它。
+
+```cpp
+QPoint topLeft = cursor - rect().center();
+// 靠近屏幕边缘时夹回可用区(此时光标自然偏离中心,是预期行为)
+topLeft.setX(qBound(avail.left(), topLeft.x(), qMax(avail.left(), avail.right() - width() + 1)));
+topLeft.setY(qBound(avail.top(),  topLeft.y(),  qMax(avail.top(),  avail.bottom() - height() + 1)));
+```
+
+摆位放在 `setMode()` **之后**:形态切换会改窗口尺寸(800×600 ⇄ 520×660),
+必须按新尺寸算中心,否则翻译页会偏。
+
+从列表点「翻译」(窗口已显示)时**不重新摆位** —— 只换内容与尺寸,位置保持不动。
+
+**保留**:`m_userMoved` —— 用户手动拖动过之后不再自动摆放(那是明确的"我就放这儿")。
+若希望"每次呼出都跟随光标、拖动只算临时",把这个判断去掉即可。
+
+**验证**:app 编译链接通过、无编译警告。真机确认:
+① 热键呼出 → 面板出现在**鼠标处**(鼠标大致落在面板中心),不再固定屏幕正中;
+② 在屏幕四角附近呼出 → 面板被夹回屏内,不越界;
+③ 拖动面板后再呼出 → 停在拖动后的位置(未被拉回光标处)。
+
+**补记**:按用户决定,**取消"拖动后不再自动摆放"的原有设计**。
+`m_userMoved` 字段、`startSystemMove()` 里的置位、`placeAtCursor()` 里的判断全部移除 ——
+面板**每次呼出都按光标摆位**,拖动只是临时挪一下。
+(定位语义定为"跟着人走",而不是"记住一个坑"。)
+
+---
+
+## 2026-10-09(五)修复:设置抽屉跨模式残留(浮在翻译页之上且关不掉)
+
+**现象**:列表页打开设置抽屉 → 触发翻译页 → 抽屉**浮在翻译页上面**且关不掉。
+
+**根因**(两条叠加):
+
+1. **抽屉没被清掉**:切形态时没有任何人收掉列表页的浮层。
+2. **`AppDrawer` 是 `Drawer` → 继承 `Popup`**:Popup 渲染在窗口的 overlay 层,
+   **永远盖在所有普通 Item 之上**,与我插入 Loader 的先后顺序无关。
+   而且此时焦点已交给翻译页(Loader 的 `onVisibleChanged` 会 `forceActiveFocus`),
+   抽屉自己的 `closePolicy: CloseOnEscape` 也收不到 Esc。
+
+**修复**:
+
+| 位置 | 改动 |
+| --- | --- |
+| `Main.qml` | 新增 `dismissListOverlays()`:关设置抽屉 + 关右键菜单 + 清标签编辑;在 `openTranslate()` 开头调用 —— 它是进入翻译页的**唯一漏斗**(三条链路都经 `showTranslate` → `openTranslate`) |
+| `TranslateView.qml` | 新增 `onVisibleChanged: if (!visible) dismissTopLayer()` —— 离开翻译页时收掉它自己的历史抽屉,否则下次进来会无征兆地又冒出来 |
+
+**已知静态分析误报**:`qmllint` 会对 `translatePage.item.dismissTopLayer()` 报
+`Member "dismissTopLayer" not found on type "QObject"` —— `Loader.item` 在静态类型里
+只是 `QObject*`,解析不到动态函数。运行时由 QML 动态解析,行为正常(与 `Theme`
+那批 `missing-property` 同属静态分析的能力边界)。
+
+**验证**:app 编译链接通过、无编译警告。真机确认:
+① 列表页开设置抽屉 → 触发翻译页 → **抽屉已收起**,翻译页正常;
+② 翻译页打开历史抽屉 → 切回列表 → 再进翻译页 → 历史抽屉**不再自动弹出**;
+③ 列表页开右键菜单 → 触发翻译页 → 菜单不残留。

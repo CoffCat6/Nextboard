@@ -93,7 +93,7 @@ Hotkeys::Hotkeys(PanelWindow& panel, CoreBridge& core, QObject* parent)
                 CoreFacade::instance().pinLatest();
                 break;
             case Action::OpenTranslate:
-                // 打开独立翻译窗口;主面板由 translatePrefill 的订阅方负责收起
+                // 进入面板的翻译页;显示/切形态由 translatePrefill 的订阅方负责
                 CoreFacade::instance().openTranslate();
                 break;
             case Action::CaptureTranslate:

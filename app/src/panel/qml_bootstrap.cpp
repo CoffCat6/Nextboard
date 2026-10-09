@@ -100,16 +100,42 @@ bool handleQmlLoadFailure(QQuickWidget* quick, QBoxLayout* layout) {
 }
 
 namespace {
-/// 面板显隐 → 列表释放/重拉(内存收口 S6.1/S6.3)。
-/// 隐藏时清空行,委托与图片纹理随之释放;显示时在首帧前重拉,不留空白。
+/// 列表的"在线/离线"由两件事共同决定:**面板是否可见** 与 **当前停在哪一页**;
+/// 只有"可见 且 停在列表页"才需要持有列表行,其余一律释放。
+///
+/// 动机(内存收口 S6.1/S6.3):列表行对应的 QML 委托与图片纹理是本应用最大的一块
+/// 常驻开销 —— 而面板大多数时间是隐藏的(托盘常驻 + 失焦即隐),进翻译页时列表
+/// 更是完全用不到。隐藏期间剪贴板通知仍会刷新模型,若不拦住,释放就白做了。
 class PanelListLifecycle : public QObject {
 public:
-    PanelListLifecycle(ClipEntryModel* m, QObject* parent) : QObject(parent), m_model(m) {}
+    PanelListLifecycle(PanelWindow* panel, ClipEntryModel* model)
+        : QObject(panel), m_panel(panel), m_model(model) {}
+
     bool eventFilter(QObject* obj, QEvent* e) override {
-        if (e->type() == QEvent::Show) m_model->acquire();
+        // 自己记可见性而不问 isVisible():事件处理器里它的取值时机不直观,
+        // 而 Show/Hide 是本过滤器亲眼看到的,最可靠。
+        if (e->type() == QEvent::Show) {
+            m_visible = true;
+            sync();
+        } else if (e->type() == QEvent::Hide) {
+            m_visible = false;
+            sync();
+        }
         return QObject::eventFilter(obj, e);
     }
+
+    /// 形态切换后重新判定(进翻译页 → 释放;回列表页 → 重拉)。
+    void sync() {
+        if (m_visible && m_panel->mode() == PanelWindow::Mode::List)
+            m_model->acquire();
+        else
+            m_model->release();
+    }
+
+private:
+    PanelWindow* m_panel;
     ClipEntryModel* m_model;
+    bool m_visible = false;
 };
 } // namespace
 
@@ -126,11 +152,10 @@ void qmlAttachPanel(PanelWindow* panel) {    if (!panel) return;
     QObject::connect(&facade, &CoreFacade::clipChanged, &facade, [model] {
         model->refresh();
     });
-    // 面板隐藏 → 释放列表(委托/纹理下线);显示 → 重拉(见 PanelListLifecycle)
-    QObject::connect(panel, &PanelWindow::panelHidden, panel, [model] {
-        model->release();
-    });
-    panel->installEventFilter(new PanelListLifecycle(s_entries, panel));
+    // 面板显隐 + 形态切换 → 列表释放/重拉(见 PanelListLifecycle)
+    auto* lifecycle = new PanelListLifecycle(panel, s_entries);
+    panel->installEventFilter(lifecycle);
+    QObject::connect(panel, &PanelWindow::modeChanged, panel, [lifecycle] { lifecycle->sync(); });
 }
 
 } // namespace nb

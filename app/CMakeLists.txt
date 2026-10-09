@@ -44,7 +44,6 @@ add_executable(nextboard WIN32
     src/capture/capture_session.cpp
     src/editor/editor_window.cpp
     src/pin/pin_window.cpp
-    src/translate/translate_window.cpp
 )
 
 # ---- 主面板 QML(qt_add_qml_module → qrc,无运行期文件依赖) ----
@@ -69,7 +68,7 @@ qt_add_qml_module(nextboard
         panel/qml/ThemedMenuSeparator.qml
         panel/qml/AppDrawer.qml
         panel/qml/SettingsDrawer.qml
-        panel/qml/TranslateWindow.qml
+        panel/qml/TranslateView.qml
         panel/qml/Theme.qml
 )
 

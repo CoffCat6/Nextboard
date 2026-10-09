@@ -1,8 +1,11 @@
 // 主面板(theme.md 布局):Header(标题/搜索/翻译/设置) + 导航标签 + 历史列表
 // + 底部状态栏(快捷键提示) + 设置抽屉 + 右下角 Toast。
 //
-// 翻译已独立为单独窗口(TranslateWindow.qml),面板内不再有翻译抽屉 ——
-// 面板专注"呼出即用、用完即走"的剪贴板历史。
+// 面板有**两种形态**(见 PanelWindow::Mode),同一窗口内互斥显示:
+//  - 列表页:呼出即用、用完即走的剪贴板历史(本文件 142 行起的 ColumnLayout);
+//  - 翻译页:需要停留的翻译工作区(TranslateView.qml,由 Loader 延迟构建)。
+// 合并成整窗模式切换(而不是独立窗口)是为了省掉第二个 QQmlEngine 与它自己的
+// 场景图/渲染栈 —— 详见 docs/progress.md 的内存收口记录。
 import QtQuick
 import QtQuick.Controls.Basic
 import QtQuick.Layouts
@@ -38,6 +41,29 @@ Rectangle {
 
     /// 标签编辑:目标条目 id 与内联卡片可见性。
     property string tagEditId: ""
+
+    /// 翻译页是否已构建过:首次进入才实例化,之后常驻 ——
+    /// 这样"切走再回来"原文/译文还在,且从不翻译的用户完全不付这份开销。
+    property bool translatePageBuilt: false
+
+    /// 收掉列表页的全部浮层:设置抽屉 / 右键菜单 / 标签编辑。
+    ///
+    /// ⚠️ 设置抽屉(`AppDrawer` → `Drawer`)继承自 **Popup**,渲染在窗口的 overlay 层 ——
+    /// 它永远盖在所有普通 Item 之上,与"谁先声明"无关。所以切到翻译页时若不清掉,
+    /// 它会**浮在翻译页上面**,而且此时焦点已交给翻译页,抽屉自己的 Esc 也收不到。
+    function dismissListOverlays() {
+        if (settingsDrawer.opened) settingsDrawer.close()
+        if (root.menuTarget !== null) root.closeEntryMenu()
+        if (root.tagEditId !== "") root.tagEditId = ""
+    }
+
+    /// C++ 侧(PanelWindow::showTranslate)调用:切到翻译页并预填原文。
+    /// 页的构建是同步的(非异步 Loader),故置位后 item 立即可用。
+    function openTranslate(text) {
+        dismissListOverlays()   // 先把列表页的浮层收干净,再进翻译页
+        translatePageBuilt = true
+        if (translatePage.item) translatePage.item.openWith(text)
+    }
 
     /// 打开标签编辑卡片(右键菜单「标签…」)。
     function openTagEditor(entry) {
@@ -105,11 +131,20 @@ Rectangle {
     }
 
     Keys.onEscapePressed: {
+        // 分层处理,一次 Esc 只消费一层(自上而下):
+        //   设置抽屉 → 翻译页自己的浮层 → 收起面板
+        // 翻译页的 Esc 语义与 ✕ 一致:**直接收起**,不再顺带切回列表页。
         if (settingsDrawer.opened) {
             settingsDrawer.close()
-        } else {
-            panelWindow.hidePanel()
+            return
         }
+        if (panelWindow.mode === "translate") {
+            // 翻译页存在时先问它有没有浮层要关(如历史抽屉),没有就收起面板
+            if (!translatePage.item || !translatePage.item.dismissTopLayer())
+                panelWindow.hidePanel()
+            return
+        }
+        panelWindow.hidePanel()
     }
     // Ctrl+F / Ctrl+K 聚焦搜索(§27);Ctrl+1..9 复制当前视图第 N 条(第一代 F2)。
     Keys.onPressed: function(event) {
@@ -122,6 +157,7 @@ Rectangle {
         }
         if ((event.modifiers & Qt.ControlModifier)
                 && !settingsDrawer.opened
+                && panelWindow.mode !== "translate"
                 && event.key >= Qt.Key_1 && event.key <= Qt.Key_9) {
             const resp = Entries.copyByIndex(event.key - Qt.Key_1)
             if (resp.ok) panelWindow.hidePanel()
@@ -130,8 +166,11 @@ Rectangle {
         }
     }
 
+    // ---- 页 1:剪贴板历史(列表) ----
+    // 与翻译页互斥显示:不可见时不产生场景图节点,切到翻译页时这块的渲染开销归零。
     ColumnLayout {
         anchors.fill: parent
+        visible: panelWindow.mode === "list"
         spacing: 0
 
         // ---- Header(§16/§17:Surface 底 + 底边线,标题 + 搜索 + 动作) ----
@@ -148,10 +187,11 @@ Rectangle {
                 color: Theme.colors.border
             }
 
-            // ⚠️ 顶部**不挂任何拖动**:图标 / 标题 / 搜索框 / 按钮都不可拖动。
-            // 曾经把整个头部做成拖动区,结果在搜索框里按住拖选文字时,指针一旦
-            // 移出搜索框,DragHandler 就被激活 → 窗口跟着跑,体验很差。
-            // 窗口移动改为状态栏左侧的专用把手(见底部 DragGrip)。
+            // ⚠️ 拖动**只挂在下方的"品牌+标题"展示区**,不要挂整个头部:
+            // 曾经把整个头部做成拖动区,结果在搜索框里按住拖选文字、指针一旦移出
+            // 搜索框,DragHandler 就被激活 → 窗口跟着跑,体验很差。
+            // 挂在"不参与任何交互的展示区"上,就与搜索框/按钮各不相干。
+            // 这里是窗口移动的**唯一**入口(原先底部状态栏的把手已移除)。
 
             RowLayout {
                 anchors.fill: parent
@@ -159,9 +199,12 @@ Rectangle {
                 anchors.rightMargin: Theme.metrics.spacingMd
                 spacing: Theme.metrics.spacingSm
 
-                // 品牌标记 + 标题:纯展示,不参与任何鼠标交互(钉死)
+                // 品牌标记 + 标题:纯展示,不参与任何鼠标交互 ——
+                // 正因为"不参与交互",它才是头部唯一安全的窗口拖动把手。
                 RowLayout {
+                    id: headerDragArea
                     Layout.alignment: Qt.AlignVCenter
+                    Layout.fillHeight: true   // 命中区撑满头部高度,好按
                     spacing: Theme.metrics.spacingSm
 
                     AppMark {
@@ -176,6 +219,15 @@ Rectangle {
                         font.weight: Font.DemiBold
                         color: Theme.colors.textPrimary
                         Layout.alignment: Qt.AlignVCenter
+                    }
+
+                    HoverHandler { cursorShape: Qt.SizeAllCursor }
+                    DragHandler {
+                        // ⚠️ `target: null` 不能省:PointerHandler 的 target **默认是
+                        // 声明它的父项**,否则拖动会去改这个 RowLayout 的 x/y(布局下次
+                        // 重排才弹回,拖动过程中标题就被挪走了)。置 null 即只留 active 信号。
+                        target: null
+                        onActiveChanged: if (active) panelWindow.startSystemMove()
                     }
                 }
 
@@ -561,25 +613,8 @@ Rectangle {
                 anchors.rightMargin: Theme.metrics.spacingMd
                 spacing: Theme.metrics.spacingXs
 
-                // 窗口移动的**唯一**入口:状态栏左侧把手。
-                // 顶部(图标/标题/搜索/按钮)全部钉死不可拖动,避免误触;
-                // 需要挪动面板时认准这个把手即可。
-                DragGrip {}
-                Text {
-                    text: "拖动移动"
-                    color: Theme.colors.textSecondary
-                    font.family: Theme.fontFamily
-                    font.pixelSize: Theme.metrics.fontMicro
-                    Layout.alignment: Qt.AlignVCenter
-                }
-                Rectangle {
-                    Layout.preferredWidth: Theme.metrics.borderWidth
-                    Layout.preferredHeight: 12
-                    Layout.alignment: Qt.AlignVCenter
-                    Layout.leftMargin: Theme.metrics.spacingXs
-                    Layout.rightMargin: Theme.metrics.spacingXs
-                    color: Theme.colors.border
-                }
+                // 窗口拖动已上移到头部「品牌 + 标题」区(见 Header 的 headerDragArea),
+                // 状态栏这里不再需要专用把手。
 
                 KeyCap { label: "Ctrl" }
                 KeyCap { label: "K" }
@@ -617,39 +652,27 @@ Rectangle {
         }
     }
 
-    // ---- 窗口拖动把手(状态栏专用) ----
-    // 六个小圆点 = 通用"抓手"符号。只有它能移动窗口,顶部控件一律不可拖动。
-    component DragGrip: Item {
-        id: grip
-        // 命中区比图形略大,方便点中(状态栏高 30px,20px 的手柄仍有余量)
-        implicitWidth: 20
-        implicitHeight: 20
-        Layout.alignment: Qt.AlignVCenter
-        readonly property color dotColor: gripHover.hovered ? Theme.colors.accent
-                                                            : Theme.colors.textTertiary
-        Grid {
-            anchors.centerIn: parent
-            columns: 2
-            rowSpacing: 3
-            columnSpacing: 3
-            Repeater {
-                model: 6
-                delegate: Rectangle {
-                    width: 3
-                    height: 3
-                    radius: 1.5
-                    color: grip.dotColor
-                }
-            }
-        }
-        // 悬停给出"可拖动"的光标与配色反馈
-        HoverHandler { id: gripHover; cursorShape: Qt.SizeAllCursor }
-        DragHandler {
-            onActiveChanged: if (active) panelWindow.startSystemMove()
+    // ---- 页 2:翻译 ----
+    // 与列表**同一窗口、同一 QQuickWidget、同一 QQmlEngine** —— 这是本轮内存收口的关键:
+    // 原先翻译是独立顶层窗口,自带第二个 QML 引擎与它自己的场景图/渲染栈(见 docs/progress.md)。
+    // 延迟构建 + 之后常驻:从不翻译的用户不付这份开销,常用的人切走再回来内容还在。
+    Loader {
+        id: translatePage
+        active: root.translatePageBuilt
+        anchors.fill: parent
+        visible: panelWindow.mode === "translate"
+        sourceComponent: Component { TranslateView { } }
+        // 页切换时把焦点交接清楚:进翻译页→页内拿焦点(否则 Ctrl+Enter 不生效);
+        // 回列表页→面板根拿焦点(否则 Esc/Ctrl+F 这些根级按键会留在已隐藏的页里)。
+        onVisibleChanged: {
+            // 进入:把焦点交给本页(否则 Ctrl+Enter 之类不生效)。
+            // 离开时的清理由 TranslateView 自己处理(它最清楚自己有哪些浮层)。
+            if (visible) { if (item) item.forceActiveFocus() }
+            else root.forceActiveFocus()
         }
     }
 
-    // ---- 抽屉(设置仍留在面板内;翻译已独立为窗口) ----
+    // ---- 抽屉(设置仍留在面板内;翻译已并入面板为"整窗模式切换") ----
     SettingsDrawer { id: settingsDrawer }
 
     // ---- Core 信号订阅 ----

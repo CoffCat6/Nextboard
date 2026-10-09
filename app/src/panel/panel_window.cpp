@@ -25,17 +25,23 @@
 namespace nb {
 namespace {
 constexpr int BLUR_HIDE_DELAY_MS = 200; // 第一代结论:防拖动标题栏的虚假失焦
+// 两种形态的尺寸与下限(见 PanelWindow::Mode):
+//  - 列表:呼出即用的历史面板,宽一点好扫读;
+//  - 翻译:520×660 是原独立翻译窗口的实测尺寸,输入输出双栏需要更高。
 constexpr int PANEL_W = 800;
 constexpr int PANEL_H = 600;
+constexpr int PANEL_MIN_W = 620;   // 低于此尺寸头部(标题+搜索框+动作按钮)会挤变形
+constexpr int PANEL_MIN_H = 380;
+constexpr int TRANSLATE_W = 520;
+constexpr int TRANSLATE_H = 660;
+constexpr int TRANSLATE_MIN_W = 420;   // 低于此宽度翻译双栏信息会挤成一团
+constexpr int TRANSLATE_MIN_H = 500;
 } // namespace
 
 PanelWindow::PanelWindow(CoreBridge& core, QWidget* parent)
     : QWidget(parent, Qt::FramelessWindowHint | Qt::Tool), m_core(core) {
     setWindowTitle("Nextboard");
-    resize(PANEL_W, PANEL_H);
-    // 无边框窗口的缩放下限:低于此尺寸头部(标题 + 搜索框 + 四个带图标的动作按钮)
-    // 会挤变形;620 是"搜索框仍可用"的实测下限估算
-    setMinimumSize(620, 380);
+    applyModeSize(Mode::List);   // 起始形态=列表(内含初始 resize 与最小尺寸)
     setupUi();
 
     // 失焦自动隐藏(延迟复查,第一代 lib.rs 同参数)。
@@ -45,9 +51,67 @@ PanelWindow::PanelWindow(CoreBridge& core, QWidget* parent)
     m_blurTimer->setSingleShot(true);
     m_blurTimer->setInterval(BLUR_HIDE_DELAY_MS);
     connect(m_blurTimer, &QTimer::timeout, this, [this] {
-        if (m_pinned) return;   // 固定:点其他地方也不隐藏
+        if (m_pinned) return;    // 固定:点其他地方也不隐藏
+        if (m_holdOpen) return;  // 翻译页:输入长文时切走焦点不该消失
         if (m_everFocused && !isActiveWindow()) hide();
     });
+}
+
+void PanelWindow::setMode(Mode mode) {
+    if (m_mode == mode) return;
+    m_mode = mode;
+    // 翻译页要能停留,但**不动**用户的固定状态、也不置顶 —— 只临时抑制失焦隐藏。
+    m_holdOpen = (mode == Mode::Translate);
+    applyModeSize(mode);
+    emit modeChanged();
+    // 形态切换的内存读数:列表页释放/翻译页构建的净效果都体现在这两条上
+    logMemory(mode == Mode::Translate ? "mode-translate" : "mode-list");
+}
+
+void PanelWindow::applyModeSize(Mode mode) {
+    const bool translate = (mode == Mode::Translate);
+    const QSize minSize = translate ? QSize(TRANSLATE_MIN_W, TRANSLATE_MIN_H)
+                                    : QSize(PANEL_MIN_W, PANEL_MIN_H);
+    const QSize target = translate ? QSize(TRANSLATE_W, TRANSLATE_H)
+                                   : QSize(PANEL_W, PANEL_H);
+    // ⚠️ 顺序:必须先设新下限再 resize —— 翻译尺寸宽 520 小于列表下限 620,
+    // 若先 resize,窗口会被旧下限顶成 620 宽(高度同理)。
+    setMinimumSize(minSize);
+    if (!isVisible()) {
+        resize(target);
+        return;
+    }
+    // 已显示:保持窗口中心不动(尺寸变了但位置不跳),再夹回屏幕可用区
+    const QPoint center = frameGeometry().center();
+    resize(target);
+    QPoint topLeft = center - rect().center();
+    QScreen* screen = QGuiApplication::screenAt(center);
+    if (!screen) screen = QGuiApplication::primaryScreen();
+    if (screen) {
+        const QRect avail = screen->availableGeometry();
+        topLeft.setX(qBound(avail.left(), topLeft.x(),
+                            qMax(avail.left(), avail.right() - width() + 1)));
+        topLeft.setY(qBound(avail.top(), topLeft.y(),
+                            qMax(avail.top(), avail.bottom() - height() + 1)));
+    }
+    move(topLeft);
+}
+
+void PanelWindow::showTranslate(const QString& text) {
+    const bool wasHidden = !isVisible();
+    setMode(Mode::Translate);   // 尺寸/停留策略随形态切换
+    // 原本隐藏(托盘/热键链路)→ 按光标摆位,与列表页同一套手感;
+    // 已经显示着(从列表点「翻译」)→ 保持原位,只换内容与尺寸。
+    if (wasHidden) placeAtCursor();
+    if (wasHidden || !isActiveWindow()) {
+        show();
+        raise();
+        activateWindow();
+    }
+    // 预填 + 自动翻译交给 QML 根(Main.qml 的 openTranslate):它会按需构建翻译页。
+    if (m_quick && m_quick->rootObject())
+        QMetaObject::invokeMethod(qobject_cast<QObject*>(m_quick->rootObject()), "openTranslate",
+                                  Q_ARG(QVariant, text));
 }
 
 PanelWindow::~PanelWindow() = default;
@@ -77,17 +141,33 @@ void PanelWindow::setupUi() {
     handleQmlLoadFailure(m_quick, layout);
 }
 
+/// 把窗口摆到**光标处**(以光标为窗口中心,再夹回屏幕可用区)。
+///
+/// 面板是"呼出即用"的:出现在鼠标旁边,就省掉了"每次把鼠标挪到屏幕中央"这一步。
+/// **每次呼出都重新摆位** —— 拖动只是临时挪一下,不改变"下次从光标处弹出"的行为
+/// (这里刻意不记"用户拖动过"的位置:面板的定位语义是"跟着人走",不是"记住一个坑")。
+void PanelWindow::placeAtCursor() {
+    const QPoint cursor = QCursor::pos();
+    QScreen* screen = QGuiApplication::screenAt(cursor);
+    if (!screen) screen = QGuiApplication::primaryScreen();
+    if (!screen) return;
+    // 以光标为中心:光标落在面板正中,离列表、语言栏、按钮都近。
+    // 靠近屏幕边缘时夹回可用区(此时光标自然偏离中心,这是预期行为)。
+    const QRect avail = screen->availableGeometry();
+    QPoint topLeft = cursor - rect().center();
+    topLeft.setX(qBound(avail.left(), topLeft.x(),
+                        qMax(avail.left(), avail.right() - width() + 1)));
+    topLeft.setY(qBound(avail.top(), topLeft.y(),
+                        qMax(avail.top(), avail.bottom() - height() + 1)));
+    move(topLeft);
+}
+
 void PanelWindow::showAtCursor() {
-    // 用户手动拖动过之后就不再自动居中 —— 否则刚拖到顺手的位置,一收一开又跳回屏幕中央
-    if (!m_userMoved) {
-        const QPoint cursor = QCursor::pos();
-        QScreen* screen = QGuiApplication::screenAt(cursor);
-        if (!screen) screen = QGuiApplication::primaryScreen();
-        if (screen) {
-            const QRect avail = screen->availableGeometry();
-            move(avail.center() - rect().center());
-        }
-    }
+    // 热键/托盘的语义是"呼出剪贴板历史",故一律切回列表页
+    // (若停在翻译页时按热键,先回到列表;翻译内容仍在,再点「翻译」即可回去)。
+    setMode(Mode::List);
+    // 摆位放在 setMode 之后:形态切换会改窗口尺寸,得按新尺寸算中心
+    placeAtCursor();
     show();
     raise();
     activateWindow();
@@ -98,7 +178,7 @@ HWND PanelWindow::nativeHandle() const {
 }
 
 void PanelWindow::startSystemMove() {
-    m_userMoved = true;   // 之后不再自动居中(见 showAtCursor)
+    // 只移动窗口,不记录位置:拖动是临时挪动,下次呼出仍按光标摆位(见 placeAtCursor)
     if (QWindow* handle = windowHandle()) {
         if (handle->startSystemMove()) return;
     }

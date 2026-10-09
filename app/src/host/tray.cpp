@@ -50,7 +50,7 @@ void Tray::buildMenu() {
         "QMenu::separator { height: 1px; background: #D9E0E7; margin: 4px 8px; }"
         "QMenu::indicator { width: 14px; height: 14px; }"));
     m_menu->addAction("打开主面板", [this] { m_panel.showAtCursor(); });
-    m_menu->addAction("打开翻译窗口", [] { CoreFacade::instance().openTranslate(); });
+    m_menu->addAction("打开翻译", [] { CoreFacade::instance().openTranslate(); });
     m_menu->addSeparator();
     // 截图 / 贴图入口(对齐第一代托盘):截图前先收起面板,否则面板会被拍进画面;
     // 延时 150ms 等窗口真正消失(与热键链路 hidePanelThenCapture 同一取舍)。
