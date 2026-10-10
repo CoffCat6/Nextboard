@@ -290,6 +290,9 @@ AppDrawer {
         overlayIdle.value = Math.round(idleSecs / 60)
         themeCombo.currentIndex = s.theme === "light" ? 1 : s.theme === "dark" ? 2 : 0
         softwareRenderCheck.checked = s.softwareRender === true
+        // 开机自启不进 settings,而是注册表实况 → 每次打开都回读同步。
+        // (勾选态在首次点击时被赋值,声明式绑定即被破坏,不显式回读就会一直停留在旧值)
+        autoStartCheck.checked = Core.autoStartEnabled()
         dataDirInput.text = s.dataDir || ""
         root.dataDirDirty = false
         root.renderDirty = false
@@ -639,11 +642,12 @@ AppDrawer {
                 text: "开机自启(写入当前用户注册表 Run 键)"
                 checked: Core.autoStartEnabled()
                 onClicked: {
-                    // 注册表操作立即生效并回读实际结果,失败时还原勾选态
+                    // 注册表操作立即生效并回读实际结果,失败时还原勾选态并提示原因
                     if (Core.setAutoStart(checked)) {
                         checked = Core.autoStartEnabled()
                     } else {
                         checked = !checked
+                        Core.showToast("开机自启设置失败:写入注册表被拒绝(可能被安全软件或组策略拦截)")
                     }
                 }
             }
