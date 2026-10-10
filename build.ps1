@@ -133,7 +133,7 @@ $exe = Join-Path $BuildDir 'nextboard.exe'
 Write-Host "`n==== 构建完成 ====" -ForegroundColor Cyan
 Write-Host "  $exe"
 Write-Host "  热键: Ctrl+Shift+V 面板 / Ctrl+Shift+A 框选 / Ctrl+Shift+Q 全屏 / Ctrl+Shift+P 贴图"
-Write-Host "  日志: $($BuildDir)\nextboard.log"
+Write-Host "  日志: $($BuildDir)\data\nextboard.log"
 
 if ($Run) {
     Step '启动'

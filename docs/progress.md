@@ -2743,3 +2743,249 @@ Basic 默认菜单: 200x283  6 条:Cut Copy Paste Delete -- Select All   首条�
   `fontMono` 的设置化(需动 core `Settings`);② `docs/theme.md` §39 的字号表
   (20/16/14/13/12)与 `Theme.metrics`(18/15/14/13/12/11)仍未对齐,改动前先定以哪份为准。
 
+---
+
+## 2026-10-09(五)数据目录改为 exe 同级 data/(便携式布局)
+
+### 诉求与结论
+
+应用数据、日志、设置配置文件**统一落在 `<nextboard.exe 同级>\data\`**(原先数据在
+`%LOCALAPPDATA%\Nextboard\Nextboard`,日志在 exe 同级根目录 —— 两处分离)。
+
+| 文件 | 落点 | 原来 |
+| --- | --- | --- |
+| `clipboard.db`(+wal/shm)、`blobs\` | `data\` | `%LOCALAPPDATA%\Nextboard\Nextboard` |
+| `app_config.json` | `data\` | 同上(core 的 `data_dir` 决定,自动跟随) |
+| `nbcore.log` | `data\` | 同上(core `init_logging`) |
+| `nextboard.log`(含崩溃兜底) | `data\` | **exe 同级根目录** |
+
+### 实现
+
+| 位置 | 改动 |
+| --- | --- |
+| **新增 `app/src/host/app_paths.{hpp,cpp}`** | 数据目录的**唯一来源**:`appDataDir()` / `ensureAppDataDir()` / `appDataFile()`;三处调用方(C++ 宿主、日志、界面提示)不再各写一份 |
+| `core_bridge.cpp` | `QStandardPaths::AppLocalDataLocation` → `appDataDir()`;目录不可写时**立即返回可读错误**(`数据目录不可写:<路径>(安装目录需可写)`),不再让问题以"核心初始化失败"含混暴露 |
+| `main.cpp` | 日志与崩溃日志路径 → `data\nextboard.log`;装日志处理器**之前**先建目录(否则首条日志无处可写) |
+| `qml_bootstrap.cpp` | 界面加载失败提示里的硬编码 `app/build/nextboard.log` 改为**动态真实路径** |
+| `app/CMakeLists.txt` | 注册 `src/host/app_paths.cpp` |
+
+设置里的自定义数据目录(绝对路径、重启生效、复制式迁移)不受影响。
+
+### 连带改动:安装器必须保护安装目录内的数据
+
+数据进了安装目录,`tools/installer.nsi` 原先卸载时的 `RMDir /r "$INSTDIR"` 会**连剪贴板
+历史一起删掉**。改为:
+
+- 卸载时**逐项遍历顶层条目并跳过 `data`**(Windows 无"排除删除";遍历写法对以后新增的
+  目录/文件自动覆盖),`Delete` + `RMDir /r` 对同一项都调用以同时覆盖文件/目录/空目录;
+- 「同时删除个人数据」可选 Section 改为删 `$INSTDIR\data`,并顺带清理旧位置
+  `%LOCALAPPDATA%\Nextboard\Nextboard`(0.2.0 早期版本遗留);
+- 静默卸载跳过组件页且该节默认不选 → **数据必保留**。
+
+### 验证与限制
+
+- **逐个翻译单元编译验证**(用 `app/build/build.ninja` 里 nextboard 目标的**原样参数**:
+  `/W3 /utf-8 -std:c++20` 等):`app_paths.cpp` / `core_bridge.cpp` / `qml_bootstrap.cpp` /
+  `main.cpp` 四个文件 **exit 0 且无警告**;
+- `tools/installer.nsi` 用 makensis 编译通过(LZMA,58.3MB → 16.3MB);
+- ⚠️ **本会话无法完成整包构建**:`app\build` 是 Medium + `(NW)` 完整性标签,而本会话进程为
+  **Low**(`S-1-16-4096`),写入/删除被"禁止向上写"拒绝 → `cmake --regenerate-during-build`
+  报 Permission denied、`package.ps1` 清理旧 stage 失败。**真机(普通 Medium 权限)不受影响**;
+- ⚠️ 需真机确认:启动后 `data\` 是否出现四个文件/目录(clipboard.db、app_config.json、
+  nextboard.log、nbcore.log);卸载后 `data\` 是否仍在;勾选删除后是否清空。
+
+### 踩坑(两条通用)
+
+1. **编辑工具会剥掉 UTF-8 BOM** —— 本轮改了 `tools/installer.nsi` 与 `build.ps1` 后
+   BOM 丢失:NSIS 报 `Bad text encoding: installer.nsi:1`(按 ACP 解析)、PowerShell 5.1 会
+   因中文注释崩解析。**改完这两个文件必须补 BOM**,否则现象与"脚本写错"难以区分。
+2. **沙箱拦截 `%TEMP%` 写入会拖垮构建链**:makensis 报 `error creating mmap`、CMake 重新
+   配置卡死 —— 两者都靠把 `TMP/TEMP` 重定向到仓库内目录绕过(`package.ps1` 已固化)。
+
+---
+
+## 2026-10-10(六)修复:开机自启勾选后无法取消
+
+### 现象与根因
+
+设置页勾上「开机自启」后再点取消:**勾选态立刻弹回**,注册表 Run 值仍在,应用照旧开机自启。
+
+链路:`CheckBox`(失败时 `checked = !checked` 还原)→ `CoreFacade::setAutoStart` →
+`auto_start::setEnabled(false)`,`auto_start.cpp` 停用分支:
+
+```cpp
+const REGSAM access = enable ? KEY_SET_VALUE : DELETE;   // ← 错在这里
+```
+
+**`RegDeleteValue` 要求键句柄带 `KEY_SET_VALUE`**;`DELETE` 是 `RegDeleteKey` 删*整个子键*
+用的权限。于是:以 DELETE 打开 Run 键**成功**,随后的删除被拒
+(`ERROR_ACCESS_DENIED=5`)→ 函数返回 false → UI 把勾选弹回。
+
+### 修复
+
+| 位置 | 改动 |
+| --- | --- |
+| `host/auto_start.cpp` | 启用/停用**统一以 `KEY_SET_VALUE` 打开**;注释写明该 API 契约(避免再犯);操作后**回读复核**,与实际不符也返回 false 并告警 —— 安全软件/组策略拦截注册表写入时可被发现 |
+| `SettingsDrawer.qml` | ① `openAndLoad()` 里按**注册表实况**同步勾选态:勾选态一旦被点击赋值,声明式绑定即失效,不显式回读就会一直停在旧值;② 失败时 `showToast` 说明原因(不再是"只有勾选态弹回、无任何解释") |
+
+### 验证(实证,非推断)
+
+**行为测试程序**(临时工具,直接链接生产代码 `auto_start.cpp` 打真实注册表;跑前备份、跑后恢复用户原值):
+
+```
+initial enabled()          = 1
+setEnabled(true)  -> 1, enabled() = 1
+LEGACY open(DELETE) rc=0, RegDeleteValueW rc=5, enabled() = 1   ← 旧 bug 精确复现
+setEnabled(false) -> 1, enabled() = 0                           ← 修复生效
+setEnabled(false) again -> 1 (幂等)
+RESULT: PASS
+```
+
+第一行是**旧实现的复现证据**:`open(DELETE)` **成功(rc=0)** → `RegDeleteValueW` 返回
+**5=ERROR_ACCESS_DENIED** → 值仍在。与线上现象一一对应。
+
+> ⚠️ 测试程序放在 `dist\` 下运行会被以**受限令牌**启动(dist 里的文件带 Low 完整性标签),
+> 注册表写入被拒、结果失真;复制到 Medium 目录(app\build)后行为正常。**环境现象,非代码缺陷。**
+
+其余验证:
+
+- 整包构建通过(`build.ps1`:`[10/10] Linking`、完整性标签 Medium);
+- 应用真机运行(`--settings --screenshot`):`nbcore.log` 实测
+  `nb_init: data_dir=...\app\build\data`;`app\build\data\` 齐备(clipboard.db+wal/shm、
+  blobs、app_config.json、nextboard.log、nbcore.log)—— **数据目录改动同时得到端到端确认**;
+- 设置抽屉打开**无 QML 加载错误、无 autoStart 相关报错**;`qmllint` **0 Error**;
+- 重新打包:stage 143 文件 / 55.2MB、portable zip 22.1MB、Setup 15.9MB。
+
+### 未决与观察
+
+- ⚠️ **安装器运行时行为在本环境仍无法验证**:`Nextboard-Setup.exe /S /D=...` 无任何产出
+  (无文件、无 ARP 项、无 `$PLUGINSDIR`、无进程),与会话早期"静默安装挂起无产出"一致
+  → 安装/卸载/数据保留仍须真机按 [04 §6](./04-build-package-release.md) 冒烟清单验证;
+- 环境遗留(未改动用户机器状态):HKCU Run 现有自启项指向
+  `dist\Nextboard-0.2.0\nextboard.exe`(打包 stage 副本),修复后可在设置里正常关闭;
+  `%LOCALAPPDATA%\Programs\Nextboard\probe_il.exe` 为早期排障残留。
+
+### 追加:退出时 QML TypeError 噪声根治(原诊断已纠正)
+
+**噪声**:每次退出日志固定刷 5 条
+
+```
+Main.qml:681 TypeError: Cannot read property 'mode' of null
+Main.qml:663 / 665 / 348  ... 'pinned' of null
+Main.qml:179 ... 'mode' of null
+```
+
+**先前的猜测是错的**(曾记为"列表 `release()` 与委托求值竞态"):报错行读的是
+`panelWindow.mode` / `panelWindow.pinned`,所以为 null 的不是条目,而是
+**`panelWindow` 这个 context property 本身**。
+
+**真正机制**(QObject 析构顺序):
+
+```
+~PanelWindow → … → ~QObject:
+   ① emit destroyed(this)      ← QML 侧 panelWindow 立刻变 null
+   ② deleteChildren()          ← 此时才删 QQuickWidget 及其整棵 QML 树
+```
+
+夹在①②之间,QML 里所有 `panelWindow.*` **绑定**会因依赖失效而重新求值 → 读到 null →
+TypeError。所以它与列表/委托无关,任何 `panelWindow.*` 绑定都会在同一瞬间报错。
+
+**修复**(`panel_window.cpp` 析构体):先把 QML 树拆掉再走基类析构 ——
+
+```cpp
+PanelWindow::~PanelWindow() {
+    delete m_quick;      // 此刻本对象仍是有效 QObject,绑定即便重算也读得到真值
+    m_quick = nullptr;   // 树已销毁 → destroyed 发出时已无绑定可重算
+}
+```
+
+**验证**(同一份 `--settings --screenshot` 自动化链路,前后对照):
+
+| 指标 | 修复前 | 修复后 |
+| --- | --- | --- |
+| `TypeError` 条数 | 5 | **0** |
+| 全日志 `[WARN]` 条数 | 5 | **0** |
+| 退出行为 | 正常 | 正常(截图产出、`mem[panel-hide]` 收尾) |
+
+> 教训:错误信息里的 "of null" 要点明**哪个**基对象为 null。此处先入为主地当成条目
+> 为 null,就把排查方向带偏了一轮;按报错行反查 `panelWindow` 才一步到位。
+
+---
+
+## 2026-10-10(六)安装包两处致命问题:完整性标签 + 卸载段命名
+
+### 问题 A:双击安装包报 `Error writing temporary file. Make sure your temp folder is valid.`
+
+**根因(非安装器缺陷,是产物标签)**:Windows 按**映像文件自身的完整性标签**决定新进程的
+完整性级别。本工作区被沙箱打上 Low 标签,`dist` 下新建文件继承 Low ——
+`dist\Nextboard-Setup-0.2.0.exe` 实测就是 `Low (I)(NW)`;于是安装器以 **Low 完整性**启动,
+而 `%TEMP%` 是 Medium → "禁止向上写" → NSIS 建不出 `$PLUGINSDIR` → 报这句话。
+
+证据链(同一现象三次复现):① 本会话早先两次静默安装"零产出、无 `$PLUGINSDIR`";
+② 同目录下 Low 标签的测试程序注册表写入被拒,复制到 Medium 目录后正常;
+③ 对同一个 setup 执行 `icacls /setintegritylevel Medium` 后,**立刻安装成功**。
+
+**修复**:`package.ps1` 新增「产物完整性标签」步骤 —— `dist` 目录置 `(OI)(CI)Medium`
+(后续产物继承)+ 对 zip/setup 显式置 Medium,并**复核**;仍为 Low 时打印可读处置
+(复制到工作区外再运行 / 手工 `icacls`)。现在打包结尾会输出
+`[OK] 产物完整性级别 = Medium(双击可直接运行)`。
+
+> 便携版同理会中招:把 zip 解压到工作区内,解压出的 exe 继承 Low,双击一样跑不起来。
+
+### 问题 B(更严重):卸载段被当成安装段 —— 安装时自我删除,卸载器 0 个 section
+
+**现象**:静默安装 exit 0,但目标目录**什么都没装**,而且原有文件(`probe_il.exe`)被删了。
+
+**根因(NSIS 命名即语义)**:NSIS 只把**精确名 `Uninstall`** 或 **`un.` 前缀**的 Section
+编进卸载器,其余一律算"安装段"。我的卸载段名是 `"!卸载 Nextboard"` ——
+既非精确名、也没有前缀,于是:
+
+1. 它在**安装时**执行:把刚铺好的文件、ARP 项、Run 键、快捷方式全删掉(所以装完什么都不剩);
+2. `WriteUninstaller` 生成的卸载器 **0 个 section**,运行它什么也不做。
+
+而这个错误**在编译汇总行里早有痕迹**:`Uninstall: 3 pages, 0 sections (0 bytes)` ——
+当时没当回事,是排查绕远的原因。
+
+**修复**:`Section "Uninstall"` + `SectionIn RO`(卸载器主段:必选、组件页置灰、静默也必跑);
+数据删除段改名 `"un.同时删除个人数据(历史记录/截图/设置)"`。修复后汇总行:
+
+```
+Install:   4 sections (1 required)
+Uninstall: 2 sections (1 required)     ← 之前是 0 sections
+```
+
+### 最小探测:把 NSIS 卸载器语义钉死
+
+| 探测项 | 结论 |
+| --- | --- |
+| `Section "Uninstall"` / `Section "un.X"` / 其它名 | 前两者归**卸载器**,第三者归**安装器**(按 makensis 汇总行计数对比) |
+| 卸载段加 `SectionIn RO` | 汇总行显示 `(1 required)` → 卸载器识别 RO |
+| 静默卸载时主段是否执行 | **执行**(probeA 实测标记文件生成) |
+| 静默卸载时 `/o` 可选段是否执行 | **不执行**(probeA 实测无标记) → "数据默认保留"的依据成立 |
+
+### 端到端实测(本会话已可运行安装器,补上了此前无法做的验收)
+
+| 步骤 | 结果 |
+| --- | --- |
+| 静默安装(最终产物) | exit 0;144 文件;**qmldir 12**;`vcruntime140.dll` 在;ARP/开始菜单/uninstaller 齐 |
+| 安装**不误删**已有文件 | 预置 `keepme.txt` 安装后仍在 ✔ |
+| 装好的副本能跑 | `--screenshot` 出图;日志 `data dir = .../Programs/Nextboard/data` |
+| 静默卸载 | exit 0;**仅剩 `data\`**;`clipboard.db`/用户标记保留;exe/Qt/uninstaller/ARP/开始菜单/Run 全清 |
+| 测试残留 | 已全部清理(安装目录、探针、markers 均已删) |
+
+### 两个通用教训
+
+1. **编译汇总行要看**:`Install/Uninstall: N sections` 能一眼看出"卸载器是空的"这类结构性错误;
+2. **产物可运行性取决于文件标签**:本环境下凡"打包/构建产出可执行文件"的流程,都应显式复核
+   完整性级别 —— 现象是"双击没反应/报临时目录无效",根因却在标签上。
+
+> 附:本轮为验证又踩了一次 **BOM 被编辑工具剥掉**(`installer.nsi` / `package.ps1` 各一次):
+> NSIS 报 `Bad text encoding`、PowerShell 5.1 直接解析失败。改这两个文件后必须补 BOM。
+>
+> 环境说明:用户 HKCU Run 中原有一条自启项(指向 `dist\Nextboard-0.2.0\nextboard.exe`),
+> 在问题 B 的安装测试中被卸载逻辑删除;该入口本就打算关闭,未再恢复。
+
+
+
+
+

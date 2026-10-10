@@ -1,6 +1,7 @@
 #include "qml_bootstrap.hpp"
 
 #include "../app_font.hpp"
+#include "../host/app_paths.hpp"
 
 #include "core_facade.hpp"
 #include "clip_entry_model.hpp"
@@ -93,8 +94,9 @@ bool handleQmlLoadFailure(QQuickWidget* quick, QBoxLayout* layout) {
                               : quick->errors().first().toString();
     label->setText(QStringLiteral(
                        "<b>界面加载失败</b><br><br>%1<br><br>"
-                       "<span style='color:#888'>完整信息见 app/build/nextboard.log</span>")
-                       .arg(first.toHtmlEscaped()));
+                       "<span style='color:#888'>完整信息见 %2</span>")
+                       .arg(first.toHtmlEscaped(),
+                            appDataFile(QStringLiteral("nextboard.log")).toHtmlEscaped()));
     layout->addWidget(label, 1);
     return true;
 }

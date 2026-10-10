@@ -1,10 +1,11 @@
 #include "core_bridge.hpp"
 
+#include "app_paths.hpp"
+
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
 #include <QImage>
-#include <QStandardPaths>
 
 #include <windows.h>
 
@@ -65,11 +66,15 @@ bool CoreBridge::init(bool /*startHidden*/, QString* error) {
         return false;
     }
 
-    // 数据目录:%LOCALAPPDATA%/Nextboard
-    const QString dataDir =
-        QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
-    QDir().mkpath(dataDir);
+    // 数据目录:exe 同级 data/(便携式布局,见 host/app_paths.hpp)。
+    // 目录不可写时**立即报错**——否则后续会以"核心初始化失败"等含混现象暴露。
+    const QString dataDir = appDataDir();
+    if (!ensureAppDataDir()) {
+        if (error) *error = QStringLiteral("数据目录不可写:%1(安装目录需可写)").arg(dataDir);
+        return false;
+    }
     m_dataDir = dataDir;
+    qInfo() << "bridge: data dir =" << dataDir;
 
     // 通知窗口:传 0(仅全局 PostMessage;v1 面板轮询/事件驱动再接入专属 HWND)
     const QJsonObject cfg{

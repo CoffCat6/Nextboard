@@ -33,6 +33,7 @@ add_executable(nextboard WIN32
     src/main.cpp
     src/app_font.cpp
     src/host/single_instance.cpp
+    src/host/app_paths.cpp
     src/host/auto_start.cpp
     src/host/tray.cpp
     src/host/hotkeys.cpp

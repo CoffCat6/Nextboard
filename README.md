@@ -22,6 +22,7 @@ Windows 桌面一体化效率板:剪贴板历史 + 截图(框选/全屏/编辑/�
 | [docs/01-architecture.md](./docs/01-architecture.md) | 总体架构:技术栈定案、进程/窗口模型与内存预算、FFI 契约、数据模型、风险登记、与第一代决策对照 |
 | [docs/02-migration-core.md](./docs/02-migration-core.md) | nbcore 改写路线:逐文件映射表、耦合点改造方案、Cargo 配置要点、FFI 方法表、测试策略、M1–M3 实施顺序 |
 | [docs/03-roadmap.md](./docs/03-roadmap.md) | 开发路线图:S0–S6 里程碑、验收门、依赖与并行、回退预案、backlog |
+| [docs/04-build-package-release.md](./docs/04-build-package-release.md) | 构建/打包/安装/发布规程:发布构建清单、运行期依赖与体积预算、NSIS 安装器规格、发布流程与检查单(**草案,待审查**) |
 
 ## 上游项目
 
@@ -58,9 +59,17 @@ powershell -ExecutionPolicy Bypass -File build.ps1 -Run       # 构建后直接�
 powershell -ExecutionPolicy Bypass -File build.ps1 -Clean     # 清缓存重新配置
 ```
 
+**打包发布产物**(构建后执行,产出便携 zip + NSIS 安装包):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\package.ps1    # dist\Nextboard-Setup-0.2.0.exe / -portable.zip
+```
+
 产物:`app\build\nextboard.exe`(nbcore.dll / Qt 运行库由脚本与 CMake 自动部署;QML 已打进 exe)。
 热键:`Ctrl+Shift+V` 面板 / `Ctrl+Shift+A` 框选 / `Ctrl+Shift+Q` 全屏 / `Ctrl+Shift+P` 贴图。
-日志:`app\build\nextboard.log`。
+数据/日志/配置:`app\build\data\`(便携式布局,exe 同级 `data` 目录 —— 数据库、截图 blob、
+`app_config.json`、`nextboard.log`、`nbcore.log` 都在这里)。
+打包/安装/发布规程见 [docs/04-build-package-release.md](./docs/04-build-package-release.md)。
 
 ### 手动分步(与脚本等价)
 

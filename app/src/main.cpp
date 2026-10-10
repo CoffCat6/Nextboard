@@ -20,9 +20,13 @@
 
 #include <windows.h>
 
-// S2 阶段:qDebug/qInfo 全量落文件(发布期移除);WIN32 子程序无控制台,这是唯一可观测手段
+// 数据/日志目录(exe 同级 data/)的单一来源;下面的日志处理器要用,故先于代码段引入
+#include "host/app_paths.hpp"
+
+// S2 阶段:qDebug/qInfo 全量落文件(发布期移除);WIN32 子程序无控制台,这是唯一可观测手段。
+// 日志与数据同处:`<exe 同级>\data\nextboard.log`(便携式布局,见 host/app_paths.hpp)
 static void fileMessageHandler(QtMsgType type, const QMessageLogContext& ctx, const QString& msg) {
-    static QFile log(QCoreApplication::applicationDirPath() + "/nextboard.log");
+    static QFile log(nb::appDataFile(QStringLiteral("nextboard.log")));
     if (!log.isOpen()) log.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
     const char* level = type == QtDebugMsg ? "DEBUG" : type == QtInfoMsg ? "INFO"
         : type == QtWarningMsg ? "WARN" : type == QtCriticalMsg || type == QtFatalMsg ? "CRIT" : "?";
@@ -49,7 +53,7 @@ static void fileMessageHandler(QtMsgType type, const QMessageLogContext& ctx, co
 namespace {
 
 void appendCrashLog(const QString& text) {
-    QFile log(QCoreApplication::applicationDirPath() + "/nextboard.log");
+    QFile log(nb::appDataFile(QStringLiteral("nextboard.log")));
     if (log.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
         log.write(QStringLiteral("[CRASH] %1\n").arg(text).toUtf8());
 }
@@ -100,10 +104,15 @@ int main(int argc, char* argv[]) {
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/resources/nextboard.ico")));
     // 常驻托盘(第一代语义):关闭/隐藏最后一个窗口不退出,退出仅走托盘菜单
     QApplication::setQuitOnLastWindowClosed(false);
+    // 数据目录(exe 同级 data/):日志、设置、数据库、截图 blob 全部落在这一处。
+    // 必须在装日志处理器之前建好,否则首条日志无处可写(表现为"静默无日志")。
+    const bool dataDirReady = nb::ensureAppDataDir();
     qInstallMessageHandler(fileMessageHandler);
     ::SetUnhandledExceptionFilter(unhandledExceptionFilter);
     std::set_terminate(onTerminate);
     qInfo() << "Nextboard starting, appDir =" << QCoreApplication::applicationDirPath();
+    if (dataDirReady) qInfo() << "data dir =" << nb::appDataDir();
+    else qWarning() << "数据目录创建失败(安装目录需可写):" << nb::appDataDir();
     // 启动分段读数:基线高时据此定位是"Qt 运行时 / nbcore / QML 装配 / 面板 QML 树"
     // 哪一段吃掉的,而不是靠猜。
     nb::logMemory("app-init");   // Qt 运行时 + 平台插件,尚未加载任何 QML
