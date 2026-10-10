@@ -115,7 +115,18 @@ void PanelWindow::showTranslate(const QString& text, Orientation orientation) {
                                   Q_ARG(QVariant, text));
 }
 
-PanelWindow::~PanelWindow() = default;
+PanelWindow::~PanelWindow() {
+    // 退出时那串 QML 噪声的根治(见 docs/progress.md「退出时的 TypeError」):
+    // QObject 的析构顺序是「先 emit destroyed(this) → 再 deleteChildren()」,而 QML 根上下文里的
+    // context property `panelWindow` 正指向本对象 —— destroyed 一发出,它在 QML 侧立刻变 null,
+    // 于是 Main.qml 里一批**绑定**(panelWindow.mode / panelWindow.pinned)会在这一瞬重新求值,
+    // 每次退出刷 5 条 "TypeError: Cannot read property 'xxx' of null"。
+    //
+    // 在析构体里**先拆掉 QML 树**:此时本对象仍是有效的 QObject(派生部分也还活着),
+    // 绑定即便重算也读得到真实值;树没了之后,`destroyed` 发出时已没有绑定可重算。
+    delete m_quick;
+    m_quick = nullptr;
+}
 
 void PanelWindow::setupUi() {
     auto* layout = new QHBoxLayout(this);
