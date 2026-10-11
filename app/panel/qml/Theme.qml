@@ -65,6 +65,92 @@ QtObject {
         readonly property color sourceCapture:   dark ? "#7EC2FF" : "#1A6FC4"
         readonly property color sourceTranslate: dark ? "#C9A7FF" : "#6F42C1"
         readonly property color sourceOcr:       dark ? "#7FD8B4" : "#1B7A55"
+
+        // ---- 标签调色板(S5.2:自定义标签按名字取色) ----
+        // 与来源徽标同口径:**彩色前景 + 中性底**,暗色用亮柔彩、浅色用深饱和。
+        //
+        // 8 个色值不是手挑的,是按下面三条约束搜出来的(工具与实测见
+        // docs/progress.md「标签配色」):
+        //   ① 文字对比度:浅色值在 surfaceSecondary(#F8FAFC)上 ≥ 4.7:1,
+        //      暗色值在 #1A2028 上 ≥ 6.5:1(11px 小字按正文当量对待,留余量);
+        //   ② 两两可区分:同主题内任意两色的 CIEDE2000 ΔE ≥ 17.5;
+        //   ③ 不与"固定"徽标撞色:与 warning 的 ΔE ≥ 19(暗) / 29(浅)。
+        // ③ 是硬要求而非锦上添花:"固定"是**状态**标记且以实心色块出现,
+        //    而标签也是彩色胶囊 —— 一次误读就会把"有标签"看成"已固定"。
+        //    故色相 45°~100°(实测 warning 落在 58°/84°)整段不用。
+        //
+        // ⚠️ 两个主题**共用同一套色相**(第 i 档在亮/暗下是同一色族):
+        //    否则同一个标签切换主题会换色相,颜色就不再是标签的记忆锚点。
+        readonly property color tagRed:     dark ? "#FF8882" : "#CE0124"   // H24
+        readonly property color tagOlive:   dark ? "#BCCE02" : "#6B7600"   // H116
+        readonly property color tagGreen:   dark ? "#3DC964" : "#008235"   // H149
+        readonly property color tagTeal:    dark ? "#03EED9" : "#087E73"   // H184
+        readonly property color tagAzure:   dark ? "#01C9FD" : "#067A9B"   // H225
+        readonly property color tagBlue:    dark ? "#7BAAFE" : "#1165FA"   // H262
+        readonly property color tagPurple:  dark ? "#C08EFF" : "#9742E7"   // H303
+        readonly property color tagMagenta: dark ? "#FA74C3" : "#D11695"   // H346
+
+        /// 取色用的调色板。⚠️ 顺序即哈希色位:**增删中间项会改变所有既有标签的颜色**
+        /// (末尾追加除外),要改请连同 progress.md 的说明一起改。
+        readonly property var tagPalette: [tagRed, tagOlive, tagGreen, tagTeal,
+                                           tagAzure, tagBlue, tagPurple, tagMagenta]
+    }
+
+    // ---- 标签取色(纯函数,无状态) ----
+
+    /// 标签名 → 颜色。**只依赖名字**:同名恒定、跨重启恒定、不落库、不依赖条目集合,
+    /// 因此可以直接写在绑定里(委托复用/回收都不会"串味")。
+    ///
+    /// ⚠️ 代价是不同标签可能撞色:8 色下 32 个真实标签实测同色 57 对(随机期望 62 对),
+    /// 即"同屏 3 个标签里有一对同色"约 3 成概率。要严格不撞色就得把"标签名→颜色"
+    /// 持久化(含分配顺序),那是 core 侧改动,不在本轮范围。
+    function tagColor(name) {
+        const s = (name === undefined || name === null) ? "" : ("" + name)
+        if (s.length === 0) return colors.textSecondary
+        return colors.tagPalette[tagHash(s) % colors.tagPalette.length]
+    }
+
+    /// 字符串 → 32 位无符号哈希(FNV-1a 变体 + murmur3 finalizer 的雪崩)。
+    ///
+    /// 为什么不能沿用常见的 djb2(`h = h * 33 + c`):33 ≡ 1 (mod 8),于是
+    /// `h mod 8` 退化成 `(5381 + Σord(c)) mod 8` —— **与字符顺序无关**。
+    /// 实测后果:任意换序的标签必然同色(`重要`/`重...`、`ab`/`ba`),且分布按
+    /// "码和同余"聚集,`重要` 与 `学习` 稳定撞在同一个色位。
+    ///
+    /// ⚠️ 三个乘数都 < 2^22,配合 < 2^31 的余数,保证中间值 < 2^53(QML 的 JS 是
+    /// 双精度,超过 2^53 会丢低位、不同平台可能不一致)。
+    /// ⚠️ 位运算必须用 `>>> 0` 转无符号:`& 0xffffffff` 在 JS 里是**有符号**的
+    /// (0xffffffff 按 int32 是 -1),结果变负数会让后续取模与乘法全错。
+    function tagHash(s) {
+        let h = 2166136261 % 2147483647
+        for (let i = 0; i < s.length; ++i)
+            h = (h * 131 + s.charCodeAt(i)) % 2147483647
+        h = (h ^ (h >>> 13)) >>> 0
+        h = (h * 65599 + 7) % 2147483647
+        h = (h ^ (h >>> 11)) >>> 0
+        h = (h * 2654435 + 11) % 2147483647
+        h = (h ^ (h >>> 15)) >>> 0
+        return h
+    }
+
+    /// 标签行的富文本:每个标签用自己的颜色,分隔符弱化。
+    /// ⚠️ 必须是**一个 Text(RichText)**,不能改成一串 TagChip 委托 ——
+    /// EntryCard 的元信息行是 RowLayout,动态增删委托会让它的隐式尺寸失效
+    /// (清空标签后卡片会塌陷),详见 EntryCard.qml 的注释。
+    function tagRichText(names) {
+        if (!names || names.length === 0) return ""
+        const parts = []
+        for (let i = 0; i < names.length; ++i) {
+            const n = "" + names[i]
+            // 颜色值参与字符串拼接时由其 toString()(#rrggbb)承担
+            parts.push('<span style="color:' + tagColor(n) + '">' + escapeHtml(n) + '</span>')
+        }
+        return parts.join('<span style="color:' + colors.textTertiary + '"> · </span>')
+    }
+
+    /// 标签名是用户输入,进 RichText 前必须转义 —— 否则 `<b>` 之类会被当标记渲染
+    function escapeHtml(s) {
+        return ("" + s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     }
 
     // ---- 尺度(theme.md §11/14/16/24/26/39) ----

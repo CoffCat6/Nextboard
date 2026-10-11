@@ -18,7 +18,9 @@ Button {
     property string size: "normal"
     /// 图标/纯符号按钮:正方形(宽 = 高)
     property bool square: false
-    /// 可选图标(项目图标词汇,见 HeaderIcon.qml):"" / "translate" / "settings" / "pin"
+    /// 可选图标(项目图标词汇,见 HeaderIcon.qml):
+    /// "" / "translate" / "settings" / "pin" / "all" / "text" / "image" / "file"
+    /// / "chevron" / "pencil" / "trash"
     /// ⚠️ 不能叫 `icon` —— Basic 的 Button(AbstractButton)已有 `icon`(QQuickIcon),
     /// 且被声明为 FINAL,QML 里重新声明会直接让整个组件加载失败
     /// ("Cannot override FINAL property"),连带所有使用方一起失效(曾导致主面板空白)。

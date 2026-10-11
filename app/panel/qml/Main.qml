@@ -388,9 +388,15 @@ Rectangle {
                     // 计数来自 Core.counts(单一数据源 + countsChanged 通知)。
                     readonly property var count: Core.counts[viewId]
                     readonly property bool selected: tabs.current === tabDelegate.viewId
+                    /// 图标种类与 viewId 同源;"pinned" 复用图钉图标(与头部「固定」按钮同符号)。
+                    readonly property string iconKind:
+                        tabDelegate.viewId === "pinned" ? "pin" : tabDelegate.viewId
                     radius: Theme.metrics.radiusInput
                     height: Theme.metrics.navItemHeight
-                    width: tabLabel.implicitWidth + Theme.metrics.spacingLg + 6
+                    // 图标 + 间距 + 文字(与 ThemedButton 的 hasIcon 同口径)
+                    // + 左右内边距 + 左侧指示条占位。总内边距刻意与改造前一致(22px),
+                    // 免得 5 个标签页一起变宽把头部挤变形(Main.qml 的 PANEL_MIN_W 有下限)。
+                    width: tabInner.implicitWidth + 6 + 2 * Theme.metrics.spacingSm
                     color: selected ? Theme.colors.accentSoft
                          : tabMa.containsMouse ? Theme.colors.surfaceHover
                          : "transparent"
@@ -409,16 +415,30 @@ Rectangle {
                         radius: 1
                         color: Theme.colors.accent
                     }
-                    Text {
-                        id: tabLabel
+
+                    Row {
+                        id: tabInner
                         anchors.centerIn: parent
-                        text: tabDelegate.count !== undefined
-                              ? tabDelegate.label + " " + tabDelegate.count
-                              : tabDelegate.label
-                        color: tabDelegate.selected ? Theme.colors.textPrimary
-                             : Theme.colors.textSecondary
-                        font.family: Theme.fontFamily
-                        font.pixelSize: Theme.metrics.fontSecondary
+                        spacing: 6
+                        HeaderIcon {
+                            anchors.verticalCenter: parent.verticalCenter
+                            kind: tabDelegate.iconKind
+                            // 图标跟随文字色:选中态 textPrimary,未选中 textSecondary
+                            color: tabDelegate.selected ? Theme.colors.textPrimary
+                                                      : Theme.colors.textSecondary
+                            size: 14
+                        }
+                        Text {
+                            id: tabLabel
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: tabDelegate.count !== undefined
+                                  ? tabDelegate.label + " " + tabDelegate.count
+                                  : tabDelegate.label
+                            color: tabDelegate.selected ? Theme.colors.textPrimary
+                                 : Theme.colors.textSecondary
+                            font.family: Theme.fontFamily
+                            font.pixelSize: Theme.metrics.fontSecondary
+                        }
                     }
                     MouseArea {
                         id: tabMa
@@ -456,21 +476,48 @@ Rectangle {
                         id: tagChip
                         required property var modelData
                         readonly property bool active: root.activeTag === modelData.tag
+                        /// 标签自己的派生色:**与卡片上的同名标签同色**(同一纯函数、
+                        /// 无状态,筛选条与条目两端不可能取到不同值)。
+                        readonly property color tagFg: Theme.tagColor(modelData.tag)
                         height: 22
                         width: tagChipText.implicitWidth + 16
                         radius: Theme.metrics.radiusBadge
-                        color: active ? Theme.colors.accentSoft
-                             : tagChipMa.containsMouse ? Theme.colors.surfaceHover
+                        // 活跃态:文字用标签自己的色,底色**保持中性**(surfaceSecondary,
+                        // 与非活跃同底),靠"同色边框 + 色点实心"表达选中。
+                        //
+                        // ⚠️ 为什么不用"标签色半透明叠底"(更直觉的做法):浅色调色板是按
+                        // "在 surfaceSecondary 上 ≥ 4.7:1"定出来的,余量只有 0.2 —— 压一层
+                        // 同色相叠底会立刻跌破 4.5:1(实测最差 4.02)。要两者兼得只能把浅色
+                        // 调色板整体压暗,那又会让标签在卡片上显得沉重。故活跃态改由
+                        // 边框/色点承担(实测边框与底的 ΔE ≥ 58,足够醒目)。
+                        color: tagChipMa.containsMouse ? Theme.colors.surfaceHover
                              : Theme.colors.surfaceSecondary
                         border.width: Theme.metrics.borderWidth
-                        border.color: active ? Theme.colors.accent : Theme.colors.border
+                        border.color: tagChip.active ? tagChip.tagFg : Theme.colors.border
                         Behavior on color { ColorAnimation { duration: Theme.animation.fast } }
-                        Text {
+                        Behavior on border.color { ColorAnimation { duration: Theme.animation.fast } }
+                        Row {
                             id: tagChipText
                             anchors.centerIn: parent
-                            text: modelData.tag + " " + modelData.count
-                            font.pixelSize: Theme.metrics.fontCaption
-                            color: active ? Theme.colors.accent : Theme.colors.textSecondary
+                            spacing: 4
+                            // 色点:标签色在筛选条上的"锚",不依赖文字颜色即可对号入座。
+                            // 活跃态实心、非活跃态空心 —— 这样"选中"在灰度屏/色弱下也读得出
+                            // (只靠颜色深浅区分对色觉障碍不友好)。
+                            Rectangle {
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 6; height: 6; radius: 3
+                                color: tagChip.active ? tagChip.tagFg : "transparent"
+                                border.width: tagChip.active ? 0 : 1
+                                border.color: tagChip.tagFg
+                            }
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: tagChip.modelData.tag + " " + tagChip.modelData.count
+                                font.pixelSize: Theme.metrics.fontCaption
+                                // 活跃态用标签色,非活跃态中性灰:
+                                // 全部着色会盖住分类标签页的层级(§47 配色比例)
+                                color: tagChip.active ? tagChip.tagFg : Theme.colors.textSecondary
+                            }
                         }
                         MouseArea {
                             id: tagChipMa

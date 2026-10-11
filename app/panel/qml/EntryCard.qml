@@ -48,22 +48,77 @@ Rectangle {
         fileCopyTimer.stop()
     }
 
-    /// 卡片元信息行的操作按钮:小胶囊 + 悬停换底(§34,100~140ms)。
+    /// 卡片右下角的操作按钮,三种形态:
+    ///   iconName != "" && !showLabel  → **纯图标**(方形,宽=高;label 作 ToolTip)
+    ///   iconName != "" && showLabel   → 图标 + 文字
+    ///   iconName == ""                → 纯文字
+    ///
+    /// 本轮四个按钮全用纯图标:元信息行同排还压着 time/size/类型/固定/来源/标签徽标,
+    /// 按钮再带文字会把行宽顶爆;方形按钮(22)比原文字按钮(约 36)省 14px×4。
+    /// 认知成本由 ToolTip 补偿。
+    ///
+    /// ⚠️ `label` 与 `showLabel` 是两个东西:label 是**提示文案**(纯图标形态不渲染,
+    /// 只进 ToolTip);要不要把文字画出来由 showLabel 决定。两者混用会翻车 ——
+    /// 实测:首版用 `iconOnly = iconName !== "" && label === ""` 判定,而四个按钮都传了
+    /// label(给 ToolTip 用),iconOnly 恒 false → 全部退化为"图标+文字",
+    /// 展开/收起的 rotation:180 把文字也转倒了(用户看到"文字颠倒")。
+    ///
+    /// ⚠️ 图标属性叫 iconName 不能叫 `icon`:Basic 的 AbstractButton 已有 FINAL 的
+    /// `icon`,重声明会让组件加载失败(坑记在 ThemedButton.qml 注释里)。
+    /// ⚠️ 方形分支不能写 `? implicitHeight : undefined`:给 implicitWidth 赋 undefined
+    /// 会得到 "Unable to assign [undefined] to double",宽度失效为 0、按钮在布局里消失
+    /// (同一条坑也记在 ThemedButton.qml)。
     component CardAction: Rectangle {
         id: action
-        property string label: ""
+        property string label: ""          // ToolTip 文案;showLabel 时兼作渲染文本
+        property string iconName: ""       // "" = 纯文字按钮
+        property bool showLabel: false     // true = 渲染文字(图标+文字 / 纯文字形态)
+        property bool danger: false        // 危险操作(删除):悬停前景转 danger
+        /// 只翻转**图标**(展开/收起的方向切换)。⚠️ 不能转整个按钮:
+        /// rotation 在按钮上会把里面的文字一起倒置(实测用户反馈"文字颠倒")。
+        property real iconRotation: 0
         signal triggered()
-        implicitWidth: actionLabel.implicitWidth + 14
+        readonly property bool iconOnly: iconName !== "" && !showLabel
+        // 图标 12px(fontCaption 同号):纯图标时占满 22px 高,加文字时与文字同行
+        readonly property real iconSize: Theme.metrics.fontCaption
+        /// 按钮高度。⚠️ implicitWidth 不能写 `iconOnly ? implicitHeight : ...` ——
+        /// 同对象隐式尺寸互引会让布局拿不到确定值(实测 4 个按钮在 RowLayout 里
+        /// 全部叠到行中间,fillWidth spacer 失效);用同一常量显式写死。
+        readonly property int buttonHeight: 22
+        implicitWidth: iconOnly ? buttonHeight
+                     : (iconName !== "" ? iconSize + 4 : 0) + actionLabel.implicitWidth + 14
         radius: Theme.metrics.radiusBadge
-        implicitHeight: 22
+        implicitHeight: buttonHeight
+        // 悬停底色统一 accentSoft,**危险操作只换前景色**。
+        // ⚠️ 不能"底色也变 danger":红底 + 红图标/红字 = 全红一片,什么都看不见
+        //    (实测用户反馈"整体太红")。与其它按钮保持同一悬停语言,仅色相不同 ——
+        //    danger 前景压在 accentSoft 上对比度仍达标(浅 5.1:1 / 暗 4.6:1)。
         color: actionHover.containsMouse ? Theme.colors.accentSoft : Theme.colors.surfaceSecondary
         Behavior on color { ColorAnimation { duration: Theme.animation.fast } }
+
+        readonly property color _fg: actionHover.containsMouse
+             ? (action.danger ? Theme.danger : Theme.colors.accent)
+             : Theme.colors.textSecondary
+
+        HeaderIcon {
+            visible: action.iconName !== ""
+            kind: action.iconName
+            color: action._fg
+            size: action.iconSize
+            rotation: action.iconRotation
+            anchors.verticalCenter: parent.verticalCenter
+            x: action.iconOnly ? (parent.width - width) / 2 : 7
+            Behavior on color { ColorAnimation { duration: Theme.animation.fast } }
+        }
         Text {
             id: actionLabel
-            anchors.centerIn: parent
+            visible: action.showLabel && action.label !== ""
+            // 图标+文字形态下给图标让位;纯图标形态不渲染
+            x: action.iconName !== "" ? action.iconSize + 4 + 7 : 7
+            anchors.verticalCenter: parent.verticalCenter
             text: action.label
             font.pixelSize: Theme.metrics.fontCaption
-            color: actionHover.containsMouse ? Theme.colors.accent : Theme.colors.textSecondary
+            color: action._fg
         }
         MouseArea {
             id: actionHover
@@ -71,6 +126,49 @@ Rectangle {
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
             onClicked: action.triggered()
+        }
+        // 纯图标形态的认知补偿:悬停出文字提示。「展开/收起」的文案随 textExpanded
+        // 自动切换,无需额外状态。delay 防止扫过一排按钮时 tooltip 刷屏。
+        ToolTip.visible: action.iconOnly && actionHover.containsMouse
+        ToolTip.text: action.label
+        ToolTip.delay: 600
+    }
+
+    /// 元信息徽标:图标 + 文字(可选)。
+    ///
+    /// 图标与文字**同色**(调用方只给一个 fg),与"来源"徽标的既有口径一致:
+    /// 徽标是弱化的元信息(§40),不该出现第二种颜色。
+    /// 高度固定 22 与 CardAction 一致,元信息行不会因图标有无而参差。
+    component MetaBadge: Rectangle {
+        id: badge
+        /// HeaderIcon 的种类:"" = 纯文字徽标
+        property string iconKind: ""
+        property string label: ""
+        property color fg: Theme.colors.textSecondary
+        property color bg: Theme.colors.surfaceSecondary
+        implicitWidth: badgeRow.implicitWidth + 12
+        implicitHeight: 22
+        radius: Theme.metrics.radiusBadge
+        color: badge.bg
+        RowLayout {
+            id: badgeRow
+            anchors.centerIn: parent
+            spacing: 4
+            HeaderIcon {
+                visible: badge.iconKind !== ""
+                // 11px 与徽标文字同号:图标不高于文字,视觉上不被读成"按钮"
+                size: Theme.metrics.fontMicro
+                kind: badge.iconKind
+                color: badge.fg
+                Layout.alignment: Qt.AlignVCenter
+            }
+            Text {
+                visible: badge.label !== ""
+                text: badge.label
+                font.pixelSize: Theme.metrics.fontMicro
+                color: badge.fg
+                Layout.alignment: Qt.AlignVCenter
+            }
         }
     }
 
@@ -178,69 +276,98 @@ Rectangle {
             // 元数据弱化(§40:12px / TextSecondary)
             Label { text: root.timeText; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
             Label { text: root.sizeText; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
-            Label {
+
+            // 内容类型(§38 图标 + 文字):一眼可辨文本/图片/文件,
+            // 不必再逐张读卡片正文才知道是什么类型。
+            MetaBadge {
+                iconKind: root.kind
+                label: root.kind
+                fg: Theme.colors.textTertiary
+            }
+
+            // 固定:实心琥珀底保留其"状态标记"的地位(§40 warning 语义),
+            // 但补一个图钉图标 —— 只靠文字在扫视时不比类型徽标更醒目。
+            MetaBadge {
                 visible: root.pinned
-                text: "固定"; font.pixelSize: Theme.metrics.fontMicro
-                padding: 3; leftPadding: 6; rightPadding: 6
-                color: Theme.colors.onWarning
-                background: Rectangle { color: Theme.colors.warning; radius: Theme.metrics.radiusBadge }
+                iconKind: "pin"
+                label: "固定"
+                fg: Theme.colors.onWarning
+                bg: Theme.colors.warning
             }
-            Label {
+
+            // 来源徽标:图标与文字同色(色相表意与 Theme.colors.source* 一致)
+            MetaBadge {
                 visible: root.source !== "" && root.source !== "clipboard"
-                text: root.source; font.pixelSize: Theme.metrics.fontMicro
-                padding: 3; leftPadding: 6; rightPadding: 6
-                color: root.source === "capture" ? Theme.colors.sourceCapture
-                     : root.source === "translate" ? Theme.colors.sourceTranslate
-                     : root.source === "ocr" ? Theme.colors.sourceOcr
-                     : Theme.colors.textSecondary
-                background: Rectangle { color: Theme.colors.surfaceSecondary; radius: Theme.metrics.radiusBadge }
+                iconKind: root.source === "capture" ? "image"
+                        : root.source === "translate" ? "translate"
+                        : root.source === "ocr" ? "text" : ""
+                label: root.source
+                fg: root.source === "capture" ? Theme.colors.sourceCapture
+                  : root.source === "translate" ? Theme.colors.sourceTranslate
+                  : root.source === "ocr" ? Theme.colors.sourceOcr
+                  : Theme.colors.textSecondary
             }
-            Label {
-                text: root.kind; font.pixelSize: Theme.metrics.fontMicro
-                padding: 3; leftPadding: 6; rightPadding: 6
-                color: Theme.colors.textTertiary
-                background: Rectangle { color: Theme.colors.surfaceSecondary; radius: Theme.metrics.radiusBadge }
-            }
-            // 标签(S5.2):只读展示,编辑走右键菜单「标签…」。
-            // 用**单个 Label 拼接**而不是 Layout 里放 Repeater —— 在 RowLayout 中动态
+
+            // 标签(S5.2):每个标签用自己的派生色(RichText 单 Label,见下)。
+            // ⚠️ 用**单个 Label 拼接**而不是 Layout 里放 Repeater —— 在 RowLayout 中动态
             // 增删委托会让布局的隐式尺寸失效(清空标签后卡片会塌陷、内容不可见)。
+            // 上色因此走 RichText:textFormat 会吃掉 `text` 里的 HTML 标记,
+            // 但这恰好也断掉了"标签名被当标记渲染"的注入路径(Theme.tagRichText 仍显式转义)。
+            //
+            // 底色用**中性** surfaceSecondary(与类型/来源徽标同底),不用 accentSoft:
+            // 标签文字现在自带色相(橄榄/品红/青…),压在一层蓝色调底上会互相打架;
+            // 而且调色板的对比度是按中性底 surfaceSecondary 验的,换底即失效。
+            // 本处只表达"有哪些标签","筛选了哪个"由筛选条自己的边框/色点表达。
             Label {
                 visible: root.tags !== undefined && root.tags !== null && root.tags.length > 0
-                text: visible ? root.tags.join(" · ") : ""
+                text: visible ? Theme.tagRichText(root.tags) : ""
+                textFormat: Text.RichText
                 font.pixelSize: Theme.metrics.fontMicro
                 padding: 3; leftPadding: 6; rightPadding: 6
-                color: Theme.colors.accent
-                background: Rectangle { color: Theme.colors.accentSoft; radius: Theme.metrics.radiusBadge }
+                background: Rectangle { color: Theme.colors.surfaceSecondary; radius: Theme.metrics.radiusBadge }
             }
             Item { Layout.fillWidth: true }
 
-            // 展开/收起:仅文本被 4 行截断时显示(截断与否由 textBody 内部判定)
+            // 展开/收起:仅文本被 4 行截断时显示(截断与否由 textBody 内部判定)。
+            // 纯图标 + iconRotation 翻转:展开态箭头向下(点了收起),收起态向上 ——
+            // 只造一个 chevron 形,方向由状态翻转,不画两个图形。
+            // ⚠️ 必须用 iconRotation 而不是 rotation:后者会把按钮里的文字一起倒置
+            //    (实测用户反馈"展开图标的文字颠倒了")。
             CardAction {
                 Layout.alignment: Qt.AlignVCenter
                 visible: root.kind === "text"
                          && bodyLoader.item !== null
                          && bodyLoader.item.truncated === true
+                iconName: "chevron"
                 label: root.textExpanded ? "收起" : "展开"
+                iconRotation: root.textExpanded ? 0 : 180
                 onTriggered: root.textExpanded = !root.textExpanded
             }
 
-            // ---- 右下角快捷按钮 ----
-            // 贴图:图片直贴;文本渲染成位图后贴(文件条目无可贴内容,故隐藏)
+            // ---- 右下角快捷按钮(纯图标,悬停见 ToolTip) ----
+            // 贴图:图片直贴;文本渲染成位图后贴(文件条目无可贴内容,故隐藏)。
+            // 图标复用 pin 图钉 —— 与右键菜单「贴到屏幕」同一符号口径。
+            // 已知取舍:同排的「固定」徽标也是 pin,但那是琥珀实心胶囊,与这里的
+            // 中性方形按钮并排仍可辨;若后续实测仍混淆,改"浮层"造型(圆角矩形+右上斜箭头)。
             CardAction {
                 Layout.alignment: Qt.AlignVCenter
                 visible: root.kind !== "file"
+                iconName: "pin"
                 label: "贴图"
                 onTriggered: Core.pinEntry(root.entryId)
             }
             CardAction {
                 Layout.alignment: Qt.AlignVCenter
                 visible: root.kind === "image"
+                iconName: "pencil"
                 label: "编辑"
                 onTriggered: root.editEntryAfterHide()
             }
             CardAction {
                 Layout.alignment: Qt.AlignVCenter
+                iconName: "trash"
                 label: "删除"
+                danger: true
                 onTriggered: root.deleteEntryWithToast()
             }
         }
