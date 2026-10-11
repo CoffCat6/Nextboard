@@ -1,4 +1,4 @@
-// 单条历史卡片:文本 / 图片缩略图 / 文件路径三种形态 + 元信息行 + 右键菜单。
+// 单条历史卡片:文本 / 图片缩略图 / 文件路径 / 待办 四种形态 + 元信息行 + 右键菜单。
 // 角色名与 ClipEntryModel::roleNames 一一对应,由 ListView 按名注入。
 import QtQuick
 import QtQuick.Controls.Basic
@@ -18,9 +18,21 @@ Rectangle {
     required property bool pinned
     required property string source
     required property var tags      // QStringList → JS 数组(S5.2)
+    /// 待办扩展(docs/05-todo.md §6.3):仅 kind === "todo" 时有意义。
+    /// ⚠️ todoDueAt 必须是 real:unix 毫秒约 1.7e12,超出 QML int(2^31≈2.1e9),
+    ///    声明成 int 会饱和 → 截止日期显示成 1970 年附近(首版实测)。
+    required property real todoDueAt      // 截止毫秒;0 = 无截止
+    required property real todoRemindAt   // 提醒毫秒;0 = 无
+    required property bool todoDone
+    required property bool todoOverdue
 
     /// 文本条目是否展开显示全文(长文本默认折叠 4 行)。
     property bool textExpanded: false
+
+    /// 内容类型的界面文案:kind 是存库标识,徽标展示中文(与导航标签页同口径)。
+    readonly property string kindLabel:
+        kind === "text" ? "文本" : kind === "image" ? "图片"
+      : kind === "file" ? "文件" : kind === "todo" ? "待办" : kind
 
     /// 请求打开本条目的右键菜单。菜单由 Main.qml **统一持有**(全面板唯一实例),
     /// 这里只上抛一个内容快照 —— 委托被回收/重建也不影响已打开的菜单。
@@ -30,6 +42,9 @@ Rectangle {
     /// 正常路径下由 Main.qml 的外部点击屏障吃掉这次点击,不会走到这里;
     /// 这是防御分支(平台/事件路由差异时的兜底),保证既不会误复制、也不会卡住菜单。
     signal menuDismissRequested()
+
+    /// 待办的"编辑待办"按钮上抛(带正文/标签快照;时刻由 Main 侧走 todo_get 拉)。
+    signal todoEditRequested(var entry)
 
     /// 本条目的右键菜单是否已打开(父级注入):驱动"当前操作对象"高亮。
     property bool menuOpen: false
@@ -247,8 +262,13 @@ Rectangle {
                     kind: root.kind,
                     pinned: root.pinned,
                     text: root.text,
-                    tags: root.tags ? root.tags.join(",") : ""
+                    tags: root.tags ? root.tags.join(",") : "",
+                    // 待办态快照:菜单里「完成/取消完成」的文案与动作都靠它
+                    todoDone: root.todoDone
                 })
+            } else if (root.kind === "todo") {
+                // 待办单击 = 无动作:首版单击切换完成态,结果"点一下卡片看正文"
+                // 就把任务勾掉了(误触率过高)。完成态入口 = 左侧复选框 / 右键菜单。
             } else if (root.kind === "file") {
                 // 单击 = 复制(经 fileCopyTimer 延迟一拍);双击 = 打开文件
                 fileCopyTimer.restart()
@@ -273,16 +293,93 @@ Rectangle {
         RowLayout {
             Layout.fillWidth: true
             spacing: 10
+
+            // 待办复选框(§6.3):放元信息行最左 —— textBody 是 Loader 内的文本布局,
+            // 再包一层会牵连折叠/展开的宽度计算;最左位也是"勾选完成"高频操作的稳定落点。
+            // ⚠️ 独立 MouseArea 会吞掉点击:勾选不触发卡片动作。
+            Rectangle {
+                visible: root.kind === "todo"
+                Layout.preferredWidth: 18
+                Layout.fillHeight: true
+                color: "transparent"
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: 14; height: 14
+                    radius: Theme.metrics.radiusBadge
+                    color: root.todoDone ? Theme.colors.accent : "transparent"
+                    border.width: Theme.metrics.borderWidth
+                    border.color: root.todoDone ? Theme.colors.accent
+                                                : Theme.colors.borderStrong
+                    Behavior on color { ColorAnimation { duration: Theme.animation.fast } }
+                    // 对勾:两根短杆,仅完成态显示(与 HeaderIcon 的 todo 图标同形)
+                    Rectangle {
+                        visible: root.todoDone
+                        width: 6; height: 1.6; radius: 0.8
+                        x: 2.4; y: 7.4; rotation: 45
+                        color: Theme.colors.accentText
+                    }
+                    Rectangle {
+                        visible: root.todoDone
+                        width: 9; height: 1.6; radius: 0.8
+                        x: 4.6; y: 6.2; rotation: -45
+                        color: Theme.colors.accentText
+                    }
+                }
+                MouseArea {
+                    anchors.fill: parent
+                    anchors.margins: -4          // 命中区略大于视觉框(≥22px 见方)
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: Entries.todoSetDone(root.entryId, !root.todoDone)
+                }
+            }
+
             // 元数据弱化(§40:12px / TextSecondary)
             Label { text: root.timeText; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
             Label { text: root.sizeText; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
 
-            // 内容类型(§38 图标 + 文字):一眼可辨文本/图片/文件,
+            // 内容类型(§38 图标 + 文字):一眼可辨文本/图片/文件/待办,
             // 不必再逐张读卡片正文才知道是什么类型。
             MetaBadge {
                 iconKind: root.kind
-                label: root.kind
+                label: root.kindLabel
                 fg: Theme.colors.textTertiary
+            }
+
+            // 待办的截止/逾期(§6.3):
+            //   逾期未完成 → error 色 + "已逾期"(不带时长 —— 显示粒度只有
+            //   天/小时两级,不足 1 小时会被 Math.max 强制成"1 小时",
+            //   明明刚过点也显示"已逾期 1 小时",误导;且该文本不随时间
+            //   自动刷新,挂多久数字就旧多久。状态本身(红字)已足够醒目);
+            //   今天到期 → "今天 HH:mm";其余 → "截止 MM-dd HH:mm"。
+            //   done 后不再显示逾期(归档态弱化)。
+            Label {
+                visible: root.kind === "todo" && root.todoDueAt > 0
+                         && !(root.todoDone && root.todoOverdue)
+                text: {
+                    if (!root.todoDone && root.todoOverdue) {
+                        return "已逾期"
+                    }
+                    const d = new Date(root.todoDueAt)
+                    const today = new Date()
+                    if (d.getFullYear() === today.getFullYear()
+                            && d.getMonth() === today.getMonth()
+                            && d.getDate() === today.getDate()) {
+                        return "今天 " + Qt.formatDateTime(d, "HH:mm") + " 截止"
+                    }
+                    return "截止 " + Qt.formatDateTime(d, "MM-dd HH:mm")
+                }
+                font.pixelSize: Theme.metrics.fontMicro
+                color: root.todoOverdue && !root.todoDone ? Theme.colors.error
+                                                          : Theme.colors.textSecondary
+            }
+
+            // 待办的提醒时刻(§6.3):已设且未完成 → 一个铃铛徽标。
+            // (提醒/通知已合并为一个 UI 时刻,故只显示一枚,不再分两个通道。)
+            MetaBadge {
+                visible: root.kind === "todo" && root.todoRemindAt > 0 && !root.todoDone
+                iconKind: "bell"
+                label: "提醒 " + Qt.formatDateTime(new Date(root.todoRemindAt), "MM-dd HH:mm")
+                fg: Theme.colors.textSecondary
             }
 
             // 固定:实心琥珀底保留其"状态标记"的地位(§40 warning 语义),
@@ -363,6 +460,18 @@ Rectangle {
                 label: "编辑"
                 onTriggered: root.editEntryAfterHide()
             }
+            // 待办专属:编辑(复用新建卡片做编辑,整卡预填)。
+            // 与右键菜单「编辑待办…」同一语义;普通「编辑」按钮只对 image 有意义。
+            CardAction {
+                Layout.alignment: Qt.AlignVCenter
+                visible: root.kind === "todo"
+                iconName: "pencil"
+                label: "编辑待办"
+                onTriggered: root.todoEditRequested({
+                    entryId: root.entryId, kind: root.kind, text: root.text,
+                    tags: root.tags ? root.tags.join(",") : ""
+                })
+            }
             CardAction {
                 Layout.alignment: Qt.AlignVCenter
                 iconName: "trash"
@@ -390,6 +499,9 @@ Rectangle {
                 width: parent.width
                 text: root.text || root.preview || ""
                 color: Theme.colors.textPrimary
+                // 待办完成后正文划线 + 弱化(§6.3:归档展示)
+                font.strikeout: root.kind === "todo" && root.todoDone
+                opacity: root.kind === "todo" && root.todoDone ? 0.55 : 1.0
                 // 文件条目的正文就是**路径**(反斜杠、扩展名、中文目录名混排),
                 // 等宽下才逐字符可读、也与「复制路径」取到的字符串形态一致;
                 // 文本/图片条目是自然语言内容,保持界面正文字体。
@@ -421,6 +533,9 @@ Rectangle {
                     readOnly: true
                     wrapMode: TextEdit.WrapAnywhere
                     color: Theme.colors.textPrimary
+                    // 与折叠态同一口径:待办完成态划线 + 弱化
+                    font.strikeout: root.kind === "todo" && root.todoDone
+                    opacity: root.kind === "todo" && root.todoDone ? 0.55 : 1.0
                     // 与折叠态同一口径:文件条目按等宽渲染路径(见 collapsedText)
                     font.family: root.kind === "file" ? Theme.fontMono : Theme.fontFamily
                     font.pixelSize: Theme.metrics.fontBody

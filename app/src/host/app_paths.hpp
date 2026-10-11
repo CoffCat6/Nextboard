@@ -16,7 +16,14 @@
 namespace nb {
 
 /// 数据根目录绝对路径(exe 同级 `data`)。依赖 QCoreApplication 已构造。
+/// 若已用 `setAppDataDirOverride()` 指定(命令行 `--data-dir`,验收/多实例调试用),
+/// 返回该覆盖值。
 QString appDataDir();
+
+/// 覆盖数据目录(必须在任何 `appDataDir()` 调用**之前**,即 main 早期解析参数时)。
+/// 用途:自动化验收跑在独立临时目录,**绝不写用户真实数据**;
+/// 空串 = 恢复默认(exe 同级 data)。
+void setAppDataDirOverride(const QString& dir);
 
 /// 确保数据目录存在;成功或已存在返回 true。
 bool ensureAppDataDir();

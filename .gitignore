@@ -3,6 +3,8 @@ app/build
 build
 core/target
 dist
+# 待办交互验收（--todo-flow 未指定 --data-dir 时的兜底数据目录）
+acceptance-data
 /.workbuddy-ai
 .vscode
 /data

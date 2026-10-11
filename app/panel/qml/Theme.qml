@@ -133,19 +133,24 @@ QtObject {
         return h
     }
 
-    /// 标签行的富文本:每个标签用自己的颜色,分隔符弱化。
+    /// 标签行的富文本:每个标签 = **色点 + 名字**(同色),分隔符弱化。
     /// ⚠️ 必须是**一个 Text(RichText)**,不能改成一串 TagChip 委托 ——
     /// EntryCard 的元信息行是 RowLayout,动态增删委托会让它的隐式尺寸失效
     /// (清空标签后卡片会塌陷),详见 EntryCard.qml 的注释。
+    ///
+    /// 色点与筛选条(tagChip)同语言:筛选条用色点做"标签色的锚",卡片这边
+    /// 也在名字前放一枚同色点 —— 标签这才有可认的"图标",不再是一串和正文
+    /// 混在一起的彩色文字。
     function tagRichText(names) {
         if (!names || names.length === 0) return ""
         const parts = []
         for (let i = 0; i < names.length; ++i) {
             const n = "" + names[i]
             // 颜色值参与字符串拼接时由其 toString()(#rrggbb)承担
-            parts.push('<span style="color:' + tagColor(n) + '">' + escapeHtml(n) + '</span>')
+            parts.push('<span style="color:' + tagColor(n) + '">\u25CF '
+                       + escapeHtml(n) + '</span>')
         }
-        return parts.join('<span style="color:' + colors.textTertiary + '"> · </span>')
+        return parts.join('<span style="color:' + colors.textTertiary + '"> \u00B7 </span>')
     }
 
     /// 标签名是用户输入,进 RichText 前必须转义 —— 否则 `<b>` 之类会被当标记渲染

@@ -15,6 +15,11 @@ use crate::store::Db;
 /// 通知消息:WM_APP 基址 + 偏移。与 docs/02-migration-core.md §4.3 的表一致。
 pub const WM_APP_CLIP_CHANGED: u32 = 0x8000 + 1;
 pub const WM_APP_SETTINGS_CHANGED: u32 = 0x8000 + 2;
+/// 待办到点(remind/notify):只当信号,宿主收到后回查待播报列表(docs/05-todo.md §4.2)。
+///
+/// ⚠️ 取 +4 而非 +3:+3 已为 `CAPTURE_READY`(截图会话流)预留,虽暂未消费也是
+///    规划位;+10 已被单实例广播占用(`single_instance.cpp`)。
+pub const WM_APP_TODO_DUE: u32 = 0x8000 + 4;
 
 /// 通知宿主(若有):PostMessage 不阻塞、不跨线程持有宿主指针。
 /// 宿主收到后按拉模式回查核心(拉模式避免 FFI 回调的线程与重入问题)。

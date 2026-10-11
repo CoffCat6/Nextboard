@@ -8,13 +8,19 @@ use crate::error::{AppError, AppResult};
 /// 预览截断长度（设计文档 §5.3）。
 pub const PREVIEW_MAX_CHARS: usize = 200;
 
-/// 条目类型；DB 中存 `'text'` / `'image'` / `'file'`。
+/// 条目类型；DB 中存 `'text'` / `'image'` / `'file'` / `'todo'`。
+///
+/// ⚠️ 新增类型必须**三处同时**扩展(`as_str` / `parse` / `from_db`):`from_db` 漏了
+/// 会让老版本读新库时整表炸(FromSqlConversionFailure),发布说明须标注
+/// "先升 core 再升宿主,或同包升级"(本应用 exe 与 nbcore.dll 同目录,天然同步)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EntryKind {
     Text,
     Image,
     File,
+    /// 待办(docs/05-todo.md):主体是文本,携带 due/remind/notify 三组可选时刻。
+    Todo,
 }
 
 impl EntryKind {
@@ -23,6 +29,7 @@ impl EntryKind {
             EntryKind::Text => "text",
             EntryKind::Image => "image",
             EntryKind::File => "file",
+            EntryKind::Todo => "todo",
         }
     }
 
@@ -32,6 +39,7 @@ impl EntryKind {
             "text" => Ok(EntryKind::Text),
             "image" => Ok(EntryKind::Image),
             "file" => Ok(EntryKind::File),
+            "todo" => Ok(EntryKind::Todo),
             other => Err(AppError::InvalidInput(format!("未知条目类型: {other}"))),
         }
     }
@@ -41,6 +49,7 @@ impl EntryKind {
             "text" => Ok(EntryKind::Text),
             "image" => Ok(EntryKind::Image),
             "file" => Ok(EntryKind::File),
+            "todo" => Ok(EntryKind::Todo),
             other => Err(rusqlite::Error::FromSqlConversionFailure(
                 2,
                 rusqlite::types::Type::Text,
@@ -48,6 +57,20 @@ impl EntryKind {
             )),
         }
     }
+}
+
+/// 主列表联查下发的待办徽标(docs/05-todo.md §2.3):卡片正面只需完成态/截止/逾期
+/// 三样;remind/notify 不随行下发(编辑预填走 todo_get 单独取)。
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoBadge {
+    /// 截止时刻(unix 毫秒);None = 无截止。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<i64>,
+    /// 是否已完成(归档)。
+    pub done: bool,
+    /// 未完成且已过截止。
+    pub overdue: bool,
 }
 
 /// 跨 FFI 的条目结构，与第一代 `src/api/types.ts` 的 `ClipEntry` 镜像（编码规范 §1.5），
@@ -77,11 +100,17 @@ pub struct ClipEntry {
     /// 标签 JSON 数组字符串；v1 仅存储，过滤功能后续迭代。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<String>,
+    /// 待办徽标(docs/05-todo.md §2.3):list_entries 对 todo 条目 LEFT JOIN todo_meta
+    /// 联查所得;非 todo 条目与不联查的查询(get 单条等)恒为 None,序列化整键省略 ——
+    /// 与 tags 同一兼容手法,旧宿主读到多余键也只是忽略。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub todo: Option<TodoBadge>,
 }
 
 
 impl ClipEntry {
-    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+    /// 从行构造;按**列名**取值,便于 JOIN 查询复用(todo::list 等)。
+    pub(crate) fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
         let kind: String = row.get("kind")?;
         let file_paths: Option<String> = row.get("file_paths")?;
         let file_paths = file_paths
@@ -95,6 +124,12 @@ impl ClipEntry {
                 })
             })
             .transpose()?;
+        // 待办徽标列只在 list()/list_via_fts() 的联查里有;缺列(get 单条等)记 None。
+        // ⚠️ 这里按**列名**取值,缺列会返回 InvalidColumnName —— 用 ok() 吞成 None,
+        //    这正是"本查询没联查 todo_meta"的合法情形。
+        let is_todo = kind == EntryKind::Todo.as_str();
+        let due_at: Option<i64> = row.get("todo_due_at").ok().flatten();
+        let done_at: Option<i64> = row.get("todo_done_at").ok().flatten();
         Ok(ClipEntry {
             id: row.get("id")?,
             kind: EntryKind::from_db(&kind)?,
@@ -111,6 +146,15 @@ impl ClipEntry {
             last_used_at: row.get("last_used_at")?,
             source: row.get("source").unwrap_or_else(|_| "clipboard".to_owned()),
             tags: row.get("tags").ok(),
+            // todo 条目即使 meta 缺行(脏数据)也按"有徽标但无时刻"处理,
+            // 否则卡片会退化成普通文本卡(复选框消失),比丢时刻更难排查。
+            todo: is_todo.then_some(TodoBadge {
+                due_at,
+                done: done_at.is_some(),
+                // overdue 需要 now,from_row 拿不到 —— 由 list() 在返回前统一补算
+                // (见 stamp_todo_overdue),避免为一行数据把 now 透传进 SQL。
+                overdue: false,
+            }),
         })
     }
 }
@@ -124,6 +168,11 @@ pub struct EntryCounts {
     pub image: i64,
     pub file: i64,
     pub pinned: i64,
+    /// 待办未完成数(todo_meta.done_at IS NULL);导航"待办"页与角标显示用。
+    /// all 含已完成待办(它们仍是列表里的条目),故 todo_open ≤ all - text - image - file。
+    pub todo_open: i64,
+    /// 已完成的待办(归档,仍在列表里)。
+    pub todo_done: i64,
 }
 
 /// 生成文本预览：按字符截断（设计文档 §5.3）。
@@ -223,6 +272,16 @@ pub fn get(conn: &Connection, id: &str) -> AppResult<Option<ClipEntry>> {
     Ok(entry)
 }
 
+/// 给联查出的待办徽标补算逾期(from_row 没有 now,构造时只能置 false)。
+/// DB 存绝对毫秒,按当前时刻比较即可;done 的条目不算逾期(§3)。
+fn stamp_todo_overdue(items: &mut [ClipEntry], now: i64) {
+    for e in items.iter_mut() {
+        if let Some(badge) = e.todo.as_mut() {
+            badge.overdue = !badge.done && badge.due_at.is_some_and(|d| d < now);
+        }
+    }
+}
+
 /// 分页列出条目：固定优先、最近使用在后；`query` 非空时按文本内容或文件路径模糊匹配，
 /// `kind` / `pinned` / `tag` 为过滤条件（Phase 2 F3 / S5.2），可叠加。
 /// 返回 `(条目, 匹配总数)`。
@@ -248,7 +307,7 @@ pub fn list(
     // 兜底保证中文搜索行为不劣于迁移前。
     if let Some(term) = query.map(str::trim).filter(|q| !q.is_empty()) {
         if let Some(match_expr) = fts_expression(term) {
-            let (items, total) = list_via_fts(
+            let (mut items, total) = list_via_fts(
                 conn,
                 &match_expr,
                 kind_str.as_deref(),
@@ -257,25 +316,33 @@ pub fn list(
                 limit,
                 offset,
             )?;
+            stamp_todo_overdue(&mut items, crate::now_ms());
             if !items.is_empty() || total > 0 {
                 return Ok((items, total));
             }
         }
     }
 
+    // 待办扩展联查(docs/05-todo.md §2.3):主列表混排的待办卡片正面就要复选框/
+    // 截止/逾期,按条目二次拉取会让列表放大成 N 次 FFI 调用 —— LEFT JOIN 一次带出,
+    // 非 todo 条目的 todo 键为 NULL,序列化时整键省略(与 tags 同一兼容手法)。
     let pattern = query.map(like_pattern);
-    let items = conn
+    let mut items = conn
         .prepare(
-            "SELECT id, kind, text_content, blob_path, file_paths, width, height, hash, byte_size, preview, pinned, created_at, last_used_at, source, tags
-             FROM clip_entries
-             WHERE (?1 IS NULL OR text_content LIKE ?1 ESCAPE '\\'
-                    OR (kind = 'file' AND file_paths LIKE ?1 ESCAPE '\\')
-                    OR (kind = 'image' AND ocr_text LIKE ?1 ESCAPE '\\'))
-               AND (?2 IS NULL OR kind = ?2)
-               AND (?3 IS NULL OR pinned = ?3)
-               AND (?4 IS NULL OR EXISTS (SELECT 1 FROM json_each(clip_entries.tags)
+            "SELECT e.id, e.kind, e.text_content, e.blob_path, e.file_paths, e.width, e.height,
+                    e.hash, e.byte_size, e.preview, e.pinned, e.created_at, e.last_used_at,
+                    e.source, e.tags,
+                    m.due_at AS todo_due_at, m.done_at AS todo_done_at
+             FROM clip_entries e
+             LEFT JOIN todo_meta m ON m.id = e.id
+             WHERE (?1 IS NULL OR e.text_content LIKE ?1 ESCAPE '\\'
+                    OR (e.kind = 'file' AND e.file_paths LIKE ?1 ESCAPE '\\')
+                    OR (e.kind = 'image' AND e.ocr_text LIKE ?1 ESCAPE '\\'))
+               AND (?2 IS NULL OR e.kind = ?2)
+               AND (?3 IS NULL OR e.pinned = ?3)
+               AND (?4 IS NULL OR EXISTS (SELECT 1 FROM json_each(e.tags)
                                           WHERE json_each.value = ?4))
-             ORDER BY pinned DESC, last_used_at DESC
+             ORDER BY e.pinned DESC, e.last_used_at DESC
              LIMIT ?5 OFFSET ?6",
         )?
         .query_map(
@@ -283,14 +350,15 @@ pub fn list(
             ClipEntry::from_row,
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    stamp_todo_overdue(&mut items, crate::now_ms());
     let total: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM clip_entries
-         WHERE (?1 IS NULL OR text_content LIKE ?1 ESCAPE '\\'
-                OR (kind = 'file' AND file_paths LIKE ?1 ESCAPE '\\')
-                OR (kind = 'image' AND ocr_text LIKE ?1 ESCAPE '\\'))
-           AND (?2 IS NULL OR kind = ?2)
-           AND (?3 IS NULL OR pinned = ?3)
-           AND (?4 IS NULL OR EXISTS (SELECT 1 FROM json_each(clip_entries.tags)
+        "SELECT COUNT(*) FROM clip_entries e
+         WHERE (?1 IS NULL OR e.text_content LIKE ?1 ESCAPE '\\'
+                OR (e.kind = 'file' AND e.file_paths LIKE ?1 ESCAPE '\\')
+                OR (e.kind = 'image' AND e.ocr_text LIKE ?1 ESCAPE '\\'))
+           AND (?2 IS NULL OR e.kind = ?2)
+           AND (?3 IS NULL OR e.pinned = ?3)
+           AND (?4 IS NULL OR EXISTS (SELECT 1 FROM json_each(e.tags)
                                       WHERE json_each.value = ?4))",
         params![pattern, kind_str, pinned_i64, tag_str],
         |row| row.get(0),
@@ -314,9 +382,12 @@ fn list_via_fts(
     let items = conn
         .prepare(
             "SELECT e.id, e.kind, e.text_content, e.blob_path, e.file_paths, e.width, e.height,
-                    e.hash, e.byte_size, e.preview, e.pinned, e.created_at, e.last_used_at, e.source, e.tags
+                    e.hash, e.byte_size, e.preview, e.pinned, e.created_at, e.last_used_at,
+                    e.source, e.tags,
+                    m.due_at AS todo_due_at, m.done_at AS todo_done_at
              FROM clip_fts f
              JOIN clip_entries e ON e.id = f.entry_id
+             LEFT JOIN todo_meta m ON m.id = e.id
              WHERE clip_fts MATCH ?1
                AND (?2 IS NULL OR e.kind = ?2)
                AND (?3 IS NULL OR e.pinned = ?3)
@@ -409,8 +480,10 @@ pub fn counts(conn: &Connection) -> AppResult<EntryCounts> {
                 COALESCE(SUM(CASE WHEN kind = 'text' THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN kind = 'image' THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN kind = 'file' THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN pinned = 1 THEN 1 ELSE 0 END), 0)
-         FROM clip_entries",
+                COALESCE(SUM(CASE WHEN pinned = 1 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN kind = 'todo' AND done_at IS NULL THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN kind = 'todo' AND done_at IS NOT NULL THEN 1 ELSE 0 END), 0)
+         FROM clip_entries LEFT JOIN todo_meta ON todo_meta.id = clip_entries.id",
         [],
         |row| {
             Ok(EntryCounts {
@@ -419,6 +492,8 @@ pub fn counts(conn: &Connection) -> AppResult<EntryCounts> {
                 image: row.get(2)?,
                 file: row.get(3)?,
                 pinned: row.get(4)?,
+                todo_open: row.get(5)?,
+                todo_done: row.get(6)?,
             })
         },
     )?;
@@ -441,13 +516,19 @@ pub fn delete(conn: &Connection, id: &str) -> AppResult<Option<String>> {
     Ok(row.flatten())
 }
 
-/// 清空全部条目，返回所有图片文件路径供调用方删除文件。
+/// 清空全部**剪贴板**条目，返回所有图片文件路径供调用方删除文件。
+///
+/// ⚠️ 排除 kind='todo'(docs/05-todo.md §2.4):清空剪贴板历史不应误删用户任务。
+/// 待办的清理由 `todo::clear_done`(只清已完成)单独负责。
 pub fn clear(conn: &Connection) -> AppResult<Vec<String>> {
     let paths: Vec<String> = conn
-        .prepare("SELECT blob_path FROM clip_entries WHERE blob_path IS NOT NULL")?
+        .prepare(
+            "SELECT blob_path FROM clip_entries \
+             WHERE blob_path IS NOT NULL AND kind != 'todo'",
+        )?
         .query_map([], |row| row.get(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    conn.execute("DELETE FROM clip_entries", [])?;
+    conn.execute("DELETE FROM clip_entries WHERE kind != 'todo'", [])?;
     Ok(paths)
 }
 
@@ -540,15 +621,22 @@ pub fn set_ocr_text(conn: &Connection, id: &str, text: &str) -> AppResult<()> {
 
 /// 超限淘汰（设计文档 §5.3）：总数超过 `keep` 时，未固定条目按最近使用时间
 /// 从旧到新删除，返回被删条目的图片文件路径。
+///
+/// ⚠️ 待办(kind='todo')**不参与淘汰、也不计入上限**(docs/05-todo.md §2.4):
+/// 否则待办会被剪贴板历史上限静默吞掉,且上限会被用户任务永久占用。
 pub fn evict(conn: &Connection, keep: i64) -> AppResult<Vec<String>> {
-    let total: i64 = conn.query_row("SELECT COUNT(*) FROM clip_entries", [], |row| row.get(0))?;
+    let total: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM clip_entries WHERE kind != 'todo'",
+        [],
+        |row| row.get(0),
+    )?;
     let excess = total - keep;
     if excess <= 0 {
         return Ok(Vec::new());
     }
     let victims: Vec<(String, Option<String>)> = {
         let mut stmt = conn.prepare(
-            "SELECT id, blob_path FROM clip_entries WHERE pinned = 0
+            "SELECT id, blob_path FROM clip_entries WHERE pinned = 0 AND kind != 'todo'
              ORDER BY last_used_at ASC, created_at ASC LIMIT ?1",
         )?;
         // 先绑定到局部变量再出块，避免块尾临时值与 stmt 的借用冲突
@@ -649,6 +737,7 @@ mod tests {
             last_used_at: used,
             source: "clipboard".into(),
             tags: None,
+            todo: None,
         }
     }
 
@@ -1086,10 +1175,100 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM clip_fts", [], |row| row.get(0))
             .unwrap();
         assert_eq!(indexed, 1, "存量行应已被 rebuild 进索引");
-        // list() 面向**最新 schema**(v5 起含 source/tags 列):补到 v5 再验证可搜索性
+        // list() 面向**最新 schema**(v5 起含 source/tags,v6 起联查 todo_meta):
+        // 补到最新再验证可搜索性
         conn.execute_batch(crate::store::MIGRATION_V5).unwrap();
+        conn.execute_batch(crate::store::MIGRATION_V6).unwrap();
         let (items, _) = list(&conn, Some("legacy"), None, None, None, 10, 0).unwrap();
         assert_eq!(items.len(), 1, "迁移后存量数据应可被搜到");
+    }
+
+    /// **迁移**：v5 → v6 保留全部旧数据,且新类型可用(docs/05-todo.md §7.1)。
+    #[test]
+    fn migration_v6_preserves_rows_and_allows_todo() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        for m in [
+            crate::store::MIGRATION_V1,
+            crate::store::MIGRATION_V2,
+            crate::store::MIGRATION_V3,
+            crate::store::MIGRATION_V4,
+            crate::store::MIGRATION_V5,
+        ] {
+            conn.execute_batch(m).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO clip_entries
+                (id, kind, text_content, blob_path, file_paths, width, height, hash,
+                 byte_size, preview, pinned, created_at, last_used_at, source, tags, ocr_text)
+             VALUES ('t1', 'text', '旧文本', NULL, NULL, NULL, NULL, 'h1',
+                     9, '旧文本', 1, 100, 200, 'translate', '[\"旧标签\"]', '识别文字')",
+            [],
+        )
+        .unwrap();
+
+        conn.execute_batch(crate::store::MIGRATION_V6).unwrap();
+
+        // 旧行逐字段保留(重建表最容易漏列)
+        let row: (String, String, i64, String, String, Option<String>) = conn
+            .query_row(
+                "SELECT id, kind, pinned, source, tags, ocr_text FROM clip_entries WHERE id = 't1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "t1");
+        assert_eq!(row.1, "text");
+        assert_eq!(row.2, 1, "pinned 保留");
+        assert_eq!(row.3, "translate", "source 保留");
+        assert_eq!(row.4, "[\"旧标签\"]", "tags 保留");
+        assert_eq!(row.5.as_deref(), Some("识别文字"), "ocr_text 保留");
+
+        // 新类型可插入;未知类型仍被 CHECK 拒绝
+        conn.execute(
+            "INSERT INTO clip_entries
+                (id, kind, text_content, hash, byte_size, preview, pinned, created_at, last_used_at)
+             VALUES ('td', 'todo', '待办', 'todo:td', 6, '待办', 0, 1, 1)",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO clip_entries
+                    (id, kind, text_content, hash, byte_size, preview, pinned, created_at, last_used_at)
+                 VALUES ('x', 'html', 'x', 'h', 1, 'x', 0, 1, 1)",
+                [],
+            )
+            .is_err(),
+            "CHECK 应拒绝未知类型"
+        );
+
+        // FTS 触发器在重建后仍工作(插入新行应同步进索引)
+        let indexed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM clip_fts WHERE entry_id = 'td'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 1, "重建表后 FTS 触发器必须仍生效");
+
+        // 索引重建齐全
+        for idx in ["idx_entries_list", "idx_entries_hash", "idx_entries_kind", "idx_entries_source"] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name = ?1",
+                    [idx],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "{idx} 应已重建");
+        }
+
+        // 完整性自检
+        let ok: String = conn
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ok, "ok");
     }
 
     /// **迁移**：ocr_text 列存在且参与索引。

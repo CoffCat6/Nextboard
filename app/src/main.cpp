@@ -80,19 +80,49 @@ void onTerminate() {
 int main(int argc, char* argv[]) {
     // 隐藏自启参数(与第一代 --hidden 语义一致);
     // --software:强制 Qt Quick 用软件(CPU 光栅)后端,用于对比 GPU/RHI 相关内存。
+    // --data-dir <path>:覆盖数据目录,验收/多实例调试用 —— **必须在任何
+    //   appDataDir() 调用之前解析并生效**,否则会先落到真实数据目录。
     bool startHidden = false;
     bool softwareBackend = false;
+    bool ownDataDir = false;   // 显式 --data-dir:验收/调试,不参与单实例门禁
     for (int i = 1; i < argc; ++i) {
         const QString arg = QString::fromLocal8Bit(argv[i]);
         if (arg == QLatin1String("--hidden")) startHidden = true;
         else if (arg == QLatin1String("--software")) softwareBackend = true;
+        else if (arg == QLatin1String("--data-dir") && i + 1 < argc) {
+            nb::setAppDataDirOverride(QString::fromLocal8Bit(argv[++i]));
+            ownDataDir = true;
+        }
     }
 
-    SingleInstance instance;
-    if (!instance.ensure("NextboardSingleInstance")) {
-        // 已有实例:激活它的窗口后退出
-        instance.activateExisting();
-        return 0;
+    // 单实例门禁:同一数据目录只允许一个实例。
+    // ⚠️ 指定了 --data-dir 时**跳过**(验收/调试常与用户实例并存,且用的是
+    //    独立数据目录,不存在竞争;否则第二次验收启动会被门禁静默挡掉)。
+    // ⚠️ 验收模式(--todo-flow)会**写库**,若调用方忘了配 --data-dir,默认落到
+    //    真实数据目录里 —— 这里兜底切到独立目录,保证验收不污染用户数据。
+    //    目录固定在 **exe 同级**的 `acceptance-data`(不用临时目录:临时目录
+    //    受 TMP 环境变量影响,位置不确定,排查时反而找不到数据)。
+    if (!ownDataDir) {
+        for (int i = 1; i < argc; ++i) {
+            if (QString::fromLocal8Bit(argv[i]) == QLatin1String("--todo-flow")) {
+                const QString dir = QDir(QCoreApplication::applicationDirPath())
+                                        .filePath(QStringLiteral("acceptance-data"));
+                const bool created = QDir().mkpath(dir);
+                nb::setAppDataDirOverride(dir);
+                ownDataDir = true;
+                qWarning() << "验收模式(--todo-flow)未指定 --data-dir,已改用"
+                           << dir << "(建目录成功:" << created << ")以免污染真实数据";
+                break;
+            }
+        }
+    }
+    if (!ownDataDir) {
+        SingleInstance instance;
+        if (!instance.ensure("NextboardSingleInstance")) {
+            // 已有实例:激活它的窗口后退出
+            instance.activateExisting();
+            return 0;
+        }
     }
 
     QApplication app(argc, argv);
@@ -176,6 +206,7 @@ int main(int argc, char* argv[]) {
     //   (验收翻译页;原文非空会自动翻译,顺带覆盖译文区)。
     QString shotPath, queryText, translateText;
     bool openSettings = false;
+    bool todoFlow = false;
     for (int i = 1; i < argc; ++i) {
         const QString arg = QString::fromLocal8Bit(argv[i]);
         if (arg == QLatin1String("--screenshot") && i + 1 < argc)
@@ -186,6 +217,110 @@ int main(int argc, char* argv[]) {
             translateText = QString::fromLocal8Bit(argv[++i]);
         else if (arg == QLatin1String("--settings"))
             openSettings = true;
+        // 待办交互验收:走"新建卡片 → 开浮层 → 拨轮 → 确定 → 保存"整条链路,
+        // 结果(浮层几何/字段值/是否关闭)打日志供脚本断言。
+        else if (arg == QLatin1String("--todo-flow"))
+            todoFlow = true;
+    }
+    if (todoFlow) {
+        // 待办交互验收:分步驱动,每步读回状态打日志(脚本据此断言)。
+        // 目的:回归三个交互缺陷 —— ①浮层打不开(几何溢出面板)
+        // ②时间设了却保存不上(字段没写回)③必须点别处才关轮(确定无效)。
+        QTimer::singleShot(4000, &panel, [&panel] {
+            // 目标时间:明天 09:30(与"现在"明显不同,便于识别"没写回")
+            const QDateTime target = QDateTime(QDate::currentDate().addDays(1),
+                                               QTime(9, 30));
+            const qint64 ms = target.toMSecsSinceEpoch();
+
+            // ① 打开卡片 + 点「截止」字段(浮层保持打开以便观测几何)
+            panel.invokeAcceptance("acceptanceOpenPicker");
+            QTimer::singleShot(600, &panel, [&panel, ms, target] {
+                const QVariantMap st = panel.rootProperty("acceptanceState").toMap();
+                const bool insideX = st.value("pickerX").toDouble() >= 0
+                    && st.value("pickerX").toDouble() + st.value("pickerW").toDouble()
+                       <= st.value("overlayW").toDouble();
+                const bool insideY = st.value("pickerY").toDouble() >= 0
+                    && st.value("pickerY").toDouble() + st.value("pickerH").toDouble()
+                       <= st.value("overlayH").toDouble();
+                qInfo() << "STEP1 card:" << st.value("cardVisible").toBool()
+                        << "pickerVisible:" << st.value("pickerVisible").toBool()
+                        << "geom x/y/w/h/contentH:" << st.value("pickerX").toDouble()
+                        << st.value("pickerY").toDouble() << st.value("pickerW").toDouble()
+                        << st.value("pickerH").toDouble() << st.value("pickerContentH").toDouble()
+                        << "overlay w/h:" << st.value("overlayW").toDouble()
+                        << st.value("overlayH").toDouble()
+                        << "insideX:" << insideX << "insideY:" << insideY;
+
+                // ② 拨轮 → **真实点击「确定」** → 值应写回字段且浮层关闭
+                //    ⚠️ 三处关键:
+                //    a. 拨轮必须改 currentIndex(走 onCurrentIndexChanged →
+                //       rebuildFromTumblers → accepted 的真实链路),不能用
+                //       setFromMs(那是预填路径)—— 早先多版验收都用了预填
+                //       路径或直调 commit,把真 bug 掩盖了。
+                //    b. 点击必须投真实鼠标事件(QQuickWidget 层),直接调
+                //       onClicked 或 sendEvent 给 QQuickWindow 都绕过命中路径。
+                //    c. 预期值 = **今天 + 目标小时 + 打开时归位的分钟**
+                //       (拨的是"时"列;分/秒/毫秒仍是打开归位时的当前值),
+                //       不是原始 targetMs(明天 09:30)。
+                panel.setRootProperty("acceptanceTargetMs", QVariant(static_cast<double>(ms)));
+                panel.invokeAcceptance("acceptanceSetWheel");
+                const QDateTime now0 = QDateTime::currentDateTime();
+                // ⚠️ 分钟粒度截断(设计 §3:UI 按分钟选择):归位保留到分钟,
+                //    秒/毫秒清零 —— 预期值必须同口径,否则差几秒恒不匹配。
+                const QDateTime wheelExpected = QDateTime(
+                    QDate::currentDate(),
+                    QTime(target.time().hour(), now0.time().minute(), 0, 0));
+                const qint64 wheelMs = wheelExpected.toMSecsSinceEpoch();
+                const bool clicked = panel.clickByObjectName(QStringLiteral("todoPickerConfirm"));
+                qInfo() << "STEP2 clicked confirm:" << clicked
+                        << "expected wheelMs:" << wheelMs;
+                QTimer::singleShot(500, &panel, [&panel, wheelMs, target] {
+                    const QVariantMap st2 = panel.rootProperty("acceptanceState").toMap();
+                    const qint64 fieldMs =
+                        static_cast<qint64>(st2.value("dueFieldMs").toDouble());
+                    qInfo() << "STEP2 pickerClosed:" << !st2.value("pickerVisible").toBool()
+                            << "dueFieldMs:" << fieldMs << "expected:" << wheelMs
+                            << "match:" << (fieldMs == wheelMs && fieldMs > 0)
+                            << "remindAutoFilled(=due-10min):" << static_cast<qint64>(
+                                   st2.value("remindFieldMs").toDouble());
+
+                    // ③ 输入正文 → **真实点击「保存」** → 库中应有该条目
+                    panel.setRootProperty("acceptanceInputText",
+                                          QVariant(QStringLiteral("验收待办")));
+                    panel.invokeAcceptance("acceptanceSetText");
+                    const bool saved =
+                        panel.clickByObjectName(QStringLiteral("todoComposerSave"));
+                    qInfo() << "STEP3 clicked save:" << saved;
+                    QTimer::singleShot(1200, &panel, [&panel, fieldMs] {
+                        const QVariantMap st3 =
+                            panel.rootProperty("acceptanceState").toMap();
+                        qInfo() << "STEP3 composerClosed:"
+                                << !st3.value("cardVisible").toBool()
+                                << "errorText:" << st3.value("errorText").toString();
+                        const QVariantMap resp =
+                            nb::CoreFacade::instance().call("todo_list",
+                                                            QVariantMap{{"done", "all"}});
+                        const QVariantList items =
+                            resp.value("data").toMap().value("items").toList();
+                        qInfo() << "STEP4 persisted items:" << items.size();
+                        if (!items.isEmpty()) {
+                            const QVariantMap row = items.first().toMap();
+                            const qint64 due =
+                                static_cast<qint64>(row.value("dueAt").toDouble());
+                            // 期望值 = STEP2 读回的**字段值**(滚轮组合出的时刻),
+                            // 而不是原始 targetMs —— 拨轮只拨了"时"列,
+                            // 日期部分是打开时归位的"今天",两者本就不同。
+                            qInfo() << "STEP4 text:" << row.value("textContent").toString()
+                                    << "dueAt:" << due << "fieldMs:" << fieldMs
+                                    << "match:" << (due == fieldMs && fieldMs > 0)
+                                    << "remindAt:" << static_cast<qint64>(
+                                           row.value("remindAt").toDouble());
+                        }
+                        QApplication::quit();
+                    });
+                });
+            });
+        });
     }
     if (!shotPath.isEmpty()) {
         QTimer::singleShot(5000, &panel, [path = shotPath, queryText, openSettings,
@@ -211,6 +346,14 @@ int main(int argc, char* argv[]) {
     // 设置里改完快捷键后重新注册(信号由 CoreFacade 发出,避免它依赖 Hotkeys 实例)
     QObject::connect(&nb::CoreFacade::instance(), &nb::CoreFacade::hotkeysChanged,
                      &hotkeys, &nb::Hotkeys::applyFromSettings);
+
+    // 待办到点(remind/notify):托盘气泡 + 列表/角标刷新(docs/05-todo.md §4.3)。
+    // 面板**不自动弹出** —— 气泡点击才弹(§6.5,避免打扰)。
+    // ⚠️ 连接必须在 tray 构造之后(tray 是栈对象,先声明先构造)。
+    QObject::connect(&panel, &nb::PanelWindow::todoDue, &tray, &nb::Tray::onTodoDue);
+    // 气泡点击(QSystemTrayIcon::messageClicked)→ 弹面板并切"待办"视图
+    QObject::connect(&nb::CoreFacade::instance(), &nb::CoreFacade::todosRequested,
+                     &panel, &nb::PanelWindow::showCenteredOnTodos);
 
     // nbcore 通知 HWND = 主面板窗口;WM_APP → PanelWindow::clipChanged
     // → ClipEntryModel::refresh(200ms 去抖)。

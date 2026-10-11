@@ -15,6 +15,10 @@ class Tray : public QSystemTrayIcon {
 public:
     Tray(PanelWindow& panel, CoreBridge& core, QObject* parent = nullptr);
 
+    /// 待办到点(docs/05-todo.md §4.3):拉取待播报列表 → 逐条弹气泡 →
+    /// 回写"已播报"标记(宿主确认制去重,气泡只弹一次)。
+    void onTodoDue();
+
 private:
     void buildMenu();
 

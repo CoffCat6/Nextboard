@@ -43,6 +43,10 @@ public:
         FilePathsRole,   // QStringList
         BlobPathRole,
         TagsRole,        // QStringList(条目自身的标签)
+        TodoDueRole,     // 待办:截止时刻毫秒;非 todo / 无截止 = 0
+        TodoRemindRole,  // 待办:提醒时刻毫秒(编辑预填/推迟用);无 = 0
+        TodoDoneRole,    // 待办:是否已完成(划线归档)
+        TodoOverdueRole, // 待办:未完成且已过截止
     };
     Q_ENUM(Roles)
 
@@ -61,7 +65,7 @@ public:
     const QVariantList& tagStats() const { return m_tags; }
 
     // ---- QML 接口 ----
-    Q_INVOKABLE void setView(const QString& view);      // all|text|image|file|pinned
+    Q_INVOKABLE void setView(const QString& view);      // all|text|image|file|pinned|todo
     Q_INVOKABLE void setQuery(const QString& query);    // 搜索(防抖 200ms)
     Q_INVOKABLE void refresh();                         // 通知驱动(去抖 200ms)
     Q_INVOKABLE void refreshNow();                      // 立即重拉(打开面板/翻页后)
@@ -76,6 +80,20 @@ public:
     Q_INVOKABLE void setTag(const QString& tag);
     /// 覆盖设置条目的标签(S5.2);成功后重拉列表与标签统计。
     Q_INVOKABLE void saveTags(const QString& id, const QStringList& tags);
+    /// 待办完成态切换(docs/05-todo.md §5):成功后重拉列表并刷新计数。
+    Q_INVOKABLE void todoSetDone(const QString& id, bool done);
+    /// 只更新待办时刻(times 键:dueAt/remindAt/notifyAt,毫秒;null = 清空该时刻)。
+    /// 推迟/顺延用 —— 不动正文与标签。成功后重拉列表。
+    Q_INVOKABLE void todoUpdateTimes(const QString& id, const QVariantMap& times);
+    /// 新建/编辑待办:id 为空 = 新建,否则编辑;成功后重拉并返回 {ok, id?}。
+    /// ⚠️ 编辑时 tags **总是**下发(空数组 = 清空标签),否则"删光标签保存"会静默无效。
+    Q_INVOKABLE QVariantMap todoSave(const QString& id, const QString& text,
+                                     const QVariantMap& times, const QStringList& tags);
+    /// 待办编辑预填:{text, dueAt, remindAt, notifyAt}(毫秒,无则 0);
+    /// 非 todo / 不存在返回空 map(QML 侧判空)。
+    Q_INVOKABLE QVariantMap todoMeta(const QString& id);
+    /// 清空已完成的待办(归档清理)。
+    Q_INVOKABLE void todoClearDone();
     /// 面板**隐藏**时调用:清空全部行 —— QML 侧委托随之销毁,图片纹理一并释放;
     /// 期间拒绝一切刷新,避免隐藏时又被剪贴板通知填满(内存收口 S6.1/S6.3)。
     Q_INVOKABLE void release();
@@ -94,6 +112,9 @@ signals:
 private:
     void reload(int limit);            // 全量重拉(视图/搜索/刷新)
     void applyPage(const QVariantMap& resp, bool append);
+    /// 组装一次列表请求(query/tag/kind/pinned 与待办 done 口径都在这里统一)。
+    /// ⚠️ reload 与 fetchMore 必须共用本函数:两处各写一份曾导致翻页与首屏口径漂移。
+    QVariantMap buildListRequest(int limit, int offset) const;
     /// 重新拉取标签统计(与列表同源:applyPage 后刷新)。
     void refreshTags();
     /// 由 blob 路径拼出 file:// URL(thumb=true 时取同目录 .thumb<版本>.png 缩略图,
@@ -115,6 +136,12 @@ private:
         qint64 lastUsedAt = 0;
         qint64 byteSize = 0;
         bool pinned = false;
+        // 待办扩展(docs/05-todo.md §2.3):list_entries / todo_list 对 todo 条目下发;
+        // 非 todo 条目恒为默认值。
+        qint64 todoDueAt = 0;     // 0 = 无截止
+        qint64 todoRemindAt = 0;  // 0 = 无提醒
+        bool todoDone = false;
+        bool todoOverdue = false;
     };
     QVector<Row> m_rows;
     QString m_view = "all";

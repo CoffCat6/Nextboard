@@ -43,6 +43,10 @@ QVariant ClipEntryModel::data(const QModelIndex& index, int role) const {
         case FilePathsRole: return r.filePaths;
         case BlobPathRole: return r.blobPath;
         case TagsRole: return r.tags;
+        case TodoDueRole: return r.todoDueAt;
+        case TodoRemindRole: return r.todoRemindAt;
+        case TodoDoneRole: return r.todoDone;
+        case TodoOverdueRole: return r.todoOverdue;
     }
     return {};
 }
@@ -54,7 +58,34 @@ QHash<int, QByteArray> ClipEntryModel::roleNames() const {
         {TimeRole, "timeText"}, {SizeRole, "sizeText"}, {ByteSizeRole, "byteSize"},
         {PinnedRole, "pinned"}, {SourceRole, "source"}, {FilePathsRole, "filePaths"},
         {BlobPathRole, "blobPath"}, {TagsRole, "tags"},
+        {TodoDueRole, "todoDueAt"}, {TodoRemindRole, "todoRemindAt"},
+        {TodoDoneRole, "todoDone"}, {TodoOverdueRole, "todoOverdue"},
     };
+}
+
+QVariantMap ClipEntryModel::buildListRequest(int limit, int offset) const {
+    QVariantMap req{{"limit", limit}, {"offset", offset}};
+    // 待办视图走独立端点(todo_list):它的 kind 是隐含的,且排序口径不同
+    // (逾期>今日>未来>无期限,归档垫底,docs/05-todo.md §5)。
+    if (m_view == QLatin1String("todo")) {
+        // ⚠️ 取 all:完成的待办是归档不是删除,从待办页消失会像"数据丢了"。
+        req.insert("done", "all");
+    } else {
+        const QString kind = (m_view == QLatin1String("pinned")
+                              || m_view == QLatin1String("all"))
+                                 ? QString() : m_view;
+        if (!kind.isEmpty()) req.insert("kind", kind);
+        if (m_view == QLatin1String("pinned")) req.insert("pinned", true);
+    }
+    // 搜索/标签筛选与主列表同口径叠加(两个端点都认这两个键)
+    if (!m_query.trimmed().isEmpty()) req.insert("query", m_query);
+    if (!m_tag.isEmpty()) req.insert("tag", m_tag);
+    return req;
+}
+
+/// 列表端点:待办视图用 todo_list,其余用 list_entries。
+static const char* listMethodFor(const QString& view) {
+    return view == QLatin1String("todo") ? "todo_list" : "list_entries";
 }
 
 bool ClipEntryModel::canFetchMore(const QModelIndex& parent) const {
@@ -65,15 +96,10 @@ void ClipEntryModel::fetchMore(const QModelIndex& parent) {
     if (parent.isValid() || m_loading || m_released) return;
     m_loading = true;
     emit loadingChanged();
-    // 追加下一页;query/kind/pinned 语义与首屏一致
-    QVariantMap req{{"limit", m_limit}, {"offset", m_rows.size()}};
-    const QString kind = (m_view == QLatin1String("pinned") || m_view == QLatin1String("all"))
-                             ? QString() : m_view;
-    if (!kind.isEmpty()) req.insert("kind", kind);
-    if (m_view == QLatin1String("pinned")) req.insert("pinned", true);
-    if (!m_query.trimmed().isEmpty()) req.insert("query", m_query);
-    if (!m_tag.isEmpty()) req.insert("tag", m_tag);
-    const QVariantMap resp = CoreFacade::instance().call("list_entries", req);
+    // 追加下一页:请求口径与首屏完全一致(buildListRequest 单一来源)
+    const QVariantMap resp =
+        CoreFacade::instance().call(listMethodFor(m_view),
+                                    buildListRequest(m_limit, m_rows.size()));
     m_loading = false;
     emit loadingChanged();
     applyPage(resp, true);
@@ -185,6 +211,115 @@ void ClipEntryModel::refreshTags() {
     emit tagStatsChanged();
 }
 
+// ---- 待办(docs/05-todo.md §5/§6) ----
+
+/// times 里的时刻 → FFI 三态参数:键缺失/无效 = 不传(null),null/0 = 明确清空。
+static void applyTimeFields(QVariantMap& req, const QVariantMap& times, const QString& key) {
+    const QVariant v = times.value(key);
+    if (!v.isValid()) return;                        // 未提及:不动
+    if (v.isNull()) {                                // 显式清空
+        req.insert(key, QVariant());
+        return;
+    }
+    bool ok = false;
+    const qint64 ms = v.toLongLong(&ok);
+    if (ok && ms > 0) {
+        // ⚠️ 必须转成 double:QML 的 real 经 QVariant 过来是 double,直接塞
+        //    qint64 会被 JSON 序列化成字符串(实测),core 侧 as_i64() 拿不到。
+        req.insert(key, static_cast<double>(ms));
+    } else {
+        req.insert(key, QVariant());                 // 传 null = 清空该时刻
+    }
+}
+
+void ClipEntryModel::todoSetDone(const QString& id, bool done) {
+    const QVariantMap resp =
+        CoreFacade::instance().call("todo_set_done", {{"id", id}, {"done", done}});
+    if (!resp.value("ok").toBool()) {
+        emit toast(QStringLiteral("更新待办失败:%1").arg(
+            resp.value("error").toMap().value("message").toString()));
+        return;
+    }
+    reload(m_limit);   // 完成态影响排序(归档垫底)与计数,整体重拉
+}
+
+void ClipEntryModel::todoUpdateTimes(const QString& id, const QVariantMap& times) {
+    QVariantMap req{{"id", id}};
+    applyTimeFields(req, times, "dueAt");
+    applyTimeFields(req, times, "remindAt");
+    applyTimeFields(req, times, "notifyAt");
+    const QVariantMap resp = CoreFacade::instance().call("todo_update", req);
+    if (!resp.value("ok").toBool()) {
+        emit toast(QStringLiteral("推迟失败:%1").arg(
+            resp.value("error").toMap().value("message").toString()));
+        return;
+    }
+    reload(m_limit);
+}
+
+QVariantMap ClipEntryModel::todoSave(const QString& id, const QString& text,
+                                     const QVariantMap& times, const QStringList& tags) {
+    const bool editing = !id.isEmpty();
+    QVariantMap req;
+    req.insert("text", text);
+    if (editing) req.insert("id", id);
+    applyTimeFields(req, times, "dueAt");
+    applyTimeFields(req, times, "remindAt");
+    applyTimeFields(req, times, "notifyAt");
+    // ⚠️ 编辑时必须**无条件下发 tags**(空数组 = 明确清空):core 的 tags_opt 对
+    //    缺键视为"不改",不下发就删不掉标签(实测"编辑里删光标签保存"无效)。
+    if (editing || !tags.isEmpty()) {
+        req.insert("tags", tags);
+    }
+    const QVariantMap resp =
+        CoreFacade::instance().call(editing ? "todo_update" : "todo_create", req);
+    if (!resp.value("ok").toBool()) {
+        const QString msg = resp.value("error").toMap().value("message").toString();
+        emit toast(QStringLiteral("保存待办失败:%1").arg(msg));
+        // 把 core 的原文一并回传,让卡片错误行能显示具体原因(如正文超长)
+        return {{"ok", false}, {"message", msg}};
+    }
+    reload(m_limit);
+    return {{"ok", true},
+            {"id", resp.value("data").toMap().value("id").toString()}};
+}
+
+QVariantMap ClipEntryModel::todoMeta(const QString& id) {
+    if (id.isEmpty()) return {};
+    // 一次 todo_get 拿全:正文 + 三个时刻 + 标签(比在 m_rows 里翻更可靠 ——
+    // 条目可能被分页/筛选挡在列表外,那时行内查不到就会丢时刻)。
+    const QVariantMap resp = CoreFacade::instance().call("todo_get", {{"id", id}});
+    if (!resp.value("ok").toBool()) return {};
+    const QVariantMap data = resp.value("data").toMap();
+    if (data.isEmpty()) return {};
+    const QString kind = data.value("kind").toString();
+    if (kind != QLatin1String("todo")) return {};
+    QVariantMap out;
+    out.insert("text", data.value("textContent").toString());
+    out.insert("dueAt", static_cast<qint64>(data.value("dueAt").toDouble()));
+    out.insert("remindAt", static_cast<qint64>(data.value("remindAt").toDouble()));
+    out.insert("notifyAt", static_cast<qint64>(data.value("notifyAt").toDouble()));
+    // 标签以 JSON 数组字符串存库,这里解析成 QStringList 供输入框回填
+    const QString tagsJson = data.value("tags").toString();
+    QStringList tags;
+    if (!tagsJson.isEmpty()) {
+        const QJsonArray arr = QJsonDocument::fromJson(tagsJson.toUtf8()).array();
+        for (const QJsonValue& t : arr) tags.append(t.toString());
+    }
+    out.insert("tags", tags);
+    return out;
+}
+
+void ClipEntryModel::todoClearDone() {
+    const QVariantMap resp = CoreFacade::instance().call("todo_clear_done", {});
+    if (!resp.value("ok").toBool()) {
+        emit toast(QStringLiteral("清空已完成失败:%1").arg(
+            resp.value("error").toMap().value("message").toString()));
+        return;
+    }
+    reload(m_limit);
+}
+
 QString ClipEntryModel::imageUrlForBlob(const QString& blobPath, bool thumb) {
     if (blobPath.isEmpty()) return {};
     // blob 存的是相对 blobs 目录的路径;历史数据可能是绝对路径,两种都兼容。
@@ -219,19 +354,14 @@ void ClipEntryModel::reload(int limit) {
     if (m_loading) { m_debounce.start(); return; }  // 进行中:稍后重试
     m_loading = true;
     emit loadingChanged();
-    QVariantMap req{{"limit", m_limit}, {"offset", 0}};
-    const QString kind =
-        (m_view == QLatin1String("pinned") || m_view == QLatin1String("all")) ? QString() : m_view;
-    if (!kind.isEmpty()) req.insert("kind", kind);
-    if (m_view == QLatin1String("pinned")) req.insert("pinned", true);
-    if (!m_query.trimmed().isEmpty()) req.insert("query", m_query);
-    if (!m_tag.isEmpty()) req.insert("tag", m_tag);
     beginResetModel();
     m_rows.clear();
     m_total = 0;
     endResetModel();
     emit hasMoreChanged();
-    const QVariantMap resp = CoreFacade::instance().call("list_entries", req);
+    // 端点与请求口径都由统一函数决定(待办视图走 todo_list,见 buildListRequest)
+    const QVariantMap resp = CoreFacade::instance().call(listMethodFor(m_view),
+                                                        buildListRequest(m_limit, 0));
     m_loading = false;
     emit loadingChanged();
     applyPage(resp, false);
@@ -282,6 +412,17 @@ void ClipEntryModel::applyPage(const QVariantMap& resp, bool append) {
         if (!tagsJson.isEmpty()) {
             const QJsonArray arr = QJsonDocument::fromJson(tagsJson.toUtf8()).array();
             for (const QJsonValue& t : arr) r.tags.append(t.toString());
+        }
+        // 待办扩展(docs/05-todo.md §2.3):两个端点(list_entries / todo_list)都以
+        // **扁平条目 + todo 徽标**下发,这里一套解析通吃。
+        // ⚠️ 徽标键只在 todo 条目上出现;非 todo 条目保持默认零值。
+        if (r.kind == QLatin1String("todo")) {
+            const QVariantMap badge = e.value("todo").toMap();
+            r.todoDueAt = static_cast<qint64>(badge.value("dueAt").toDouble());
+            r.todoDone = badge.value("done").toBool();
+            r.todoOverdue = badge.value("overdue").toBool();
+            // 提醒时刻只有 todo_list / todo_get 下发(树标里没有):编辑预填要用
+            r.todoRemindAt = static_cast<qint64>(e.value("remindAt").toDouble());
         }
         rows.append(std::move(r));
     }

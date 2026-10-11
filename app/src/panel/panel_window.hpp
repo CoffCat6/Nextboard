@@ -8,6 +8,7 @@
 class QHBoxLayout;
 class QTimer;
 class QQuickWidget;
+class QQuickItem;
 
 namespace nb {
 
@@ -59,6 +60,32 @@ public:
     /// 自动化验收:打开设置抽屉(等价点「设置」按钮,验证懒构建链路)。
     void openSettingsPanel();
 
+    /// 弹面板并切到"待办"视图(docs/05-todo.md §4.3 气泡点击链路):
+    /// 居中显示 + 通知 QML 清搜索词并切视图。落点在 PanelWindow 是因为
+    /// "显示窗口"只有它有;视图切换由 QML 的 showTodos() 完成。
+    void showCenteredOnTodos();
+
+    /// 自动化验收:在 QML 根上调用一个**零参**验收函数。
+    /// ⚠️ 刻意不带参数:invokeMethod 按签名查找,带参与不带参是不同签名。
+    /// 参数走 PanelWindow::setRootProperty 写属性传递。
+    bool invokeAcceptance(const char* method);
+
+    /// 自动化验收:读 / 写 QML 根上的属性(传参 + 观测验收状态)。
+    QVariant rootProperty(const char* name) const;
+    bool setRootProperty(const char* name, const QVariant& value);
+
+    /// 自动化验收:在 QML 树中按 objectName 找项,**投递一次真实的左键按下+抬起**。
+    ///
+    /// 为什么必须投真实事件而不是直接调 onClicked:直接调会绕过按钮的命中测试
+    /// (是否被遮挡 / 是否 hit-testable / 是否被上层 MouseArea 吞掉),而这些
+    /// 恰恰是"点了没反应"类缺陷的所在 —— 早先用直调方法做验收,漏掉了
+    /// 「点确定无效」这个真 bug。
+    ///
+    /// 返回:是否找到目标且事件被派发(找不到返回 false)。
+    bool clickByObjectName(const QString& objectName);
+    /// 按 objectName 找项的**场景坐标中心**(找不到返回 false)。
+    bool itemCenterByObjectName(const QString& objectName, QPointF* centerOut) const;
+
     /// QML 侧 ESC 调用(关闭抽屉后的兜底隐藏)。
     Q_INVOKABLE void hidePanel() { hide(); }
 
@@ -86,6 +113,9 @@ protected:
 signals:
     /// 剪贴板变化(nbcore PostMessage 通知)→ 模型刷新。
     void clipChanged();
+    /// 待办到点(WM_APP_TODO_DUE):托盘据此拉取待播报列表弹气泡、
+    /// 列表模型据此重拉(docs/05-todo.md §4.3)。
+    void todoDue();
     /// "固定"状态变化(QML 按钮选中态)。
     void pinnedChanged();
     /// 面板被收起:QML 侧据此收掉瞬时 UI(右键菜单等),避免下次呼出时残留。
@@ -103,6 +133,12 @@ private:
     void placeAtCursor();
     /// 把窗口摆在光标所在屏的中央(并夹回可用区)。托盘等"人在别处"的入口用。
     void placeScreenCenter();
+    /// 验收专用:按 objectName 在**整棵场景树**里找项。
+    /// ⚠️ 根取窗口 contentItem 而非 QML rootObject:Popup 内容挂在 Overlay 层,
+    ///    是 rootObject 之外的兄弟子树,从 rootObject 递归找不到。
+    QQuickItem* findAcceptanceItem(const QString& objectName) const;
+    /// 验收专用:返回 scenePos 处**最顶层**的可交互项(递归探测,诊断"点了没反应")。
+    QQuickItem* topItemAt(QQuickItem* node, const QPointF& scenePos) const;
 
     CoreBridge& m_core;
     QQuickWidget* m_quick = nullptr;

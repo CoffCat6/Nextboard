@@ -73,6 +73,7 @@ qt_add_qml_module(nextboard
         panel/qml/SettingsDrawer.qml
         panel/qml/TranslateView.qml
         panel/qml/Theme.qml
+        panel/qml/TodoDatePicker.qml
 )
 
 target_include_directories(nextboard PRIVATE

@@ -5,7 +5,10 @@
 #include "panel/panel_window.hpp"
 
 #include <QApplication>
+#include <QDateTime>
 #include <QDebug>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <QMenu>
 #include <QStyle>
 #include <QTimer>
@@ -29,6 +32,12 @@ Tray::Tray(PanelWindow& panel, CoreBridge& core, QObject* parent)
     connect(this, &QSystemTrayIcon::activated, this, [this](ActivationReason reason) {
         if (reason == QSystemTrayIcon::Trigger || reason == QSystemTrayIcon::DoubleClick)
             m_panel.showCentered();
+    });
+    // 气泡点击 → 弹面板并切到"待办"视图(§4.3)。⚠️ messageClicked 在部分
+    // Win10/11 环境不触发(系统通知中心设置/免打扰);那时气泡本身已起到提示作用,
+    // 用户从托盘图标也能打开面板看到角标 —— 冒烟清单覆盖这条降级路径。
+    connect(this, &QSystemTrayIcon::messageClicked, this, [] {
+        CoreFacade::instance().showCenteredOnTodos();
     });
     show();
 }
@@ -117,6 +126,37 @@ void Tray::buildMenu() {
     m_menu->addAction(QStringLiteral("退出"), [] {
         QApplication::quit();
     });
+}
+
+void Tray::onTodoDue() {
+    // 拉取"已到点但还没播报过"的待办(宿主确认制:气泡被用户关掉也不再重复弹,
+    // 但面板角标仍会亮 —— 两层去重的第二层,见 docs/05-todo.md §4.2)。
+    const QJsonObject resp = m_core.call("todo_due_pending");
+    if (!resp.value("ok").toBool()) return;
+    const QJsonArray items = resp.value("data").toArray();
+    if (items.isEmpty()) return;
+
+    QStringList shownIds;
+    for (const QJsonValue& v : items) {
+        const QJsonObject item = v.toObject();
+        const QString id = item.value("id").toString();
+        const QString text = item.value("text").toString();
+        const qint64 at = static_cast<qint64>(item.value("at").toDouble());
+        const bool missed = item.value("missed").toBool();
+        // 标题 = 正文首行截 24 字(多行正文塞进气泡标题会被系统截断成乱码观感)
+        QString title = text.section(QLatin1Char('\n'), 0, 0).left(24);
+        if (missed) title = QStringLiteral("错过的提醒:") + title;
+        const QString body = QStringLiteral("截止 %1,点击查看")
+                                 .arg(QDateTime::fromMSecsSinceEpoch(at)
+                                          .toString(QStringLiteral("MM-dd HH:mm")));
+        showMessage(title, body, QSystemTrayIcon::Information, 8000);
+        shownIds.append(id);
+    }
+    if (!shownIds.isEmpty()) {
+        QJsonArray ids;
+        for (const QString& id : shownIds) ids.append(id);
+        m_core.call("todo_due_mark_shown", QJsonObject{{"ids", ids}});
+    }
 }
 
 } // namespace nb

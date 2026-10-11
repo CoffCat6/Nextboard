@@ -15,6 +15,7 @@ pub mod ocr;
 pub mod screen;
 pub mod settings;
 pub mod store;
+pub mod todo;
 pub mod translate;
 
 /// 初始化日志(log crate → 数据目录 nbcore.log)。

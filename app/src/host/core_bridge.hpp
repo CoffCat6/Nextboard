@@ -28,6 +28,10 @@ namespace nb {
 // nbcore 通知消息(与 core/nbcore/src/core.rs 对应)
 constexpr UINT WM_APP_CLIP_CHANGED = 0x8000 + 1;
 constexpr UINT WM_APP_SETTINGS_CHANGED = 0x8000 + 2;
+/// 待办到点(remind/notify):只当信号,宿主收到后 `call("todo_due_pending")`
+/// 拉取待播报列表(docs/05-todo.md §4.2;⚠️ 常量必须与 core 侧同步)。
+/// 取 +4 而非 +3:+3 为 CAPTURE_READY 预留。
+constexpr UINT WM_APP_TODO_DUE = 0x8000 + 4;
 
 /// nbcore.dll 加载与调用。进程内单份;失败时 ok()=false 且 lastError 有原因。
 class CoreBridge {

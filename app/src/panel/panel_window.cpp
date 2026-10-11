@@ -9,6 +9,7 @@
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QMetaObject>
+#include <QMouseEvent>
 #include <QQmlContext>
 #include <QQmlEngine>
 #include <QQuickItem>
@@ -253,6 +254,136 @@ void PanelWindow::openSettingsPanel() {
         QMetaObject::invokeMethod(qobject_cast<QObject*>(m_quick->rootObject()), "openSettings");
 }
 
+void PanelWindow::showCenteredOnTodos() {
+    // 先切回列表形态(面板可能停在翻译页),再居中弹出并让 QML 切到待办视图。
+    // ⚠️ 顺序要紧:setMode(Translate 之外的形态)会重设窗口尺寸/下限,
+    //    放在 show 之前可以避免"先按旧尺寸显示再跳一下"。
+    setMode(Mode::List);
+    showCentered();
+    // QML 侧 showTodos():清搜索词(残留关键词会把待办过滤掉)+ 切"待办"视图 + 重拉
+    if (m_quick && m_quick->rootObject())
+        QMetaObject::invokeMethod(qobject_cast<QObject*>(m_quick->rootObject()), "showTodos");
+}
+
+bool PanelWindow::invokeAcceptance(const char* method) {
+    if (!m_quick || !m_quick->rootObject()) return false;
+    return QMetaObject::invokeMethod(qobject_cast<QObject*>(m_quick->rootObject()), method);
+}
+
+QVariant PanelWindow::rootProperty(const char* name) const {
+    if (!m_quick || !m_quick->rootObject()) return {};
+    return m_quick->rootObject()->property(name);
+}
+
+bool PanelWindow::setRootProperty(const char* name, const QVariant& value) {
+    if (!m_quick || !m_quick->rootObject()) return false;
+    return m_quick->rootObject()->setProperty(name, value);
+}
+
+namespace {
+/// 深度优先在 QQuickItem 子树里按 objectName 找项(QML 侧没有 findChild)。
+QQuickItem* findItemByName(QQuickItem* node, const QString& name) {
+    if (!node) return nullptr;
+    if (node->objectName() == name) return node;
+    const QList<QQuickItem*> kids = node->childItems();
+    for (QQuickItem* kid : kids) {
+        if (QQuickItem* hit = findItemByName(kid, name)) return hit;
+    }
+    return nullptr;
+}
+} // namespace
+
+bool PanelWindow::itemCenterByObjectName(const QString& objectName, QPointF* centerOut) const {
+    QQuickItem* target = findAcceptanceItem(objectName);
+    if (!target) return false;
+    // scenePos 即窗口内坐标(scene == window contents,见 clickByObjectName 注释)
+    const QPointF topLeft = target->mapToScene(QPointF(0, 0));
+    if (centerOut) *centerOut = topLeft + QPointF(target->width() / 2, target->height() / 2);
+    return true;
+}
+
+QQuickItem* PanelWindow::findAcceptanceItem(const QString& objectName) const {
+    if (!m_quick || !m_quick->rootObject()) return nullptr;
+    QQuickWindow* win = m_quick->quickWindow();
+    if (!win) return nullptr;
+    // ⚠️ 根必须是窗口的 contentItem,不是 QML rootObject:
+    //    Popup 的 contentItem 挂在 **Overlay 层**(contentItem 之外的兄弟子树),
+    //    从 rootObject 递归找不到浮层里的按钮(实测 "找不到 objectName")。
+    //    从 contentItem 出发能覆盖普通内容 + Overlay + 所有 popup。
+    return findItemByName(win->contentItem(), objectName);
+}
+
+bool PanelWindow::clickByObjectName(const QString& objectName) {
+    QQuickItem* target = findAcceptanceItem(objectName);
+    if (!target) {
+        qWarning() << "验收:找不到 objectName" << objectName;
+        return false;
+    }
+    QQuickWindow* win = m_quick->quickWindow();
+    if (!win) return false;
+    // QQuickWindow 的场景坐标系原点 = 窗口内容区左上角,与投递到窗口的
+    // QMouseEvent 使用的坐标一致 → mapToScene 的结果可直接用,**不要**再减
+    // win->x()/y()(那是窗口在屏幕上的位置,减了会得到负数,实测 -2517)。
+    const QPointF local = target->mapToScene(QPointF(0, 0))
+                          + QPointF(target->width() / 2, target->height() / 2);
+    qInfo() << "验收点击" << objectName << "local=" << local
+            << "size=" << target->width() << target->height()
+            << "visible=" << target->isVisible() << "enabled=" << target->isEnabled()
+            << "opacity=" << target->opacity();
+
+    // ---- 探针:该点上真正"最顶层"的项是谁 ----
+    // 两套判据:
+    //  ① childAt:Qt 官方命中测试(递归找可见项,与事件派发同源,最可信)
+    //  ② 自研 topItemAt:按"可见 + contains"递归
+    QQuickItem* top = win->contentItem()->childAt(local.x(), local.y());
+    if (top) {
+        const QPointF topPos = top->mapToScene(QPointF(0, 0));
+        qInfo() << "验收探针①childAt =" << top->metaObject()->className()
+                << "objectName:" << top->objectName()
+                << "scene:" << topPos << "size:" << top->width() << top->height()
+                << "是目标/目标祖先? " << (top == target
+                    || top->isAncestorOf(target)
+                    || target->isAncestorOf(top));
+        QQuickItem* top2 = topItemAt(win->contentItem(), local);
+        if (top2) {
+            qInfo() << "验收探针②自研 =" << top2->metaObject()->className()
+                    << "objectName:" << top2->objectName()
+                    << "是目标/目标祖先? " << (top2 == target
+                        || top2->isAncestorOf(target)
+                        || target->isAncestorOf(top2));
+        }
+    } else {
+        qInfo() << "验收探针 = <null>(该点无可见项)";
+    }
+
+    // ⚠️ 注入方式:把事件发给 **QQuickWidget**(QWidget 层)而不是直接塞给
+    //    QQuickWindow —— QQuickWidget 会像收到真实系统鼠标一样把事件转发进
+    //    QML 场景(含 DeliveryAgent 的抓取/命中链)。直接 sendEvent 给
+    //    QQuickWindow 会绕过窗口系统的鼠标状态,事件被 Overlay 的 popup 容器
+    //    拦下而不落到按钮(实测:按钮永远点不着,连卡片上的「保存」也一样)。
+    //    坐标:QQuickWidget 铺满面板,场景坐标即 widget 局部坐标。
+    QMouseEvent press(QEvent::MouseButtonPress, local, m_quick->mapToGlobal(local),
+                      Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QMouseEvent release(QEvent::MouseButtonRelease, local, m_quick->mapToGlobal(local),
+                        Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(m_quick, &press);
+    QCoreApplication::sendEvent(m_quick, &release);
+    return true;
+}
+
+QQuickItem* PanelWindow::topItemAt(QQuickItem* node, const QPointF& scenePos) const {
+    if (!node || !node->isVisible() || node->opacity() <= 0) return nullptr;
+    // 只看"包含该点"的子树(与 QQuickWindow 的命中测试同序:后声明的在上)
+    const QPointF local = node->mapFromScene(scenePos);
+    if (!node->contains(local)) return nullptr;
+    const QList<QQuickItem*> kids = node->childItems();
+    for (int i = kids.size() - 1; i >= 0; --i) {
+        if (QQuickItem* hit = topItemAt(kids[i], scenePos)) return hit;
+    }
+    // 叶子或"子项都不含"的节点:只要它自己能收鼠标就算命中
+    return node;
+}
+
 void PanelWindow::showEvent(QShowEvent* e) {
     QWidget::showEvent(e);
     logMemory("panel-show");
@@ -288,6 +419,13 @@ bool PanelWindow::nativeEvent(const QByteArray& eventType, void* message, qint64
         }
         if (msg->message == nb::WM_APP_SETTINGS_CHANGED) {
             emit clipChanged(); // 设置变化也刷新一次(监听开关等影响列表)
+            if (result) *result = 0;
+            return true;
+        }
+        // 待办到点:只当信号,payload(哪条待办/什么正文)由接收方拉取
+        // (与 CLIP_CHANGED 同哲学,不往 PostMessage 塞指针 —— §4.2)
+        if (msg->message == nb::WM_APP_TODO_DUE) {
+            emit todoDue();
             if (result) *result = 0;
             return true;
         }

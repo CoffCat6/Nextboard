@@ -2,6 +2,7 @@
 //! 平移自 clipboard-plus src-tauri/src/store,零逻辑改动(02-migration-core.md §2.1)。
 
 pub mod entry;
+pub mod todo;
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -35,8 +36,11 @@ const MIGRATION_V4: &str = include_str!("migrations/v4.sql");
 /// v5:一体化素材库扩展(source 来源标记 + tags 标签,Nextboard 架构 §6)。
 const MIGRATION_V5: &str = include_str!("migrations/v5.sql");
 
+/// v6:待办(Todo)类型(kind 增 'todo',重建表)+ todo_meta 扩展表(docs/05-todo.md §2)。
+pub(crate) const MIGRATION_V6: &str = include_str!("migrations/v6.sql");
+
 /// 当前库结构版本;新增迁移时递增并追加执行分支。
-const LATEST_VERSION: i64 = 5;
+const LATEST_VERSION: i64 = 6;
 
 /// 打开(或创建)数据库文件,启用 WAL 并执行迁移。
 pub fn open(path: &Path) -> AppResult<rusqlite::Connection> {
@@ -64,6 +68,9 @@ pub fn migrate(conn: &mut rusqlite::Connection) -> AppResult<()> {
     }
     if version < 5 {
         conn.execute_batch(MIGRATION_V5)?;
+    }
+    if version < 6 {
+        conn.execute_batch(MIGRATION_V6)?;
     }
     if version < LATEST_VERSION {
         conn.pragma_update(None, "user_version", LATEST_VERSION)?;

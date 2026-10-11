@@ -158,6 +158,12 @@ void qmlAttachPanel(PanelWindow* panel) {    if (!panel) return;
     auto* lifecycle = new PanelListLifecycle(panel, s_entries);
     panel->installEventFilter(lifecycle);
     QObject::connect(panel, &PanelWindow::modeChanged, panel, [lifecycle] { lifecycle->sync(); });
+    // 待办到点 → 列表与角标立即重拉(docs/05-todo.md §4.3)。
+    // ⚠️ 走 refreshNow 绕开 200ms 去抖:提醒到点后角标/列表晚半秒,
+    //    用户会读成"提示了但列表里没有"。
+    QObject::connect(panel, &PanelWindow::todoDue, panel, [model] {
+        model->refreshNow();
+    });
 }
 
 } // namespace nb

@@ -118,6 +118,9 @@ public:
     /// 用指定原文进入翻译页(条目右键「翻译」入口)。
     Q_INVOKABLE void openTranslateWith(const QString& text) { emit translatePrefill(text); }
 
+    /// 请求弹面板并切到"待办"视图(docs/05-todo.md §4.3:气泡点击链路)。
+    Q_INVOKABLE void showCenteredOnTodos() { emit todosRequested(); }
+
     /// 请求重新注册全局快捷键(设置里改完热键后调用)。
     /// 本类不认识 Hotkeys 实例,故只发信号,由 main.cpp 接线。
     Q_INVOKABLE void reloadHotkeys() { emit hotkeysChanged(); }
@@ -139,6 +142,8 @@ signals:
     void translatePrefill(const QString& text);
     /// 同 translatePrefill,但要求居中显示(托盘链路)。
     void translatePrefillCentered(const QString& text);
+    /// 请求弹面板并切到"待办"视图(气泡点击 / 托盘角标链路)。
+    void todosRequested();
     void themeChanged();
 
 public:

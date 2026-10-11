@@ -17,8 +17,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use base64::Engine as _;
 
 use crate::core::{notify_host, CoreConfig, WM_APP_CLIP_CHANGED};
-use crate::error::AppError;
+use crate::error::{AppError, AppResult};
 use crate::store::entry::{self, EntryKind};
+use crate::store::todo;
 
 /// 成功码;NB_ERR 为通用失败(详情见响应 JSON 的 error 字段)。
 const NB_OK: i32 = 0;
@@ -82,6 +83,8 @@ pub unsafe extern "C" fn nb_init(config_json: *const c_char) -> i32 {
         // 缩略图回填需要 'static Core;init 成功后 Core::get 恒可用
         if let Ok(core) = crate::core::Core::get() {
             crate::clip::spawn_thumbnail_backfill(core);
+            // 待办调度线程:轮询 remind/notify 到点(docs/05-todo.md §4.1)
+            crate::todo::spawn_scheduler(core);
         }
         log::info!("nb_init complete");
         Ok(())
@@ -379,6 +382,9 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
             let core = crate::core::Core::get()?;
             let id = str_req(req, "id")?;
             let db = core.db.lock()?;
+            // 待办的扩展行随条目一起删(非 todo 条目无 meta,静默通过),
+            // 否则 todo_meta 会留下孤儿行、counts 的 CASE 也会算错。
+            todo::delete_meta(&db, &id)?;
             let blob = entry::delete(&db, &id)?;
             if let Some(path) = blob {
                 crate::clip::remove_blob(&crate::clip::resolve_blob_path(&core.blobs_dir, &path));
@@ -567,6 +573,124 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
             Ok(serde_json::json!({ "entry": stored }))
         }
 
+        // ---- 待办(docs/05-todo.md §5) ----
+        // 业务语义见 store::todo;本层只做参数解包与响应装配。
+        "todo_create" => {
+            let core = crate::core::Core::get()?;
+            let text = str_req(req, "text")?;
+            let due_at = ms_opt(req, "dueAt")?;
+            let remind_at = ms_opt(req, "remindAt")?;
+            let notify_at = ms_opt(req, "notifyAt")?;
+            let tags = tags_opt(req)?;
+            let id = {
+                let mut db = core.db.lock()?;
+                todo::create(&mut db, &text, due_at, remind_at, notify_at, tags, crate::now_ms())?
+            };
+            notify_host(WM_APP_CLIP_CHANGED); // 列表新增条目,复用既有刷新信号
+            Ok(serde_json::json!({ "id": id }))
+        }
+        "todo_update" => {
+            let core = crate::core::Core::get()?;
+            let id = str_req(req, "id")?;
+            let text = str_opt(req, "text");
+            let due_at = ms_opt_opt(req, "dueAt")?;
+            let remind_at = ms_opt_opt(req, "remindAt")?;
+            let notify_at = ms_opt_opt(req, "notifyAt")?;
+            let tags = tags_opt(req)?;
+            {
+                let mut db = core.db.lock()?;
+                todo::update(&mut db, &id, text.as_deref(), due_at, remind_at, notify_at, tags)?;
+            }
+            notify_host(WM_APP_CLIP_CHANGED);
+            Ok(serde_json::Value::Null)
+        }
+        "todo_list" => {
+            let core = crate::core::Core::get()?;
+            let filter = todo::TodoFilter::parse(str_opt(req, "done").as_deref())?;
+            // 与 list_entries 同语义的叠加过滤:标签筛选/搜索切到待办页不能失效,
+            // 否则同一筛选条件在两个视图给出不一致的结果集。
+            let query = str_opt(req, "query");
+            let tag = str_opt(req, "tag");
+            let limit = req.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
+            let offset = req.get("offset").and_then(|v| v.as_i64()).unwrap_or(0);
+            let db = core.db.lock()?;
+            let (items, total) =
+                todo::list(&db, filter, query.as_deref(), tag.as_deref(), limit, offset)?;
+            Ok(serde_json::json!({ "items": items, "total": total }))
+        }
+        "todo_get" => {
+            let core = crate::core::Core::get()?;
+            let id = str_req(req, "id")?;
+            let db = core.db.lock()?;
+            Ok(match todo::get(&db, &id)? {
+                Some(item) => serde_json::to_value(item)?,
+                None => serde_json::Value::Null,
+            })
+        }
+        "todo_set_done" => {
+            let core = crate::core::Core::get()?;
+            let id = str_req(req, "id")?;
+            let done = req
+                .get("done")
+                .and_then(|v| v.as_bool())
+                .ok_or_else(|| AppError::InvalidInput("缺少 done".into()))?;
+            {
+                let db = core.db.lock()?;
+                todo::set_done(&db, &id, done)?;
+            }
+            notify_host(WM_APP_CLIP_CHANGED);
+            Ok(serde_json::Value::Null)
+        }
+        "todo_delete" => {
+            let core = crate::core::Core::get()?;
+            let id = str_req(req, "id")?;
+            {
+                let db = core.db.lock()?;
+                todo::delete(&db, &id)?;
+            }
+            notify_host(WM_APP_CLIP_CHANGED);
+            Ok(serde_json::Value::Null)
+        }
+        // 待办计数并入 entry_counts(EntryCounts 已含 todoOpen/todoDone);
+        // 保留独立方法名以便宿主/脚本直接取。
+        "todo_counts" => {
+            let core = crate::core::Core::get()?;
+            let db = core.db.lock()?;
+            Ok(serde_json::to_value(entry::counts(&db)?)?)
+        }
+        // 调度到点后宿主拉取待播报列表(§4.2:WM_APP 只当信号,payload 宿主拉取)
+        "todo_due_pending" => {
+            let core = crate::core::Core::get()?;
+            let db = core.db.lock()?;
+            Ok(serde_json::to_value(todo::pending_bubbles(&db, 8)?)?)
+        }
+        // 气泡播报确认(幂等)
+        "todo_due_mark_shown" => {
+            let core = crate::core::Core::get()?;
+            let ids: Vec<String> = req
+                .get("ids")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .ok_or_else(|| AppError::InvalidInput("缺少 ids 数组".into()))?;
+            let db = core.db.lock()?;
+            todo::mark_bubble_shown(&db, &ids)?;
+            Ok(serde_json::Value::Null)
+        }
+        // 「清空已完成」(归档清理;与 clear_history 分离 —— 见 store::todo::clear_done)
+        "todo_clear_done" => {
+            let core = crate::core::Core::get()?;
+            {
+                let db = core.db.lock()?;
+                todo::clear_done(&db)?;
+            }
+            notify_host(WM_APP_CLIP_CHANGED);
+            Ok(serde_json::Value::Null)
+        }
+
         _ => Err(AppError::InvalidInput(format!("未知方法: {method}"))),
     }
 }
@@ -580,4 +704,44 @@ fn str_opt(req: &serde_json::Value, key: &str) -> Option<String> {
 
 fn str_req(req: &serde_json::Value, key: &str) -> Result<String, AppError> {
     str_opt(req, key).ok_or_else(|| AppError::InvalidInput(format!("缺少参数 {key}")))
+}
+
+/// 可空毫秒时间戳(存在但为 null → None;缺失 → None;非整数 → InvalidInput)。
+/// 用于 create 这类"没有就是没有"的场景(update 的三态语义见 [`ms_opt_opt`])。
+fn ms_opt(req: &serde_json::Value, key: &str) -> AppResult<Option<i64>> {
+    match req.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => v
+            .as_i64()
+            .map(Some)
+            .ok_or_else(|| AppError::InvalidInput(format!("{key} 应为毫秒时间戳整数"))),
+    }
+}
+
+/// 三态时间参数(update 用):键缺失 = None(不改);null = Some(None)(清空);
+/// 整数 = Some(Some(ms))(设置)。设计文档 §5 的 todo_update 语义。
+fn ms_opt_opt(req: &serde_json::Value, key: &str) -> AppResult<Option<Option<i64>>> {
+    match req.get(key) {
+        None => Ok(None),
+        Some(serde_json::Value::Null) => Ok(Some(None)),
+        Some(v) => v
+            .as_i64()
+            .map(|ms| Some(Some(ms)))
+            .ok_or_else(|| AppError::InvalidInput(format!("{key} 应为毫秒时间戳整数或 null"))),
+    }
+}
+
+/// 可空标签数组(缺失 → None;与 str_opt 不同,**空数组是合法值 = 清空标签**)。
+fn tags_opt(req: &serde_json::Value) -> AppResult<Option<Vec<String>>> {
+    match req.get("tags") {
+        None => Ok(None),
+        Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => Ok(Some(
+            v.as_array()
+                .ok_or_else(|| AppError::InvalidInput("tags 应为字符串数组".into()))?
+                .iter()
+                .filter_map(|x| x.as_str().map(str::to_owned))
+                .collect(),
+        )),
+    }
 }

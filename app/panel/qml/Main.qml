@@ -31,6 +31,65 @@ Rectangle {
     // 设置抽屉已改 Loader 懒构建,这条链路同时验证"首次构建 + 尺寸对齐面板根"。
     function openSettings() { settingsDrawerLoader.openAndLoad() }
 
+    /// 自动化验收入口(待办链路,**零参分步**直调,等价用户操作序列):
+    ///   ① acceptanceOpenPicker():打开新建卡片 + 点「截止」字段开浮层(保持打开)
+    ///   ② 宿主读 acceptanceState 断言浮层几何在可视区内
+    ///   ③ acceptanceTargetMs 赋值 → acceptanceClickConfirm():**真实点击**「确定」
+    ///   ④ acceptanceInputText 赋值 → acceptanceClickSave():**真实点击**「保存」
+    ///
+    /// ⚠️ 全部零参:QMetaObject::invokeMethod 按签名查找,带参与不带参是不同签名;
+    ///    参数走属性传递可以避免签名不匹配(实测 "No such method ...(QVariant,QVariant)")。
+    /// ⚠️ 动作只产生副作用、不返回结构体:invokeMethod 无法把 QJSValue 对象
+    ///    转成 QVariantMap(实测 return type mismatch),状态一律走 acceptanceState 读回。
+    /// ⚠️ **不能再直接调 pickerBody.commit()/apply() 来"模拟"点确定** ——
+    ///    那会绕过按钮的命中路径,正是这个盲区漏掉了"点确定没反应"的真 bug。
+    ///    现在改为把点击事件投到按钮项上,走与用户完全相同的链路。
+    property real acceptanceTargetMs: 0
+    property string acceptanceInputText: ""
+
+    function acceptanceOpenPicker() {
+        openTodoComposer(null)
+        openTimePicker(todoDueField)          // 等价用户点「截止」字段
+    }
+
+    /// 等价用户**拨滚轮**:经 pickerBody.spinHourTo 走与用户拨动相同的
+    /// onCurrentIndexChanged → rebuildFromTumblers 链路。拨轮后字段**不**写回
+    /// (新契约:确定才写回),宿主在真实点击「确定」后从 dueFieldMs 断言。
+    function acceptanceSetWheel() {
+        pickerBody.spinHourTo(acceptanceTargetMs)
+    }
+
+    /// 等价用户在正文框输入(保存由真实点击「保存」按钮触发)。
+    function acceptanceSetText() {
+        todoInput.text = acceptanceInputText
+    }
+
+    /// 读回:是否处于编辑态(供断言"保存成功后卡片已关")。
+    readonly property string acceptanceEditId: todoEditId
+
+    /// 验收只读状态:浮层几何 + 字段值 + 卡片可见性 + 错误行 + 按钮几何。
+    readonly property var acceptanceState: ({
+        cardVisible: todoComposerCard.visible,
+        pickerVisible: timePickerPopup.visible,
+        pickerOpen: timePickerPopup.visible,
+        pickerX: timePickerPopup.x,
+        pickerY: timePickerPopup.y,
+        pickerW: timePickerPopup.width,
+        pickerH: timePickerPopup.height,
+        pickerContentH: timePickerPopup.contentItem
+                        ? timePickerPopup.contentItem.implicitHeight : -1,
+        // 浮层内容在场景中的绝对原点与尺寸(用于把点击坐标算准)
+        contentX: timePickerPopup.contentItem
+                  ? timePickerPopup.contentItem.mapToItem(null, 0, 0).x : -1,
+        contentY: timePickerPopup.contentItem
+                  ? timePickerPopup.contentItem.mapToItem(null, 0, 0).y : -1,
+        overlayW: Overlay.overlay ? Overlay.overlay.width : -1,
+        overlayH: Overlay.overlay ? Overlay.overlay.height : -1,
+        dueFieldMs: todoDueField.ms,
+        remindFieldMs: todoRemindField.ms,
+        errorText: todoError.text
+    })
+
     // ---- 右键菜单:全面板**唯一实例** ----
     // 原先每个 EntryCard 各自持有一个 Menu,存在两个问题:
     //   ① 委托被 ListView 回收/重建时,菜单与卡片的绑定可能失效;
@@ -91,12 +150,207 @@ Rectangle {
         Entries.saveTags(tagEditId, tags)
     }
 
+    // ---- 待办(docs/05-todo.md §6) ----
+    /// 正在编辑的待办 id;空串 = 新建。
+    property string todoEditId: ""
+    /// 当前展开的时间选择器浮层所属字段("due"/"remind"/"")。
+    /// 仅用于字段高亮;浮层本体是 Popup,用自己的 visible 判定开关。
+    property string openPickerKind: ""
+    /// 打开浮层时目标字段的值:「取消」恢复用(0 = 打开前就是未设置)。
+    property real openPickerMsOnOpen: 0
+    /// 打开浮层时**提醒**字段的值:取消截止浮层时一并恢复(联动会改它)。
+    property real openRemindMsOnOpen: 0
+
+    /// 「确定」(截止浮层):写回截止;提醒未被用户手动设置时,
+    /// 联动为"新截止前 10 分钟" —— **每次确定都重算**,改截止提醒跟着变。
+    function confirmDuePicker(ms) {
+        todoDueField.apply(ms)
+        if (!remindManuallySet)
+            todoRemindField.apply(ms > 0 ? ms - remindDefaultLeadMs : 0)
+    }
+
+    /// 「确定」(提醒浮层):写回提醒,并标记"用户手动设置" ——
+    /// 此后改截止不再自动覆盖它。
+    function confirmRemindPicker(ms) {
+        todoRemindField.apply(ms)
+        remindManuallySet = true
+    }
+
+    /// 「取消」:恢复打开浮层前的截止与提醒(联动可能已改过提醒)。
+    function cancelDuePicker() {
+        todoDueField.apply(openPickerMsOnOpen)
+        todoRemindField.apply(openRemindMsOnOpen)
+    }
+    /// 程序化回填中(openTodoComposer 预填):抑制"截止 → 提醒"默认联动 ——
+    /// 联动是给**用户改截止**用的,回填旧数据时不该顺手替用户建一条提醒。
+    property bool todoPrefilling: false
+
+    /// 待办到点后由 C++(PanelWindow::showCenteredOnTodos)直调:切到"待办"视图。
+    /// ⚠️ 必须先清搜索词:残留关键词会把待办过滤掉,用户会看到空列表。
+    function showTodos() {
+        if (searchInput.text !== "") {
+            searchInput.clear()
+            Entries.setQuery("")
+        }
+        if (root.activeTag !== "") {
+            root.activeTag = ""
+            Entries.setTag("")
+        }
+        tabs.current = "todo"
+        Entries.setView("todo")
+        Entries.refreshNow()
+    }
+
+    /// 时间字段联动:截止**确定后**给提醒做默认 —— 提醒未被用户手动设置时,
+    /// 默认"截止前 10 分钟"(原 30 分钟偏久,实测反馈改为 10 分钟)。
+    /// ⚠️ 截止本身在 10 分钟内的,提醒时刻会落在过去 → 视为"立即提醒"
+    ///    (core §3 语义:下一轮调度触发一次),行为合理无需特判。
+    readonly property int remindDefaultLeadMs: 10 * 60 * 1000
+    /// 提醒是否被**用户手动**设置过(浮层确定/✕清空都算)。
+    /// ⚠️ 必须区分"回填的旧值":打开卡片时回填不算手动 —— 否则用户改了截止,
+    ///    提醒却永远停留在旧数据的联动值上不跟随(实测反馈的第二个问题)。
+    property bool remindManuallySet: false
+
+    /// 打开新建(头部按钮)或编辑(右键菜单/卡片按钮)待办的卡片。
+    function openTodoComposer(entry) {
+        dismissListOverlays()
+        closeTimePicker()
+        todoEditId = entry ? entry.entryId : ""
+        // 正文优先用快照(右键菜单/卡片上抛的 text):按 id 回查只保证当前页,
+        // 条目被翻页/筛选排除时会拿不到,编辑一下就把正文清空了。
+        const snapshot = entry && entry.text ? entry.text : ""
+        todoInput.text = entry ? snapshot : ""
+        // 时刻与标签走 todo_get 一次取全(meta 为空 = 非待办/不存在 → 全空)
+        const meta = entry ? Entries.todoMeta(entry.entryId) : null
+        todoPrefilling = true
+        todoDueField.apply(meta && meta.dueAt > 0 ? meta.dueAt : 0)
+        // 旧数据 remind/notify 可能不同值:取较早的(先响的那个)展示
+        const r = meta && meta.remindAt > 0 ? meta.remindAt : 0
+        const n = meta && meta.notifyAt > 0 ? meta.notifyAt : 0
+        todoRemindField.apply((r > 0 && n > 0) ? Math.min(r, n) : Math.max(r, n))
+        todoPrefilling = false
+        // 回填**不算**用户手动设置:此后改截止,提醒应跟随新的默认联动
+        remindManuallySet = false
+        todoTagInput.text = entry && entry.tags ? entry.tags : ""
+        todoError.text = ""
+        todoComposerCard.visible = true
+        todoInput.forceActiveFocus()
+    }
+
+    /// 收起新建/编辑卡片:连带收掉时间选择器浮层 ——
+    /// ⚠️ 浮层渲染在 Overlay 层,**不随卡片隐藏而消失**,会孤零零留在面板上。
+    function closeTodoComposer() {
+        closeTimePicker()
+        todoComposerCard.visible = false
+    }
+
+    /// 打开时间选择器浮层。同一字段再点一次 = 收起。
+    ///
+    /// ⚠️ 两个关键点(首版交互问题的根因):
+    ///  1. 定位必须在 open() **之后**算:内容(pickerBody)是 Popup 挂载时才创建的,
+    ///     open() 前读 height 得到 0 → 误判"下方空间足够"→ 浮层溢出面板底边,
+    ///     滚轮落在可视区外,表现就是"点了打不开"。
+    ///  2. 关闭交给屏障显式 closeTimePicker(),不依赖 CloseOnPressOutside ——
+    ///     后者会吞掉点「保存」的那一下(点击被用于关浮层,不穿透到按钮),
+    ///     表现就是"必须点别处才能关轮子、否则保存没反应"。
+    function openTimePicker(field) {
+        const wasOpen = timePickerPopup.visible
+            && timePickerPopup.targetKind === field.pickerKind
+        if (wasOpen) {
+            closeTimePicker()
+            return
+        }
+        timePickerPopup.targetField = field
+        timePickerPopup.targetKind = field.pickerKind
+        openPickerKind = field.pickerKind
+        openPickerMsOnOpen = field.ms        // 「取消」恢复基准
+        // 截止浮层的「取消」要一并恢复提醒(确定时联动会改它)
+        openRemindMsOnOpen = todoRemindField.ms
+        // ⚠️ 定位必须在 open() **之前**:open() 后再改 x/y,渲染位置会跟过去,
+        //    但 Overlay 的**命中区域**不跟着更新(探针证实:官方 childAt 在按钮
+        //    位置命中的是 Overlay 容器而非按钮)→ 浮层看得见、滚轮拨得动、
+        //    按钮却点不着。先摆好位置再打开,两者一致。
+        positionTimePicker(field)
+        timePickerPopup.open()
+        // 预填仍需在 open() 之后:contentItem 挂载前 Tumbler 的 currentIndex
+        // 赋值会被视图重置(实测:快捷钮设置后打开,滚轮停在错误位置)。
+        pickerBody.setFromMs(field.ms)
+    }
+
+    /// 浮层定位:默认贴字段下方;下方放不下(最小高面板)翻到字段上方。
+    /// ⚠️ 高度取 contentItem 的隐式高度,而不是 Popup.height:Padding 与
+    ///    contentItem 的隐式尺寸叠加规则在首次 open() 时可能还没落定,
+    ///    用后者偶发算出 0 高度 → 误判"下方放得下" → 浮层溢出面板底边,
+    ///    滚轮落到可视区之外,表现就是"点了打不开"(首版实测)。
+    function positionTimePicker(field) {
+        const overlay = Overlay.overlay
+        const pos = field.mapToItem(overlay, 0, field.height)
+        const w = timePickerPopup.width
+        const h = timePickerPopup.contentItem
+                  ? timePickerPopup.contentItem.implicitHeight : timePickerPopup.height
+        timePickerPopup.x = Math.max(8, Math.min(pos.x, overlay.width - w - 8))
+        const below = overlay.height - pos.y
+        timePickerPopup.y = below >= h + 8
+                           ? pos.y
+                           : Math.max(8, pos.y - field.height - h - 8)
+    }
+
+    function closeTimePicker() {
+        timePickerPopup.close()
+        openPickerKind = ""
+    }
+
+    /// 推迟待办(右键菜单):due/remind/notify 各 +delta(已过点的同样顺延)。
+    function postponeTodo(id, delta) {
+        const meta = Entries.todoMeta(id)
+        if (!meta || meta.dueAt === undefined) return
+        const r = meta.remindAt > 0 ? meta.remindAt
+                  : (meta.notifyAt > 0 ? meta.notifyAt : 0)
+        Entries.todoUpdateTimes(id, {
+            "dueAt": meta.dueAt > 0 ? meta.dueAt + delta : null,
+            "remindAt": r > 0 ? r + delta : null,
+            "notifyAt": r > 0 ? r + delta : null
+        })
+        Core.showToast("已推迟")
+    }
+
+    /// 提交新建/编辑待办。失败时**保留卡片与输入**,只把原因写到错误行。
+    function commitTodoComposer() {
+        const text = todoInput.text.trim()
+        if (text === "") {
+            todoError.text = "写点什么吧 —— 正文不能为空"
+            return
+        }
+        // 提醒/通知合并为一个 UI 时刻:写同值 —— 到点时面板高亮 + 托盘气泡
+        // 一起发生(core 两通道各自去重)。数据层两字段保留以兼容旧数据。
+        const remind = todoRemindField.ms > 0 ? todoRemindField.ms : null
+        const times = {
+            "dueAt": todoDueField.ms > 0 ? todoDueField.ms : null,
+            "remindAt": remind,
+            "notifyAt": remind
+        }
+        const tags = []
+        const parts = todoTagInput.text.split(/[,，\s]+/)
+        for (let i = 0; i < parts.length; ++i) {
+            const t = parts[i].trim()
+            if (t.length > 0 && tags.indexOf(t) < 0) tags.push(t)
+        }
+        todoError.text = ""
+        const resp = Entries.todoSave(todoEditId, text, times, tags)
+        if (resp.ok !== true) {
+            // core 原文直接进错误行(如"正文超过 4KB"),卡片不关、输入不丢
+            todoError.text = resp.message ? resp.message : "保存失败"
+            return
+        }
+        closeTodoComposer()
+        Core.showToast(todoEditId === "" ? "已添加待办" : "待办已更新")
+    }
+
     /// EntryCard 右键时调用:记住目标条目并在光标处弹出菜单。
     function openEntryMenu(entry) {
         menuTarget = entry
         entryMenu.popup()
     }
-
     /// 收起菜单并清空目标(屏障点击、菜单自身关闭都会走到这里)。
     function closeEntryMenu() {
         menuTarget = null
@@ -329,6 +583,15 @@ Rectangle {
                     }
                 }
 
+                // 待办:新建一条待办条目(docs/05-todo.md §6.1;位置=翻译左侧)。
+                // 有未完成待办时转 primary(面板内"有提醒"的常驻线索,§6.3)。
+                ThemedButton {
+                    variant: Core.counts.todoOpen > 0 ? "primary" : "ghost"
+                    iconName: "todo"
+                    text: "待办"
+                    Layout.alignment: Qt.AlignVCenter
+                    onClicked: root.openTodoComposer(null)
+                }
                 ThemedButton {
                     variant: "ghost"
                     iconName: "translate"
@@ -379,6 +642,7 @@ Rectangle {
                     ListElement { label: "文本"; viewId: "text" }
                     ListElement { label: "图片"; viewId: "image" }
                     ListElement { label: "文件"; viewId: "file" }
+                    ListElement { label: "待办"; viewId: "todo" }
                     ListElement { label: "固定"; viewId: "pinned" }
                 }
                 delegate: Rectangle {
@@ -386,7 +650,9 @@ Rectangle {
                     required property string label
                     required property string viewId
                     // 计数来自 Core.counts(单一数据源 + countsChanged 通知)。
-                    readonly property var count: Core.counts[viewId]
+                    // 待办页显示**未完成数**(todoOpen),归档不占导航计数(§6.3)。
+                    readonly property var count: viewId === "todo"
+                        ? Core.counts.todoOpen : Core.counts[viewId]
                     readonly property bool selected: tabs.current === tabDelegate.viewId
                     /// 图标种类与 viewId 同源;"pinned" 复用图钉图标(与头部「固定」按钮同符号)。
                     readonly property string iconKind:
@@ -582,8 +848,12 @@ Rectangle {
                 menuOpen: root.menuTarget !== null && root.menuTarget.entryId === entryId
                 // 防御:菜单打开期间,任何卡片都吞掉点击(即使屏障因平台差异没拦住)
                 menuOpenElsewhere: root.menuTarget !== null
+                // 待办扩展角色(docs/05-todo.md §6.3);非 todo 行为默认值。
+                // ⚠️ required property 由 ListView 按角色名注入,**不要**在此写
+                //    `todoDueAt: todoDueAt` 之类的同名自绑定 —— 那是绑定环。
                 onContextMenuRequested: function(entry) { root.openEntryMenu(entry) }
                 onMenuDismissRequested: root.closeEntryMenu()
+                onTodoEditRequested: function(entry) { root.openTodoComposer(entry) }
             }
         }
 
@@ -627,6 +897,7 @@ Rectangle {
                         if (Entries.errorText !== "") return "加载失败"
                         if (searchInput.text !== "") return "没有匹配的历史记录"
                         if (tabs.current === "pinned") return "暂无固定条目"
+                        if (tabs.current === "todo") return "还没有待办"
                         return "剪贴板是空的"
                     }
                 }
@@ -640,6 +911,7 @@ Rectangle {
                         if (Entries.errorText !== "") return Entries.errorText
                         if (searchInput.text !== "") return "换个关键词试试,或清除搜索条件"
                         if (tabs.current === "pinned") return "右键条目选择「固定」即可常驻这里"
+                        if (tabs.current === "todo") return "点右上角「待办」按钮,新建一条"
                         return "复制任意内容,它会自动出现在这里"
                     }
                 }
@@ -647,6 +919,7 @@ Rectangle {
                     anchors.horizontalCenter: parent.horizontalCenter
                     spacing: Theme.metrics.spacingXs
                     visible: Entries.errorText === "" && searchInput.text === ""
+                             && tabs.current !== "todo"
                     KeyCap { label: "Ctrl" }
                     KeyCap { label: "Shift" }
                     KeyCap { label: "V" }
@@ -833,6 +1106,16 @@ Rectangle {
             }
             function addSep() { addItem(menuSepComp.createObject(entryMenu)) }
 
+            // 组 0:待办专属(放最前 —— 完成是待办的高频操作)
+            if (entry.kind === "todo") {
+                addAction(entry.todoDone ? "取消完成" : "完成",
+                          function() { Entries.todoSetDone(entry.entryId, !entry.todoDone) })
+                addAction("推迟 1 小时", function() { root.postponeTodo(entry.entryId, 3600 * 1000) })
+                addAction("推迟到明天", function() { root.postponeTodo(entry.entryId, 24 * 3600 * 1000) })
+                addAction("编辑待办…", function() { root.openTodoComposer(entry) })
+                addSep()
+            }
+
             // 组 1:类型专属操作
             if (entry.kind === "file") {
                 addAction("打开", function() { Core.openEntry(entry.entryId) })
@@ -841,7 +1124,7 @@ Rectangle {
                 addAction("编辑", function() { root.editEntryAfterHide(entry.entryId) })
                 addAction("识别文字", function() { Core.ocrEntry(entry.entryId) })
                 addAction("翻译", function() { root.translateEntry(entry) })
-            } else {
+            } else if (entry.kind !== "todo") {
                 addAction("翻译", function() { root.translateEntry(entry) })
             }
             addSep()
@@ -965,6 +1248,306 @@ Rectangle {
                     size: "sm"
                     text: "保存"
                     onClicked: root.commitTagEditor()
+                }
+            }
+        }
+    }
+
+    // ---- 待办新建/编辑卡片(docs/05-todo.md §6.2) ----
+    // 复用 tagEditorCard 的"屏障 + 居中卡片"模式;宽一点(380)给时间字段留位置。
+    MouseArea {
+        id: todoComposerBarrier
+        anchors.fill: parent
+        z: 950
+        visible: todoComposerCard.visible
+        enabled: visible
+        acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+        // 两段式:浮层开着时这一次点击只用于关浮层,卡片保留 ——
+        // 否则"点空白处想收轮子"会连卡片一起收掉,刚填的正文全丢(首版实测)。
+        onClicked: {
+            if (timePickerPopup.visible) root.closeTimePicker()
+            else root.closeTodoComposer()
+        }
+    }
+
+    Rectangle {
+        id: todoComposerCard
+        z: 960
+        visible: false
+        anchors.centerIn: parent
+        width: Math.min(380, root.width - 48)
+        height: todoComposerLayout.implicitHeight + 2 * Theme.metrics.spacingMd
+        radius: Theme.metrics.radiusCard
+        color: Theme.colors.surface
+        border.width: Theme.metrics.borderWidth
+        border.color: Theme.colors.borderStrong
+
+        ColumnLayout {
+            id: todoComposerLayout
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: Theme.metrics.spacingMd
+            spacing: Theme.metrics.spacingSm
+
+            Text {
+                Layout.fillWidth: true
+                text: root.todoEditId === "" ? "新建待办" : "编辑待办"
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.metrics.fontSection
+                font.weight: Font.DemiBold
+                color: Theme.colors.textPrimary
+            }
+
+            // 正文:多行;Enter 提交、Shift+Enter 换行(§6.2)。
+            // ⚠️ TextEdit 是基础项,没有 `background` 属性(那是 Control 的):
+            //    直接写会让整个 Main.qml 加载失败。用 Rectangle 包一层做底板。
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: Math.max(todoInput.implicitHeight + 16, 44)
+                color: Theme.colors.surfaceSecondary
+                radius: Theme.metrics.radiusInput
+                border.width: Theme.metrics.borderWidth
+                border.color: todoInput.activeFocus ? Theme.colors.accent : Theme.colors.border
+                TextEdit {
+                    id: todoInput
+                    anchors.fill: parent
+                    anchors.margins: 8
+                    wrapMode: TextEdit.Wrap
+                    color: Theme.colors.textPrimary
+                    selectionColor: Theme.colors.accent
+                    selectedTextColor: Theme.colors.accentText
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.metrics.fontBody
+                    Text {
+                        visible: todoInput.text === "" && !todoInput.activeFocus
+                        anchors.top: parent.top
+                        anchors.left: parent.left
+                        text: "要做什么?"
+                        color: Theme.colors.textTertiary
+                        font: todoInput.font
+                    }
+                    Keys.onReturnPressed: function(event) {
+                        if (event.modifiers & Qt.ShiftModifier) {
+                            todoInput.insert(todoInput.cursorPosition, "\n")
+                            return
+                        }
+                        root.commitTodoComposer()
+                    }
+                    Keys.onEnterPressed: function(event) {
+                        if (event.modifiers & Qt.ShiftModifier) {
+                            todoInput.insert(todoInput.cursorPosition, "\n")
+                            return
+                        }
+                        root.commitTodoComposer()
+                    }
+                    Keys.onEscapePressed: root.closeTodoComposer()
+                }
+            }
+
+            // ---- 时间字段(截止 / 提醒) ----
+            // 点字段区域打开时间选择器浮层(滚轮 + 快捷钮),不手打日期。
+            //
+            // ⚠️ 热区声明顺序即命中优先级(QML 同父级重叠项**后声明者优先**):
+            //    "打开浮层"的热区必须排在 RowLayout **之前** —— 首版排在后面,
+            //    铺满整行盖住了 ✕ 清空钮,于是"点 ✕ 变成重新打开浮层";
+            //    用户以为时刻设好了,提交时字段其实仍是 0 或被清掉,
+            //    表现就是"设了时间却保存不上"。
+            component TodoTimeField: Rectangle {
+                id: timeField
+                property string pickerKind: ""    // due / remind
+                property real ms: 0               // 回显值;0 = 未设置
+                function apply(v) {
+                    // ⚠️ 只写本字段,不做任何联动 —— 截止→提醒的默认联动
+                    //    已收敛到 confirmDuePicker(用户点「确定」时算一次)。
+                    //    首版在这里调 pickerChanged:预填滚轮归位也会触发,
+                    //    把提醒锁死在"打开时刻-10分钟"且不再跟随截止变化。
+                    ms = v
+                }
+                Layout.fillWidth: true
+                implicitHeight: 30
+                radius: Theme.metrics.radiusInput
+                color: root.openPickerKind === pickerKind ? Theme.colors.surfaceHover
+                     : Theme.colors.surfaceSecondary
+                border.width: Theme.metrics.borderWidth
+                border.color: root.openPickerKind === pickerKind ? Theme.colors.accent
+                                                                 : Theme.colors.border
+                Behavior on color { ColorAnimation { duration: Theme.animation.fast } }
+
+                // 打开浮层(声明在最前 = 命中优先级最低,✕ 才能压在它上面)
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.openTimePicker(timeField)
+                }
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 8
+                    anchors.rightMargin: 8
+                    spacing: 6
+                    Text {
+                        Layout.fillWidth: true
+                        text: timeField.ms > 0
+                              ? Qt.formatDateTime(new Date(timeField.ms), "yyyy-MM-dd HH:mm")
+                              : "未设置"
+                        font.pixelSize: Theme.metrics.fontSecondary
+                        color: timeField.ms > 0 ? Theme.colors.textPrimary
+                                                : Theme.colors.textTertiary
+                        elide: Text.ElideRight
+                    }
+                    // 清空钮:有值才显示。命中区略大于字形便于点中。
+                    Text {
+                        visible: timeField.ms > 0
+                        text: "✕"
+                        font.pixelSize: Theme.metrics.fontCaption
+                        color: clearArea.containsMouse ? Theme.colors.error
+                                                       : Theme.colors.textTertiary
+                        MouseArea {
+                            id: clearArea
+                            anchors.fill: parent
+                            anchors.margins: -6
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            // 只清本字段,不打开浮层(声明在打开热区之后 → 优先命中)
+                            // ⚠️ 清**提醒**字段是用户的明确选择 → 标记"手动",
+                            //    此后改截止不再自动补提醒。
+                            onClicked: {
+                                timeField.apply(0)
+                                if (timeField.pickerKind === "remind")
+                                    root.remindManuallySet = true
+                            }
+                        }
+                    }
+                }
+            }
+
+            Text {
+                text: "截止(可空)"
+                font.pixelSize: Theme.metrics.fontCaption
+                color: Theme.colors.textSecondary
+            }
+            TodoTimeField { id: todoDueField; pickerKind: "due" }
+
+            Text {
+                text: "提醒(可空;到点弹气泡并高亮)"
+                font.pixelSize: Theme.metrics.fontCaption
+                color: Theme.colors.textSecondary
+            }
+            TodoTimeField { id: todoRemindField; pickerKind: "remind" }
+
+            Text {
+                text: "标签(逗号分隔,可空)"
+                font.pixelSize: Theme.metrics.fontCaption
+                color: Theme.colors.textSecondary
+            }
+            TextField {
+                id: todoTagInput
+                Layout.fillWidth: true
+                placeholderText: "工作, 重要"
+                placeholderTextColor: Theme.colors.textTertiary
+                color: Theme.colors.textPrimary
+                selectionColor: Theme.colors.accent
+                selectedTextColor: Theme.colors.accentText
+                font.pixelSize: Theme.metrics.fontSecondary
+                background: Rectangle {
+                    color: Theme.colors.surfaceSecondary
+                    radius: Theme.metrics.radiusInput
+                    border.width: Theme.metrics.borderWidth
+                    border.color: todoTagInput.activeFocus ? Theme.colors.accent
+                                                           : Theme.colors.border
+                }
+                Keys.onReturnPressed: root.commitTodoComposer()
+                Keys.onEnterPressed: root.commitTodoComposer()
+                Keys.onEscapePressed: root.closeTodoComposer()
+            }
+
+            // 错误行:core 的原文直接显示(不弹 Toast,免得一闪而过看不见)
+            Text {
+                id: todoError
+                Layout.fillWidth: true
+                visible: text !== ""
+                text: ""
+                wrapMode: Text.Wrap
+                font.pixelSize: Theme.metrics.fontCaption
+                color: Theme.colors.error
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Theme.metrics.spacingSm
+                Item { Layout.fillWidth: true }
+                ThemedButton {
+                    variant: "secondary"
+                    size: "sm"
+                    text: "取消"
+                    onClicked: root.closeTodoComposer()
+                }
+                ThemedButton {
+                    objectName: "todoComposerSave"   // 验收:定位按钮
+                    variant: "primary"
+                    size: "sm"
+                    text: "保存"
+                    onClicked: root.commitTodoComposer()
+                }
+            }
+        }
+    }
+
+    // ---- 时间选择器浮层(单实例,两个时间字段共用) ----
+    // ⚠️ 关闭策略刻意**不含** CloseOnPressOutside(见 openTimePicker 注释):
+    //    它会把"点保存"那一下吃掉用于关浮层,点击不穿透到按钮,用户就会感觉
+    //    "必须点别处才能关掉轮子,否则保存没反应"。外部点击由屏障统一处理:
+    //    屏障的 onClicked 先 closeTimePicker(),浮层开着时卡片不会被误关。
+    // 高度 = 选择器内容 + 底部按钮行;按下「确定」才把值写回字段。
+    Popup {
+        id: timePickerPopup
+        parent: Overlay.overlay
+        width: 320
+        // padding 由 contentItem 自己贡献,这里只留 border 的呼吸位
+        padding: 0
+        modal: false
+        closePolicy: Popup.CloseOnEscape
+        // 目标字段("due"/"remind");"" = 关闭
+        property string targetKind: ""
+        property Item targetField: null
+
+        contentItem: Item {
+            objectName: "todoPickerContent"   // 验收:定位浮层内容几何
+            implicitWidth: 320
+            implicitHeight: pickerColumn.implicitHeight
+
+            ColumnLayout {
+                id: pickerColumn
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                spacing: 0
+
+                TodoDatePicker {
+                    id: pickerBody
+                    Layout.fillWidth: true
+                    // ⚠️ 滚轮/快捷钮改动**只更新本组件内部状态与回显**,
+                    //    **不**实时写回字段 —— 写回统一在「确定」(见 onAccepted),
+                    //    "拨到一半点外部/取消"不会把半成品时刻写进待办。
+                    // ⚠️ 也**不要**在这里做截止→提醒的联动:预填滚轮归位会触发
+                    //    changed,把提醒写成"打开时刻-10分钟"且从此不再跟随
+                    //    用户后续的截止修改(实测反馈的第二个问题)。联动在
+                    //    confirmDuePicker 里做,只在用户点「确定」时发生一次。
+                    // 「确定」= 把滚轮当前值写回目标字段(按字段分派)并关闭浮层;
+                    // 「取消」= 恢复打开前的值并关闭浮层。
+                    onAccepted: function(ms) {
+                        if (timePickerPopup.targetKind === "due")
+                            root.confirmDuePicker(ms)
+                        else if (timePickerPopup.targetKind === "remind")
+                            root.confirmRemindPicker(ms)
+                        root.closeTimePicker()
+                    }
+                    onCancelled: function() {
+                        if (timePickerPopup.targetKind === "due")
+                            root.cancelDuePicker()
+                        root.closeTimePicker()
+                    }
                 }
             }
         }

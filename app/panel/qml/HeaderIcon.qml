@@ -19,7 +19,7 @@ Item {
 
     /// 图标种类:
     ///  "translate" | "settings" | "pin"  —— 头部命令按钮;
-    ///  "all" | "text" | "image" | "file" —— 内容类型(导航标签页 / 条目类型徽标),
+    ///  "all" | "text" | "image" | "file" | "todo" —— 内容类型(导航标签页 / 条目类型徽标),
     ///  其中 "pin" 同时兼作"固定"状态标识;
     ///  "chevron" | "pencil" | "trash"    —— 卡片右下角操作按钮(展开收起 / 编辑 / 删除),
     ///  其中 "chevron" 只画一个方向,反向由使用处 rotation: 180 翻转。
@@ -310,6 +310,67 @@ Item {
             color: "transparent"
             border.width: root.stroke * root.unit
             border.color: root.color
+        }
+    }
+
+    // ---- 提醒:铃铛(罩 + 底摆 + 铃舌) ----
+    // 待办卡片上"已设提醒"的徽标图标(§6.3)。Outline 与其余图标同族。
+    Item {
+        anchors.fill: parent
+        visible: root.kind === "bell"
+
+        Rectangle {   // 罩:上方圆顶(用大圆角近似的钟罩)
+            anchors.horizontalCenter: parent.horizontalCenter
+            y: 3.5 * root.unit
+            width: 8 * root.unit; height: 7.5 * root.unit
+            radius: 3.5 * root.unit
+            color: "transparent"
+            border.width: root.stroke * root.unit
+            border.color: root.color
+        }
+        Rectangle {   // 底摆:横杆(与罩底描边相接)
+            anchors.horizontalCenter: parent.horizontalCenter
+            y: 11 * root.unit
+            width: 10.5 * root.unit; height: root.stroke * root.unit; radius: height / 2
+            color: root.color
+        }
+        Rectangle {   // 铃舌:底摆下方的小方块
+            anchors.horizontalCenter: parent.horizontalCenter
+            y: 12.6 * root.unit
+            width: 1.8 * root.unit; height: 1.8 * root.unit
+            radius: 0.9 * root.unit
+            color: root.color
+        }
+    }
+
+    // ---- 待办:复选框(条目框 + 对勾) ----
+    // 对勾两根短杆(左短右长)交出"已勾"的识别度;框用 Outline 与 trash 桶身同族。
+    // ⚠️ 两根杆的定位是常量数值(与 chevron/pencil 同规矩):不要引用自身尺寸,
+    //    rotation 下自引用会触发绑定环挂死(docs/progress.md 同类踩坑)。
+    Item {
+        anchors.fill: parent
+        visible: root.kind === "todo"
+
+        Rectangle {   // 条目框
+            anchors.centerIn: parent
+            width: 11.5 * root.unit; height: 11.5 * root.unit; radius: 1.5 * root.unit
+            color: "transparent"
+            border.width: root.stroke * root.unit
+            border.color: root.color
+        }
+        Rectangle {   // 对勾短杆(左,60° 下行)
+            width: 3.2 * root.unit; height: root.stroke * root.unit; radius: height / 2
+            x: 4.1 * root.unit; y: 9.4 * root.unit
+            rotation: 60
+            transformOrigin: Item.Center
+            color: root.color
+        }
+        Rectangle {   // 对勾长杆(右上,-45°)
+            width: 6.4 * root.unit; height: root.stroke * root.unit; radius: height / 2
+            x: 6.6 * root.unit; y: 9.4 * root.unit
+            rotation: -45
+            transformOrigin: Item.Center
+            color: root.color
         }
     }
 }

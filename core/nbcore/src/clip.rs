@@ -495,6 +495,7 @@ fn build_entry(
             last_used_at: now,
             source: "clipboard".into(),
             tags: None,
+            todo: None,
         })),
         ClipItem::Image {
             rgba,
@@ -533,6 +534,7 @@ fn build_entry(
                 last_used_at: now,
                 source: "clipboard".into(),
                 tags: None,
+                todo: None,
             }))
         }
         ClipItem::File(paths) => {
@@ -557,6 +559,7 @@ fn build_entry(
                 last_used_at: now,
                 source: "clipboard".into(),
                 tags: None,
+                todo: None,
             }))
         }
     }
