@@ -170,7 +170,7 @@ todo 调度线程 → notify_host(WM_APP_TODO_DUE)
 | --- | --- | --- | --- |
 | `todo_create` | `{text, dueAt?, remindAt?, notifyAt?, tags?}` | `{id}` | 正文空 → InvalidInput |
 | `todo_update` | `{id, text?, dueAt?, remindAt?, notifyAt?, tags?}` | Null | id 不存在/非 todo → InvalidInput |
-| `todo_list` | `{done?: "open"\|"done"\|"all", query?, tag?, limit, offset}` | `{items, total}` | done 非法值 → InvalidInput |
+| `todo_list` | `{done?: "open"\|"done"\|"all", query?, tag?, due?: "today", limit, offset}` | `{items, total}` | done/due 非法值 → InvalidInput |
 | `todo_get` | `{id}` | 扁平条目 + todo 徽标 + 三时刻 | — (不存在 → null) |
 | `todo_set_done` | `{id, done}` | Null | id 不存在 → InvalidInput |
 | `todo_delete` | `{id}` | Null | 同上;同时删 todo_meta |
@@ -285,6 +285,27 @@ todo 调度线程 → notify_host(WM_APP_TODO_DUE)
 
 气泡点击才弹面板(不自动弹,避免打扰)。托盘 tooltip 保持产品名,不显示计数
 (角标方案同理不做 —— Windows 托盘改图标有闪烁成本)。
+
+### 6.6 托盘「今日待办」二级菜单
+
+不打开面板就能看到今天还有什么(§1.2 裁剪项的落地)。
+
+- **一级项**:「今日待办 (N)」,插在「打开主面板」之后;N = 今日关注数,菜单
+  打开时刷新。具体待办条目**只放二级菜单**——一级菜单放不下(既定决策)。
+- **口径**:未完成 且 (已逾期 或 今天到期),等价 `due_at ≤ 今天 23:59:59.999`
+  (本地时区,复用 `end_of_today_ms` 单点边界)。经 `todo_list` 的可选参数
+  `due: "today"` 由 **core 过滤** —— "…共 N 条"需要 SQL 层精确 COUNT,
+  宿主过滤拿不到总数。
+- **二级菜单条目**:`状态 · 正文首行`(逾期 → "已逾期",今天 → "今天 HH:mm";
+  正文首行截 20 字 + 多行加省略号),排序沿用 §5;**上限 8 条** + 禁用态
+  "…共 N 条";空态 = 禁用态"今天没有待办";FFI 失败 = 禁用态"暂不可用"。
+- **交互**:点条目 → 弹面板切待办视图并**定位高亮**该条
+  (`PanelWindow::showCenteredOnTodo(id)` → QML `showTodos(id)` →
+  `indexOfId` + `positionViewAtIndex` + 高亮 1.8s);「查看全部」→ 只切视图。
+- **刷新时机**:一级菜单 `aboutToShow` 钩子(与「延时截图」动态文案同点)重建
+  子菜单,**不做后台轮询**;与 §4 的气泡双层去重互不相干。
+- **QSS**:托盘样式表选择器扩为 `QMenu#nbTrayMenu, QMenu#nbTrayTodoMenu`
+  (#nbTrayMenu 只匹配一级本体,子菜单退回原生样式会与浅色主题割裂)。
 
 ---
 

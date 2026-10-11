@@ -1186,7 +1186,7 @@ mod tests {
     /// **迁移**：v5 → v6 保留全部旧数据,且新类型可用(docs/05-todo.md §7.1)。
     #[test]
     fn migration_v6_preserves_rows_and_allows_todo() {
-        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
         for m in [
             crate::store::MIGRATION_V1,
             crate::store::MIGRATION_V2,

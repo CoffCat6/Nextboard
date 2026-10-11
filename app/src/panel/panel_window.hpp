@@ -65,6 +65,11 @@ public:
     /// "显示窗口"只有它有;视图切换由 QML 的 showTodos() 完成。
     void showCenteredOnTodos();
 
+    /// 同上,但要求 QML 在切到待办视图后**定位并高亮**指定条目
+    /// (托盘「今日待办」二级菜单点击某条时用,docs/05-todo.md §6.6)。
+    /// id 无效(已删)时退化为普通 showCenteredOnTodos 行为。
+    void showCenteredOnTodo(const QString& id);
+
     /// 自动化验收:在 QML 根上调用一个**零参**验收函数。
     /// ⚠️ 刻意不带参数:invokeMethod 按签名查找,带参与不带参是不同签名。
     /// 参数走 PanelWindow::setRootProperty 写属性传递。

@@ -265,6 +265,17 @@ void PanelWindow::showCenteredOnTodos() {
         QMetaObject::invokeMethod(qobject_cast<QObject*>(m_quick->rootObject()), "showTodos");
 }
 
+void PanelWindow::showCenteredOnTodo(const QString& id) {
+    // 与 showCenteredOnTodos 同一摆位链路,只是把目标条目 id 一并传给 QML:
+    // QML 侧 showTodos(id) 在切视图后按 id 定位居中并高亮(托盘「今日待办」
+    // 子菜单点击某条时用)。id 无效时 QML 侧退化为普通切换。
+    setMode(Mode::List);
+    showCentered();
+    if (m_quick && m_quick->rootObject())
+        QMetaObject::invokeMethod(qobject_cast<QObject*>(m_quick->rootObject()), "showTodos",
+                                  Q_ARG(QVariant, id));
+}
+
 bool PanelWindow::invokeAcceptance(const char* method) {
     if (!m_quick || !m_quick->rootObject()) return false;
     return QMetaObject::invokeMethod(qobject_cast<QObject*>(m_quick->rootObject()), method);

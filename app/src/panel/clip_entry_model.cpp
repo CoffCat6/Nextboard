@@ -320,6 +320,14 @@ void ClipEntryModel::todoClearDone() {
     reload(m_limit);
 }
 
+int ClipEntryModel::indexOfId(const QString& id) const {
+    if (id.isEmpty()) return -1;
+    for (int i = 0; i < m_rows.size(); ++i) {
+        if (m_rows[i].id == id) return i;
+    }
+    return -1;
+}
+
 QString ClipEntryModel::imageUrlForBlob(const QString& blobPath, bool thumb) {
     if (blobPath.isEmpty()) return {};
     // blob 存的是相对 blobs 目录的路径;历史数据可能是绝对路径,两种都兼容。

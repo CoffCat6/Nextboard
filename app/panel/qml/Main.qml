@@ -186,8 +186,9 @@ Rectangle {
     property bool todoPrefilling: false
 
     /// 待办到点后由 C++(PanelWindow::showCenteredOnTodos)直调:切到"待办"视图。
-    /// ⚠️ 必须先清搜索词:残留关键词会把待办过滤掉,用户会看到空列表。
-    function showTodos() {
+    /// 托盘「今日待办」子菜单点击某条 → C++ 传条目 id 调本函数,定位并高亮该条。
+    /// ⚠️ 必须先清搜索词/标签筛选:残留条件会把待办过滤掉,用户会看到空列表。
+    function showTodos(focusId) {
         if (searchInput.text !== "") {
             searchInput.clear()
             Entries.setQuery("")
@@ -199,6 +200,24 @@ Rectangle {
         tabs.current = "todo"
         Entries.setView("todo")
         Entries.refreshNow()
+        if (focusId !== undefined && focusId !== "") locateTodo(focusId)
+    }
+
+    /// 在待办视图里定位并高亮指定条目(托盘子菜单点击链路)。
+    /// ⚠️ refreshNow 是同步 FFI 重拉,行集此刻已就绪,可直接定位;
+    ///    条目不在首屏(理论上不会:托盘展示的就是排序前 8 条)则退化不定位。
+    property string highlightTodoId: ""
+    Timer {
+        id: todoHighlightTimer
+        interval: 1800
+        onTriggered: root.highlightTodoId = ""
+    }
+    function locateTodo(id) {
+        const idx = Entries.indexOfId(id)
+        if (idx < 0) return
+        highlightTodoId = id
+        list.positionViewAtIndex(idx, ListView.Center)
+        todoHighlightTimer.restart()
     }
 
     /// 时间字段联动:截止**确定后**给提醒做默认 —— 提醒未被用户手动设置时,
@@ -845,7 +864,13 @@ Rectangle {
                 required property int index
                 width: list.width
                 // 「当前操作对象」高亮:只有被右键的那张卡片亮起(菜单为面板级单例)
+                // ⚠️ entryId 是 EntryCard 自身的 required property(模型按角色名注入),
+                //    **不要**在这里再声明一遍 —— 同名重复声明会让委托实例化失败,
+                //    表现是"列表计数正常但整页空白、空状态也不出现"(实测)。
                 menuOpen: root.menuTarget !== null && root.menuTarget.entryId === entryId
+                          // 托盘「今日待办」点击定位的条目:同一高亮形态,
+                          // 由 locateTodo 置位、定时器 1.8s 后自动熄灭
+                          || root.highlightTodoId === entryId
                 // 防御:菜单打开期间,任何卡片都吞掉点击(即使屏障因平台差异没拦住)
                 menuOpenElsewhere: root.menuTarget !== null
                 // 待办扩展角色(docs/05-todo.md §6.3);非 todo 行为默认值。

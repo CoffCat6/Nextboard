@@ -5,6 +5,9 @@ core/target
 dist
 # 待办交互验收（--todo-flow 未指定 --data-dir 时的兜底数据目录）
 acceptance-data
+# 启动冒烟临时数据目录与截图（--data-dir + --screenshot 手工验证用）
+smoke-data
+smoke.png
 /.workbuddy-ai
 .vscode
 /data

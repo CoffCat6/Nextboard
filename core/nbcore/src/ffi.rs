@@ -611,11 +611,31 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
             // 否则同一筛选条件在两个视图给出不一致的结果集。
             let query = str_opt(req, "query");
             let tag = str_opt(req, "tag");
+            // due = "today"(可选):托盘「今日待办」用 —— 未完成 且
+            // (已逾期 或 今天到期),等价于 due_at ≤ 今天 23:59:59.999(本地时区)。
+            // 边界换算在 core(end_of_today_ms),口径单点;非法值显式报错不静默。
+            // (此分支纯日历换算,不查库 —— 无需在此持锁。)
+            let due_max = match str_opt(req, "due").as_deref() {
+                None => None,
+                Some("today") => Some(todo::end_of_today_ms(crate::now_ms())),
+                Some(other) => {
+                    return Err(AppError::InvalidInput(format!(
+                        "未知 due 过滤: {other}(当前仅支持 today)"
+                    )))
+                }
+            };
             let limit = req.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
             let offset = req.get("offset").and_then(|v| v.as_i64()).unwrap_or(0);
             let db = core.db.lock()?;
-            let (items, total) =
-                todo::list(&db, filter, query.as_deref(), tag.as_deref(), limit, offset)?;
+            let (items, total) = todo::list(
+                &db,
+                filter,
+                query.as_deref(),
+                tag.as_deref(),
+                due_max,
+                limit,
+                offset,
+            )?;
             Ok(serde_json::json!({ "items": items, "total": total }))
         }
         "todo_get" => {

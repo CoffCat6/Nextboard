@@ -6,6 +6,11 @@
 //!
 //! 本 crate 不得引用任何 tauri 类型(02-migration-core.md §1 总原则)。
 
+// cdylib 链接时 MSVC 必然产出 .lib/.exp 导入库,link.exe 会把这件事打印到
+// stdout,rustc 的 `linker_messages` lint 将其转发为 warning —— 纯噪音
+// (每个版本 2 行),真实链接错误仍会以 error 报告,不受本 allow 影响。
+#![allow(linker_messages)]
+
 pub mod capture;
 pub mod clip;
 pub mod core;

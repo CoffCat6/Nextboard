@@ -354,6 +354,9 @@ int main(int argc, char* argv[]) {
     // 气泡点击(QSystemTrayIcon::messageClicked)→ 弹面板并切"待办"视图
     QObject::connect(&nb::CoreFacade::instance(), &nb::CoreFacade::todosRequested,
                      &panel, &nb::PanelWindow::showCenteredOnTodos);
+    // 托盘「今日待办」子菜单点击某条 → 弹面板定位高亮该条
+    QObject::connect(&nb::CoreFacade::instance(), &nb::CoreFacade::todoOpenRequested,
+                     &panel, &nb::PanelWindow::showCenteredOnTodo);
 
     // nbcore 通知 HWND = 主面板窗口;WM_APP → PanelWindow::clipChanged
     // → ClipEntryModel::refresh(200ms 去抖)。

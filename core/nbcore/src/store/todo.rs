@@ -268,7 +268,10 @@ pub fn update(
     Ok(())
 }
 
-/// 待办列表(§5 排序)。`query` 按正文模糊过滤,`tag` 精确匹配单标签。
+/// 待办列表(§5 排序)。`query` 按正文模糊过滤,`tag` 精确匹配单标签;
+/// `due_max` 给定时的口径 = **有截止 且 due_at ≤ due_max** 的未完成/按 filter
+/// 条件的条目(托盘「今日待办」用:传"今天 23:59:59.999 本地毫秒",
+/// 未完成时"已逾期"是该集合的子集,一条 WHERE 等价"逾期 或 今日到期")。
 ///
 /// ⚠️ 过滤条件必须与 `entry::list` 同语义:宿主切到"待办"页时下发同一组筛选参数,
 ///    这里若忽略就会与主列表给出不一致的结果集(实测表现为"筛选后条目变了")。
@@ -277,6 +280,7 @@ pub fn list(
     filter: TodoFilter,
     query: Option<&str>,
     tag: Option<&str>,
+    due_max: Option<i64>,
     limit: i64,
     offset: i64,
 ) -> AppResult<(Vec<TodoItem>, i64)> {
@@ -308,6 +312,7 @@ pub fn list(
          AND (:like IS NULL OR e.text_content LIKE :like ESCAPE '\\') \
          AND (:tag IS NULL OR EXISTS (SELECT 1 FROM json_each(e.tags) \
                                       WHERE json_each.value = :tag)) \
+         AND (:due_max IS NULL OR (m.due_at IS NOT NULL AND m.due_at <= :due_max)) \
          {TODO_ORDER} LIMIT :limit OFFSET :offset"
     );
     // ⚠️ 命名参数统一 `:name` 形式:sqlite 没有 `?limit` 这种写法(实测报
@@ -320,6 +325,7 @@ pub fn list(
                 ":end_of_today": end_of_today,
                 ":like": like,
                 ":tag": tag,
+                ":due_max": due_max,
                 ":limit": limit,
                 ":offset": offset,
             },
@@ -330,11 +336,12 @@ pub fn list(
         "SELECT COUNT(*) FROM todo_meta m JOIN clip_entries e ON e.id = m.id {filter_clause} \
          AND (:like IS NULL OR e.text_content LIKE :like ESCAPE '\\') \
          AND (:tag IS NULL OR EXISTS (SELECT 1 FROM json_each(e.tags) \
-                                      WHERE json_each.value = :tag))"
+                                      WHERE json_each.value = :tag)) \
+         AND (:due_max IS NULL OR (m.due_at IS NOT NULL AND m.due_at <= :due_max))"
     );
     let total: i64 = conn.query_row(
         &count_sql,
-        named_params! {":like": like, ":tag": tag},
+        named_params! {":like": like, ":tag": tag, ":due_max": due_max},
         |row| row.get(0),
     )?;
     Ok((items, total))
@@ -504,9 +511,9 @@ pub fn mark_bubble_shown(conn: &Connection, ids: &[String]) -> AppResult<()> {
     Ok(())
 }
 
-/// 今天 23:59:59.999 的本地毫秒("今日到期"排序界)。
+/// 今天 23:59:59.999 的本地毫秒("今日到期"排序界;ffi 的 `due=today` 过滤同源)。
 /// 用 chrono 的本地时区 —— DB 存绝对毫秒,日历边界按本地时区解释(设计 §3)。
-fn end_of_today_ms(now_ms: i64) -> i64 {
+pub(crate) fn end_of_today_ms(now_ms: i64) -> i64 {
     use chrono::TimeZone;
     let now = chrono::Local
         .timestamp_millis_opt(now_ms)
@@ -581,7 +588,7 @@ mod tests {
         let done = create_at(&mut conn, "已完成", None, None, None, now);
         set_done(&conn, &done, true).expect("set done");
 
-        let (items, total) = list(&conn, TodoFilter::Open, None, None, 50, 0).expect("open");
+        let (items, total) = list(&conn, TodoFilter::Open, None, None, None, 50, 0).expect("open");
         assert_eq!(total, 4);
         let ids: Vec<&str> = items.iter().map(|i| i.entry.id.as_str()).collect();
         assert_eq!(
@@ -591,13 +598,13 @@ mod tests {
 
         // 归档视图:只有已完成,按完成时间倒序
         let (done_items, done_total) =
-            list(&conn, TodoFilter::Done, None, None, 50, 0).expect("done");
+            list(&conn, TodoFilter::Done, None, None, None, 50, 0).expect("done");
         assert_eq!(done_total, 1);
         assert_eq!(done_items[0].entry.id, done);
         assert!(!done_items[0].overdue, "完成条目不再标逾期");
 
         // 全部:归档垫底,但仍可见(宿主待办页口径)
-        let (all, all_total) = list(&conn, TodoFilter::All, None, None, 50, 0).expect("all");
+        let (all, all_total) = list(&conn, TodoFilter::All, None, None, None, 50, 0).expect("all");
         assert_eq!(all_total, 5);
         assert_eq!(all.last().unwrap().entry.id, done);
     }
@@ -607,10 +614,10 @@ mod tests {
         let mut conn = crate::store::memory();
         let now = now_ms();
         let overdue = create_at(&mut conn, "过期的", Some(now - DAY), None, None, now);
-        let (items, _) = list(&conn, TodoFilter::All, None, None, 50, 0).expect("list");
+        let (items, _) = list(&conn, TodoFilter::All, None, None, None, 50, 0).expect("list");
         assert!(items[0].overdue, "未完成且过截止应标逾期");
         set_done(&conn, &overdue, true).expect("done");
-        let (items, _) = list(&conn, TodoFilter::All, None, None, 50, 0).expect("list2");
+        let (items, _) = list(&conn, TodoFilter::All, None, None, None, 50, 0).expect("list2");
         assert!(!items[0].overdue, "完成后不再逾期");
     }
 
@@ -623,7 +630,7 @@ mod tests {
         let id = create_at(&mut conn, "带标签的任务", Some(now - DAY), None, None, now);
         crate::store::entry::set_tags(&conn, &id, &["工作".to_string()]).expect("tags");
 
-        let (items, _) = list(&conn, TodoFilter::All, None, Some("工作"), 50, 0).expect("tag");
+        let (items, _) = list(&conn, TodoFilter::All, None, Some("工作"), None, 50, 0).expect("tag");
         assert_eq!(items.len(), 1, "标签筛选应命中待办");
         let json = serde_json::to_value(&items[0]).expect("serialize");
         assert_eq!(json["id"], serde_json::json!(id), "顶层 id(不是 entry.id 嵌套)");
@@ -662,18 +669,50 @@ mod tests {
         create_at(&mut conn, "写周报", None, None, None, now);
         crate::store::entry::set_tags(&conn, &milk, &["生活".to_string()]).expect("tags");
 
-        let (items, total) = list(&conn, TodoFilter::Open, Some("牛奶"), None, 50, 0).expect("query");
+        let (items, total) = list(&conn, TodoFilter::Open, Some("牛奶"), None, None, 50, 0).expect("query");
         assert_eq!(total, 1);
         assert_eq!(items[0].entry.text_content.as_deref(), Some("买牛奶"));
 
-        let (_, total) = list(&conn, TodoFilter::Open, None, Some("生活"), 50, 0).expect("tag");
+        let (_, total) = list(&conn, TodoFilter::Open, None, Some("生活"), None, 50, 0).expect("tag");
         assert_eq!(total, 1);
-        let (_, total) = list(&conn, TodoFilter::Open, None, Some("工作"), 50, 0).expect("tag2");
+        let (_, total) = list(&conn, TodoFilter::Open, None, Some("工作"), None, 50, 0).expect("tag2");
         assert_eq!(total, 0);
 
         // LIKE 通配符须转义:纯 "_" 不应全量命中
-        let (_, total) = list(&conn, TodoFilter::Open, Some("_"), None, 50, 0).expect("escape");
+        let (_, total) = list(&conn, TodoFilter::Open, Some("_"), None, None, 50, 0).expect("escape");
         assert_eq!(total, 0, "通配符未转义");
+    }
+
+    // ---- due_max 过滤(托盘「今日待办」= 逾期 + 今日到期) ----
+
+    #[test]
+    fn list_filters_by_due_max_for_today() {
+        let mut conn = crate::store::memory();
+        let now = now_ms();
+        let today_end = end_of_today_ms(now);
+        let overdue = create_at(&mut conn, "逾期的", Some(now - DAY), None, None, now);
+        let today = create_at(&mut conn, "今天到期", Some(today_end - 1000), None, None, now);
+        // "未来的"只用于证明 due_max 过滤会排除它(断言走 total/ids,不引变量)
+        create_at(&mut conn, "未来的", Some(now + DAY), None, None, now);
+        create_at(&mut conn, "无截止", None, None, None, now);
+        let done_today = create_at(&mut conn, "今天但已完成", Some(today_end - 2000), None, None, now);
+        set_done(&conn, &done_today, true).expect("done");
+
+        // 口径:未完成 且 有截止 且 due ≤ 今天末尾 —— "已逾期"是该集合的子集
+        let (items, total) = list(&conn, TodoFilter::Open, None, None, Some(today_end), 50, 0)
+            .expect("today filter");
+        assert_eq!(total, 2, "应为 逾期+今天到期,排除 未来/无截止/已完成");
+        let ids: Vec<&str> = items.iter().map(|i| i.entry.id.as_str()).collect();
+        assert_eq!(ids, [overdue.as_str(), today.as_str()], "沿用 §5 排序:逾期在前");
+
+        // due_max = None 时行为与旧契约完全一致(全部可见)
+        let (_, total) = list(&conn, TodoFilter::Open, None, None, None, 50, 0).expect("no filter");
+        assert_eq!(total, 4);
+
+        // 精确 COUNT 是托盘"…共 N 条"的前提:limit 1 时 total 仍为 2
+        let (_, total) = list(&conn, TodoFilter::Open, None, None, Some(today_end), 1, 0)
+            .expect("count with limit");
+        assert_eq!(total, 2);
     }
 
     // ---- 完成态与 counts ----
@@ -792,7 +831,7 @@ mod tests {
         let done = create_at(&mut conn, "已完成待办", None, None, None, now);
         set_done(&conn, &done, true).expect("done");
         clear_done(&conn).expect("clear done");
-        let (items, _) = list(&conn, TodoFilter::All, None, None, 50, 0).expect("list");
+        let (items, _) = list(&conn, TodoFilter::All, None, None, None, 50, 0).expect("list");
         assert_eq!(items.len(), 1);
     }
 

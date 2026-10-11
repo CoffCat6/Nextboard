@@ -1,4 +1,4 @@
-// 托盘:打开主面板 / 截图 / 暂停监听 / 退出。
+// 托盘:打开主面板 / 今日待办 / 截图 / 暂停监听 / 退出。
 #pragma once
 
 #include <QSystemTrayIcon>
@@ -21,10 +21,15 @@ public:
 
 private:
     void buildMenu();
+    /// 重建「今日待办」二级菜单的条目(docs/05-todo.md §6.6):
+    /// 每次一级菜单 aboutToShow 时调用 —— 不搞后台轮询,打开菜单才拉数。
+    void refreshTodoSubmenu();
 
     PanelWindow& m_panel;
     CoreBridge& m_core;
     class QMenu* m_menu = nullptr;
+    /// 「今日待办」二级菜单:内容在每次菜单展开时重建(§6.6)。
+    class QMenu* m_todoMenu = nullptr;
     /// 「暂停/恢复监听」菜单项:文案随状态切换(见 tray.cpp —— 刻意**不用**
     /// 勾选态表达状态,理由在那里)。
     QAction* m_pauseAction = nullptr;

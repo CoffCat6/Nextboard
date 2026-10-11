@@ -121,6 +121,10 @@ public:
     /// 请求弹面板并切到"待办"视图(docs/05-todo.md §4.3:气泡点击链路)。
     Q_INVOKABLE void showCenteredOnTodos() { emit todosRequested(); }
 
+    /// 请求弹面板、切"待办"视图并定位高亮指定条目
+    /// (托盘「今日待办」子菜单点击某条,docs/05-todo.md §6.6)。
+    Q_INVOKABLE void openTodoEntry(const QString& id) { emit todoOpenRequested(id); }
+
     /// 请求重新注册全局快捷键(设置里改完热键后调用)。
     /// 本类不认识 Hotkeys 实例,故只发信号,由 main.cpp 接线。
     Q_INVOKABLE void reloadHotkeys() { emit hotkeysChanged(); }
@@ -144,6 +148,8 @@ signals:
     void translatePrefillCentered(const QString& text);
     /// 请求弹面板并切到"待办"视图(气泡点击 / 托盘角标链路)。
     void todosRequested();
+    /// 请求弹面板、切待办视图并定位高亮指定条目(托盘今日待办子菜单)。
+    void todoOpenRequested(QString id);
     void themeChanged();
 
 public:

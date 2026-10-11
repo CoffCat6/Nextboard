@@ -15,6 +15,12 @@
 
 namespace nb {
 
+namespace {
+// 托盘「今日待办」子菜单的条目上限(§6.6):8×~30px 条目单屏从容,
+// 也是"一眼可扫读"的合理上限;超出部分显示"…共 N 条"(total 由 core 精确 COUNT)。
+constexpr int kTrayTodoMax = 8;
+} // namespace
+
 Tray::Tray(PanelWindow& panel, CoreBridge& core, QObject* parent)
     : QSystemTrayIcon(parent), m_panel(panel), m_core(core) {
     // 托盘图标与应用图标同源(main.cpp 已 setWindowIcon)。
@@ -68,13 +74,40 @@ void Tray::buildMenu() {
     //    本菜单已无可勾选项,该规则无用。**若日后又加回可勾选项**,必须同时
     //    补回 indicator 规则,否则勾选标记会走 QSS 默认样式,深色下可能看不清。
     m_menu->setObjectName(QStringLiteral("nbTrayMenu"));
+    // ⚠️ 选择器必须同时覆盖**二级菜单**:QSS 作用于目标窗口及其全部子窗口,
+    //    但 #nbTrayMenu 只匹配一级菜单本体,子菜单(独立窗口)会退回原生样式
+    //    (原生灰底/灰字,与这里的浅色主题割裂)。子菜单显式命名后并列进选择器。
+    //    另:一级菜单现在**有了子菜单箭头**,当初"右内边距 24px 是给箭头预留、
+    //    无子菜单时纯空占"的历史结论不再成立 —— 箭头列已必要,内边距保持 8px
+    //    会让文字与箭头贴得很近,属可接受(条目短),不再为它单独加规则。
     m_menu->setStyleSheet(QStringLiteral(
-        "QMenu#nbTrayMenu { background: #FFFFFF; border: 1px solid #D9E0E7; padding: 2px; }"
-        "QMenu#nbTrayMenu::item { color: #17202A; padding: 4px 8px; border-radius: 4px; }"
-        "QMenu#nbTrayMenu::item:selected { background: #E8F1FF; color: #17202A; }"
-        "QMenu#nbTrayMenu::item:disabled { color: #B6BEC8; }"
-        "QMenu#nbTrayMenu::separator { height: 1px; background: #D9E0E7; margin: 4px 8px; }"));
+        "QMenu#nbTrayMenu, QMenu#nbTrayTodoMenu "
+        "{ background: #FFFFFF; border: 1px solid #D9E0E7; padding: 2px; }"
+        "QMenu#nbTrayMenu::item, QMenu#nbTrayTodoMenu::item "
+        "{ color: #17202A; padding: 4px 8px; border-radius: 4px; }"
+        "QMenu#nbTrayMenu::item:selected, QMenu#nbTrayTodoMenu::item:selected "
+        "{ background: #E8F1FF; color: #17202A; }"
+        "QMenu#nbTrayMenu::item:disabled, QMenu#nbTrayTodoMenu::item:disabled "
+        "{ color: #B6BEC8; }"
+        "QMenu#nbTrayMenu::separator, QMenu#nbTrayTodoMenu::separator "
+        "{ height: 1px; background: #D9E0E7; margin: 4px 8px; }"));
     m_menu->addAction("打开主面板", [this] { m_panel.showCentered(); });
+
+    // ---- 「今日待办」二级菜单(§6.6):不打开面板就能看到今天还有什么 ----
+    // 一级项只做入口+计数(具体待办放不下,既定决策);条目在 refreshTodoSubmenu
+    // 里于每次菜单展开时重建(aboutToShow 钩子,与「延时截图」动态文案同点)。
+    m_todoMenu = new QMenu(QStringLiteral("今日待办"), m_menu);
+    m_todoMenu->setObjectName(QStringLiteral("nbTrayTodoMenu"));
+    m_todoMenu->addAction(QStringLiteral("今天没有待办"))->setEnabled(false);
+    QAction* const todoEntry = m_menu->addMenu(m_todoMenu);
+    Q_UNUSED(todoEntry);
+    connect(m_todoMenu, &QMenu::triggered, this, [this](QAction* action) {
+        // 条目 action 的 data = 条目 id;"查看全部"是空 id → 不定位只切视图
+        const QString id = action->data().toString();
+        if (id.isEmpty()) CoreFacade::instance().showCenteredOnTodos();
+        else CoreFacade::instance().openTodoEntry(id);
+    });
+
     m_menu->addAction("打开翻译", [] { CoreFacade::instance().openTranslateCentered(); });
     m_menu->addSeparator();
     // 截图 / 贴图入口(对齐第一代托盘):截图前先收起面板,否则面板会被拍进画面;
@@ -94,10 +127,12 @@ void Tray::buildMenu() {
             startDelayedCapture(captureDelaySeconds(), CaptureIntent::Region);
         });
     });
-    // 菜单每次展开时把当前等待秒数写进标题:不进设置也能知道会等多久
+    // 菜单每次展开时把当前等待秒数写进标题,并重建「今日待办」子菜单:
+    // 不搞后台轮询,打开菜单才拉数(§6.6);两条动态内容共用这一个钩子。
     connect(m_menu, &QMenu::aboutToShow, this, [this] {
         m_delayAction->setText(
             QStringLiteral("延时截图（%1 秒）").arg(captureDelaySeconds()));
+        refreshTodoSubmenu();
     });
     // 口径与热键一致(默认"最近复制",可在设置里切换为"图片优先")
     m_menu->addAction("贴图（最近内容）", [] { CoreFacade::instance().pinLatest(); });
@@ -126,6 +161,66 @@ void Tray::buildMenu() {
     m_menu->addAction(QStringLiteral("退出"), [] {
         QApplication::quit();
     });
+}
+
+void Tray::refreshTodoSubmenu() {
+    // 口径(docs/05-todo.md §6.6):未完成 且 (已逾期 或 今天到期)。
+    // core 侧 due=today 过滤(等价 due_at ≤ 今天末尾,逾期是其子集),
+    // 排序沿用 §5(逾期>今日>未来>无期限);total 精确,是"…共 N 条"的前提。
+    const QJsonObject resp = m_core.call("todo_list", QJsonObject{
+        {"done", QJsonValue(QStringLiteral("open"))},
+        {"due", QJsonValue(QStringLiteral("today"))},
+        {"limit", QJsonValue(static_cast<double>(kTrayTodoMax))},
+        {"offset", QJsonValue(0)},
+    });
+    // ⚠️ 重建前先断开 triggered 连接再清空条目:clear() 只删 action,
+    //    不删 lambda 里对 this 的隐式捕获关系,但被删 action 的连接随对象
+    //    销毁自动断开 —— 这里直接重建即可,无需手工断连(注释防止后人怀疑)。
+    m_todoMenu->clear();
+
+    if (!resp.value("ok").toBool()) {
+        // FFI 失败(核心未起/被占用):给出禁用态提示,不弹错误打扰
+        m_todoMenu->addAction(QStringLiteral("暂不可用"))->setEnabled(false);
+        m_todoMenu->addSeparator();
+        m_todoMenu->addAction(QStringLiteral("查看全部"),
+                              [this] { CoreFacade::instance().showCenteredOnTodos(); });
+        return;
+    }
+    const QJsonArray items = resp.value("data").toObject().value("items").toArray();
+    const int total = resp.value("data").toObject().value("total").toInt();
+
+    if (items.isEmpty()) {
+        m_todoMenu->addAction(QStringLiteral("今天没有待办"))->setEnabled(false);
+    } else {
+        for (const QJsonValue& v : items) {
+            const QJsonObject item = v.toObject();
+            const QString id = item.value("id").toString();
+            const QString text = item.value("textContent").toString();
+            const qint64 dueAt = static_cast<qint64>(
+                item.value("dueAt").toDouble());
+            const QJsonObject todo = item.value("todo").toObject();
+            const bool overdue = todo.value("overdue").toBool();
+            // 状态前缀:逾期 → "已逾期";今天到期 → "今天 HH:mm"(与卡片徽标同口径)
+            QString status = overdue ? QStringLiteral("已逾期")
+                : QStringLiteral("今天 %1").arg(
+                      QDateTime::fromMSecsSinceEpoch(dueAt).toString(
+                          QStringLiteral("HH:mm")));
+            // 正文首行截 20 字:QMenu 无横向滚动,长文会把菜单撑到离谱
+            QString line = text.section(QLatin1Char('\n'), 0, 0).left(20);
+            if (text.section(QLatin1Char('\n'), 1).size() > 0) line += QStringLiteral("…");
+            QAction* const entry = m_todoMenu->addAction(
+                QStringLiteral("%1 · %2").arg(status, line));
+            entry->setData(id);
+        }
+        if (total > items.size()) {
+            QAction* const more = m_todoMenu->addAction(
+                QStringLiteral("…共 %1 条").arg(total));
+            more->setEnabled(false);
+        }
+    }
+    m_todoMenu->addSeparator();
+    m_todoMenu->addAction(QStringLiteral("查看全部"),
+                          [this] { CoreFacade::instance().showCenteredOnTodos(); });
 }
 
 void Tray::onTodoDue() {

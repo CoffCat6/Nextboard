@@ -92,6 +92,10 @@ public:
     /// 待办编辑预填:{text, dueAt, remindAt, notifyAt}(毫秒,无则 0);
     /// 非 todo / 不存在返回空 map(QML 侧判空)。
     Q_INVOKABLE QVariantMap todoMeta(const QString& id);
+    /// 条目 id → 当前行号(托盘「今日待办」点击定位用);不在当前行集返回 -1。
+    /// ⚠️ 只查**已加载**的行(首屏 limit 50):托盘子菜单展示的条目取自同一
+    ///    排序的前 N 条,必在首屏内;超出的场景由 QML 侧退化处理(不定位)。
+    Q_INVOKABLE int indexOfId(const QString& id) const;
     /// 清空已完成的待办(归档清理)。
     Q_INVOKABLE void todoClearDone();
     /// 面板**隐藏**时调用:清空全部行 —— QML 侧委托随之销毁,图片纹理一并释放;
