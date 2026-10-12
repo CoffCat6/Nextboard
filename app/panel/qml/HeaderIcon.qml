@@ -23,7 +23,9 @@ Item {
     ///  其中 "pin" 同时兼作"固定"状态标识;
     ///  "chevron" | "pencil" | "trash"    —— 卡片右下角操作按钮(展开收起 / 编辑 / 删除),
     ///  其中 "chevron" 只画一个方向,反向由使用处 rotation: 180 翻转;
-    ///  "filter"                          —— 筛选入口(漏斗),头部「筛选」按钮用。
+    ///  "filter"                          —— 筛选入口(漏斗),头部「筛选」按钮用;
+    ///  "multiselect"                     —— 条目多选(三行勾选列表),
+    ///    与 "todo" 单复选框刻意区分:todo = 一条任务,multiselect = 多条并列勾选。
     property string kind: ""
     /// 描边与填充色(由调用方按所在处的文字色注入)
     property color color: Theme.colors.textPrimary
@@ -411,6 +413,48 @@ Item {
             width: 1.8 * root.unit; height: root.stroke * root.unit
             radius: height / 2
             color: root.color
+        }
+    }
+
+    // ---- 多选:三行"行首小方块 + 横线"的列表勾选形态 ----
+    // 与近邻图标的区分线(16px 视口下都很容易撞脸,刻意避开):
+    //  - vs "todo"(单个复选框+对勾):todo 是**一条**任务的勾选态,本图标是
+    //    **多条并列**的勾选列表 —— 三行 × (方块+横线);
+    //  - vs "text"(三条横线):text 无行首方块、末行短;本图标每行都有方块,
+    //    且三行等长 —— "行首方块"是勾选列表的关键特征,横线系不与之混淆。
+    // ⚠️ 方块用**实心小方块**(无描边):3.6px 尺寸配 1.5 描边在小尺寸下发糊,
+    //    实心点缩到 11px 徽标尺寸也仍清晰。
+    // ⚠️ 定位全用常量数值,不要引用自身尺寸(rotation 下自引用会挂绑定,
+    //    与 chevron/pencil/filter 同一规矩);行距 4.5,三行均布。
+    // ⚠️ 行 y 通过 Repeater 的 id 引用(multiSel.lineYs[index]):不要写
+    //    parent.parent.parent —— 层级引用结构一变就断(qmllint 也会报)。
+    Item {
+        id: multiSel
+        anchors.fill: parent
+        visible: root.kind === "multiselect"
+
+        readonly property var lineYs: [2.6, 7.1, 11.6]
+        Repeater {
+            model: 3
+            delegate: Item {
+                anchors.fill: parent
+                required property int index
+                // 行首实心小方块(勾选框)
+                Rectangle {
+                    x: 1.6 * root.unit
+                    y: (multiSel.lineYs[index] + 0.9) * root.unit
+                    width: 3.6 * root.unit; height: 3.6 * root.unit
+                    radius: 0.8 * root.unit
+                    color: root.color
+                }
+                // 行内容横线(方块右侧起,三条等长)
+                Rectangle {
+                    x: 6.8 * root.unit
+                    y: (multiSel.lineYs[index] + 1.7) * root.unit
+                    width: 7.6 * root.unit; height: 1.8 * root.unit; radius: height / 2
+                    color: root.color
+                }
+            }
         }
     }
 }

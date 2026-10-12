@@ -1248,8 +1248,10 @@ Rectangle {
                 Layout.alignment: Qt.AlignVCenter
                 size: "sm"
                 // 进入选择模式后转 primary(模式开关的状态可见性)
+                // ⚠️ 图标用 multiselect 而非 todo:todo(单复选框)已被头部
+                //    「待办」按钮占用,复用会让两个相邻按钮长得一样(用户实测)。
                 variant: root.selectMode ? "primary" : "secondary"
-                iconName: "todo"
+                iconName: "multiselect"
                 text: root.selectMode ? "退出多选" : "多选"
                 onClicked: root.toggleSelectMode()
             }
