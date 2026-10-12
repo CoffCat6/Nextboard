@@ -338,19 +338,6 @@ Rectangle {
                 border.width: option.selected ? 0 : 1
                 border.color: option.dotColor
             }
-            Text {
-                anchors.verticalCenter: parent.verticalCenter
-                // `·` 分隔名与计数:直接拼空格时形如 "1 1" 会糊成一片,
-                // 分不清哪个是名字哪个是数量(实测反馈)。
-                text: option.count > 0 ? option.label + " · " + option.count : option.label
-                font.pixelSize: Theme.metrics.fontCaption
-                // 标签选中态用标签自己的色;未选中中性灰 ——
-                // 全部着色会盖住分类行的层级(§47 配色比例)。
-                color: option.selected
-                       ? (option.dotColor !== "transparent" ? option.dotColor
-                                                             : Theme.colors.accent)
-                       : Theme.colors.textSecondary
-            }
         }
         MouseArea {
             id: optionMa
@@ -1117,6 +1104,16 @@ Rectangle {
                       ? "筛选 " + root.filterCount : "筛选"
                 onClicked: root.filterPopupOpen ? root.closeFilterPopup()
                                                 : root.openFilterPopup()
+                // 供筛选浮层的"移出自动收回"判定:浮层锚在本按钮下方,
+                // 从按钮滑入浮层的路径上鼠标会短暂离开按钮,故本按钮的 hover
+                // 也算"用户还在筛选区域"(与浮层内 hover 同源判定)。
+                MouseArea {
+                    id: filterButtonMouseMa
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    // 只提供 hover 信号,点击仍归按钮(onClicked 已在上层)
+                    onClicked: filterButton.clicked()
+                }
             }
         }
 
@@ -1147,6 +1144,48 @@ Rectangle {
             modal: false
             visible: root.filterPopupOpen
             onClosed: root.filterPopupOpen = false
+            // ---- 鼠标移出自动收回 ----
+            // 用户从筛选浮层滑到别处(去列表/搜索/别的按钮)时期望它自己关掉,
+            // 不必专门按 Esc 或点外部(用户反馈"鼠标不在筛选窗口自动收回")。
+            // 判定"鼠标离开"需要两处同源:浮层内(hoverHandler)+ 触发它的
+            // 「筛选」按钮(filterButtonMouseMa)。浮层锚在按钮下方,从按钮滑进
+            // 浮层时鼠标会"离开"按钮进入浮层 —— 中间短暂两个都不 hover,故
+            // 用延迟判定(留给用户跨区滑动的时间)。
+            //
+            // ⚠️ 触发条件加"**鼠标先进过浮层**"(hasHovered):只开浮层但鼠标没
+            //    进去过(如程序化验收、键盘导航)时**不自动关** —— 否则用户点开
+            //    后手在别处做选择,浮层立刻被关,选项都来不及看。真实路径是
+            //    "滑进去看选项 → 选完移开",先进入过浮层才谈得上"移出"。
+            HoverHandler {
+                id: filterPopupHover
+                // 缺省会抢触控/鼠标以外的设备;只关心鼠标/触控笔就够
+                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                                 | PointerDevice.Stylus
+                onHoveredChanged: if (hovered) filterPopup.hasHovered = true
+            }
+            property bool hasHovered: false
+            Timer {
+                id: filterAutoHideTimer
+                interval: 600
+                repeat: true
+                onTriggered: {
+                    // 满足"曾进入过 + 现在浮层和按钮都不在 hover"才关;
+                    // 仍在 hover 则持续计时(等用户真离开)。
+                    if (filterPopup.hasHovered
+                        && !filterPopupHover.hovered
+                        && !(filterButtonMouseMa.hovered && filterButtonMouseMa.containsMouse)) {
+                        root.closeFilterPopup()
+                    }
+                }
+            }
+            onVisibleChanged: {
+                if (visible) {
+                    filterPopup.hasHovered = false
+                    filterAutoHideTimer.start()
+                } else {
+                    filterAutoHideTimer.stop()
+                }
+            }
 
             background: Rectangle {
                 radius: Theme.metrics.radiusCard

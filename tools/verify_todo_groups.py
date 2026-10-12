@@ -152,6 +152,12 @@ def main():
         assert "active: false" in filter_line and "count: 0" in filter_line, \
             f"初始不该有生效筛选: {filter_line}"
         print("  ✅ 筛选浮层可打开,初始无生效条件(角标 0)")
+        # 程序化打开(鼠标从未进入浮层)后 ~1s 再读,**不应**被自动收回:
+        # 自动收回要求"鼠标曾进入过浮层",纯点开没进去不触发 —— 否则用户
+        # 点开浮层去看选项、手在别处,浮层立刻被关,选项都来不及看。
+        assert "FILTER autoHideKept popupOpen: true" in text, \
+            "未进入浮层时不该自动收回(鼠标没进去过,谈何'移出')"
+        print("  ✅ 仅打开未进入时不自动收回(需先进入过浮层)")
 
         # 设「截图」来源后:角标 1、activeSource=capture、列表收窄到 capture 总数
         set_line = next((r for r in lines if "FILTER afterSet" in r), None)

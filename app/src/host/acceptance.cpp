@@ -152,25 +152,33 @@ void reportTodoGroups(PanelWindow& panel) {
                     qInfo() << "FILTER popupOpen:" << st3.value("filterPopupOpen").toBool()
                             << "active:" << st3.value("filterActive").toBool()
                             << "count:" << st3.value("filterCount").toInt();
-                    // 设一个来源筛选 → 角标应变 1、列表应收窄、popup 仍开着(浮层里选完
-                    // 就关要再开一次,太啰嗦 —— 选完不关,由用户看效果后自行关闭)。
-                    panel.invokeAcceptance("acceptanceSetSource");
-                    QTimer::singleShot(600, &panel, [&panel] {
-                        const QVariantMap st4 = panel.rootProperty("acceptanceState").toMap();
-                        const QVariantMap resp = CoreFacade::instance().call(
-                            "list_entries", QVariantMap{{"source", "capture"},
-                                                        {"limit", 50}, {"offset", 0}});
-                        qInfo() << "FILTER afterSet active:" << st4.value("filterActive").toBool()
-                                << "count:" << st4.value("filterCount").toInt()
-                                << "activeSource:" << st4.value("activeSource").toString()
-                                << "| listTotal:" << resp.value("data").toMap().value("total").toInt();
-                        // 清掉筛选收尾,并读回确认回到未筛选态
-                        panel.invokeAcceptance("acceptanceClearSource");
-                        QTimer::singleShot(500, &panel, [&panel] {
-                            const QVariantMap st5 = panel.rootProperty("acceptanceState").toMap();
-                            qInfo() << "FILTER afterClear active:" << st5.value("filterActive").toBool()
-                                    << "count:" << st5.value("filterCount").toInt();
-                            QApplication::quit();
+                    // 验证"仅打开、鼠标未进入"时**不自动收回**(自动收回要求先进过
+                    // 浮层):开浮层后停 1s 再读,仍开着才算通过 —— 否则用户点开
+                    // 去看选项、手在别处,浮层立刻被关,选项都来不及看。
+                    QTimer::singleShot(1000, &panel, [&panel] {
+                        const QVariantMap kept = panel.rootProperty("acceptanceState").toMap();
+                        qInfo() << "FILTER autoHideKept popupOpen:"
+                                << kept.value("filterPopupOpen").toBool();
+                        // 设一个来源筛选 → 角标应变 1、列表应收窄、popup 仍开着(浮层里选完
+                        // 就关要再开一次,太啰嗦 —— 选完不关,由用户看效果后自行关闭)。
+                        panel.invokeAcceptance("acceptanceSetSource");
+                        QTimer::singleShot(600, &panel, [&panel] {
+                            const QVariantMap st4 = panel.rootProperty("acceptanceState").toMap();
+                            const QVariantMap resp = CoreFacade::instance().call(
+                                "list_entries", QVariantMap{{"source", "capture"},
+                                                            {"limit", 50}, {"offset", 0}});
+                            qInfo() << "FILTER afterSet active:" << st4.value("filterActive").toBool()
+                                    << "count:" << st4.value("filterCount").toInt()
+                                    << "activeSource:" << st4.value("activeSource").toString()
+                                    << "| listTotal:" << resp.value("data").toMap().value("total").toInt();
+                            // 清掉筛选收尾,并读回确认回到未筛选态
+                            panel.invokeAcceptance("acceptanceClearSource");
+                            QTimer::singleShot(500, &panel, [&panel] {
+                                const QVariantMap st5 = panel.rootProperty("acceptanceState").toMap();
+                                qInfo() << "FILTER afterClear active:" << st5.value("filterActive").toBool()
+                                        << "count:" << st5.value("filterCount").toInt();
+                                QApplication::quit();
+                            });
                         });
                     });
                 });
