@@ -37,6 +37,7 @@ add_executable(nextboard WIN32
     src/host/auto_start.cpp
     src/host/tray.cpp
     src/host/hotkeys.cpp
+    src/host/acceptance.cpp
     src/host/core_bridge.cpp
     src/host/memory_probe.cpp
     src/panel/panel_window.cpp

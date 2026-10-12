@@ -304,15 +304,6 @@ QQuickItem* findItemByName(QQuickItem* node, const QString& name) {
 }
 } // namespace
 
-bool PanelWindow::itemCenterByObjectName(const QString& objectName, QPointF* centerOut) const {
-    QQuickItem* target = findAcceptanceItem(objectName);
-    if (!target) return false;
-    // scenePos 即窗口内坐标(scene == window contents,见 clickByObjectName 注释)
-    const QPointF topLeft = target->mapToScene(QPointF(0, 0));
-    if (centerOut) *centerOut = topLeft + QPointF(target->width() / 2, target->height() / 2);
-    return true;
-}
-
 QQuickItem* PanelWindow::findAcceptanceItem(const QString& objectName) const {
     if (!m_quick || !m_quick->rootObject()) return nullptr;
     QQuickWindow* win = m_quick->quickWindow();

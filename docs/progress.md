@@ -3193,7 +3193,98 @@ Uninstall: 2 sections (1 required)     ← 之前是 0 sections
 - **旋转/缩放这类视觉变换,挂在最小的作用域上**:要转图标就转图标容器,
   挂在按钮上等于把内部所有内容一起变换。
 
+---
 
+## 2026-10-11(六)待办(Todo)功能从零实现
 
+> 起因:上一轮的工作区回退导致待办功能源码整体消失(未被 git 提交),
+> 按用户确认"基于当前基线重新实现"。
 
+### 诉求
 
+新建第四种条目类型 todo:截止/提醒/通知三组可选时刻、待办视图与计数、
+到点提醒(面板内)+ 通知(托盘气泡)、搜索与标签筛选对两个端点同语义。
+设计契约见 docs/05-todo.md(本轮新建)。
+
+### 改动清单
+
+- core:v6 迁移(重建 clip_entries 扩 kind CHECK 至 'todo' + 新建 todo_meta)、
+  store/todo.rs(CRUD/排序/扫描)、todo.rs(15s 调度线程)、ffi 十个方法、
+  list_entries 联查 todo 徽标、evict/clear 排除待办;
+- app:clip_entry_model 待办角色与 todo_* 方法、待办视图走 todo_list、
+  tray 气泡接线(WM_APP_TODO_DUE)、Main.qml 新建卡片/时间选择器/
+  导航页/EntryCard 待办形态、HeaderIcon 新增 todo+bell 图标。
+
+### 四个实测坑(每个都靠"真实链路"才暴露)
+
+1. **v6 重建表连 FTS 触发器一起删**:触发器挂在旧表上,DROP TABLE 会带走它。
+   v3 当年没这问题是因为 FTS 是 v4 才引入的。漏建后搜索/索引同步**静默失效**
+   (`cargo test` 立刻变红才发现)。迁移 SQL 里必须显式重建三个触发器。
+2. **`Tumbler.currentValue` 不存在**:那是 ComboBox 的 API。首版读它恒为
+   undefined,撞上 undefined 守卫后 `rebuildFromTumblers` **永远提前返回**,
+   拨滚轮从不发 changed → "只有快捷钮能设时间"。标准取法是
+   `values[currentIndex]`。
+3. **列表 delegate 重复声明 required property**:在 delegate 里再写一遍
+   `required property string entryId`(EntryCard 根部已声明),注入机制失效,
+   **整页委托创建失败** —— 现象是"计数正常、列表空白、空状态也不出现"。
+4. **验收注入方式错误会掩盖全部交互缺陷**:`QCoreApplication::sendEvent`
+   直接发给 QQuickWindow 会绕过窗口系统鼠标状态,事件被 Overlay 的 popup
+   容器拦下 —— **所有按钮都点不着**,连卡片上的「保存」也一样(探针结果全是
+   假象)。必须发给 **QQuickWidget**(QWidget 层),由它完整转发进 QML 场景。
+
+### 教训
+
+- **验收必须走真实链路**。本轮验收前后共三版:第一版直调 `commit()`,
+  第二版用 `setFromMs`(预填路径),都绕过了"拨轮→changed→写回"的真实链路,
+  把坑 2 掩盖了对轮;第四版改成真实点击 + 真实拨 currentIndex 后立刻暴露。
+- **迁移类改动必须断言"既有资产完好"**:v6 那次如果只测"todo 能建",
+  触发器丢失会一路带到发布。
+- 组件级 API 要先确认存在(`currentValue` 这类"看起来该有"的属性最危险):
+  写进注释,避免后人再踩。
+
+### 验证
+
+`cargo test` 201→202 全绿(含 v6 迁移逐字段断言、形状契约、双端过滤、
+扫描去重、淘汰排除);`build.ps1` 构建通过;`tools/verify_todo.py` 端到端
+全绿;`--todo-flow` 真实点击链路 STEP1-4 全 match。
+
+---
+
+## 2026-10-11(六)托盘「今日待办」二级菜单
+
+### 诉求
+
+不打开面板就能看到今天还有什么;采用二级菜单(一级放不下)。
+
+### 改动清单
+
+- core:`todo_list` 增可选参数 `due="today"`(未完成且有截止且 due ≤ 今天末尾),
+  边界复用 `end_of_today_ms` 单点;非法值显式报错。选 core 过滤而非宿主过滤的
+  理由:"…共 N 条"需要 SQL 层精确 COUNT。
+- tray:一级项「今日待办 (N)」+ 子菜单(上限 8 条 + "…共 N 条" + 空态 +
+  「查看全部」),刷新挂既有 `aboutToShow` 钩子(无轮询);QSS 选择器扩到子菜单
+  `nbTrayTodoMenu`(#nbTrayMenu 只匹配一级本体,子菜单会退回原生样式)。
+- 定位链路:`PanelWindow::showCenteredOnTodo(id)` → QML `showTodos(id)` →
+  `indexOfId` + `positionViewAtIndex` + 高亮 1.8s。
+
+### 顺带修复与清理
+
+- 列表整页空白(见上一节坑 3);
+- 清空全部构建 warning:due 分支多余的持锁、cdylib 链接产出的 linker_messages
+  噪音(`#![allow(linker_messages)]`)、测试里的 `mut`/未用变量。
+
+### 工程质量收尾
+
+- `tools/` 下的验证脚本此前被 `.gitignore` 的 `tools` 规则挡住、**从未入库**
+  (该规则在本轮核对时已不存在);两个脚本改为按脚本位置推导仓库根、
+  去掉硬编码绝对路径与写死的版本号(改为从 store/mod.rs 解析 LATEST_VERSION),
+  随本轮入库;
+- 验收钩子**保留并规范化**:`--todo-flow` 驱动逻辑从 main.cpp(369→271 行)
+  抽到 `app/src/host/acceptance.cpp`;删除无调用的 `itemCenterByObjectName`;
+  在 panel_window.hpp 集中标注钩子的存在理由、移除方式与踩坑。
+
+### 验证
+
+202 单测全绿;构建通过(无 warning);`verify_todo.py` 全绿(含 due=today
+断言);`--todo-flow` 迁移到独立文件后行为一致(STEP1-4 全 match);
+库体检脚本改默认路径与自动版本号后仍全绿。

@@ -70,26 +70,30 @@ public:
     /// id 无效(已删)时退化为普通 showCenteredOnTodos 行为。
     void showCenteredOnTodo(const QString& id);
 
-    /// 自动化验收:在 QML 根上调用一个**零参**验收函数。
+    // ---- 自动化验收钩子(仅 --todo-flow 等验收入口使用,产品路径不调用) ----
+    //
+    // 存在理由:本会话中它抓出了多个只有"真实点击"才能暴露的缺陷
+    // (委托重复声明导致列表整页空白、「点确定」事件被 Overlay 拦下),
+    // 直调 onClicked 的验收方式会把这些全部掩盖。
+    // 保留成本:不进产品交互路径,只增少量代码;收益是交互缺陷可回归。
+    // 若要移除,连带删除 main.cpp 的 --todo-flow 块与 Main.qml 的 acceptance* 成员。
+
+    /// 在 QML 根上调用一个**零参**验收函数。
     /// ⚠️ 刻意不带参数:invokeMethod 按签名查找,带参与不带参是不同签名。
-    /// 参数走 PanelWindow::setRootProperty 写属性传递。
+    /// 参数走 setRootProperty 写属性传递。
     bool invokeAcceptance(const char* method);
 
-    /// 自动化验收:读 / 写 QML 根上的属性(传参 + 观测验收状态)。
+    /// 读 / 写 QML 根上的属性(传参 + 观测验收状态)。
     QVariant rootProperty(const char* name) const;
     bool setRootProperty(const char* name, const QVariant& value);
 
-    /// 自动化验收:在 QML 树中按 objectName 找项,**投递一次真实的左键按下+抬起**。
+    /// 在 QML 树中按 objectName 找项,**投递一次真实的左键按下+抬起**。
     ///
-    /// 为什么必须投真实事件而不是直接调 onClicked:直接调会绕过按钮的命中测试
-    /// (是否被遮挡 / 是否 hit-testable / 是否被上层 MouseArea 吞掉),而这些
-    /// 恰恰是"点了没反应"类缺陷的所在 —— 早先用直调方法做验收,漏掉了
-    /// 「点确定无效」这个真 bug。
-    ///
+    /// ⚠️ 注入目标是 QQuickWidget(QWidget 层)而非 QQuickWindow:后者会绕过
+    ///    窗口系统的鼠标状态,事件被 Overlay 的 popup 容器拦下,所有按钮
+    ///    都点不着(实测踩坑,详见实现处注释)。
     /// 返回:是否找到目标且事件被派发(找不到返回 false)。
     bool clickByObjectName(const QString& objectName);
-    /// 按 objectName 找项的**场景坐标中心**(找不到返回 false)。
-    bool itemCenterByObjectName(const QString& objectName, QPointF* centerOut) const;
 
     /// QML 侧 ESC 调用(关闭抽屉后的兜底隐藏)。
     Q_INVOKABLE void hidePanel() { hide(); }
@@ -142,7 +146,10 @@ private:
     /// ⚠️ 根取窗口 contentItem 而非 QML rootObject:Popup 内容挂在 Overlay 层,
     ///    是 rootObject 之外的兄弟子树,从 rootObject 递归找不到。
     QQuickItem* findAcceptanceItem(const QString& objectName) const;
-    /// 验收专用:返回 scenePos 处**最顶层**的可交互项(递归探测,诊断"点了没反应")。
+    /// 验收专用:返回 scenePos 处**最顶层**的可交互项。
+    /// 只在 clickByObjectName 的探针日志里用(定位"点到了别的东西"这类问题);
+    /// 注意它与 Qt 官方 childAt 的语义差异——本函数按"可见+contains"递归,
+    /// 命中祖先也算,不能单独作为"按钮是否被遮挡"的判据(实测误导过一次)。
     QQuickItem* topItemAt(QQuickItem* node, const QPointF& scenePos) const;
 
     CoreBridge& m_core;
