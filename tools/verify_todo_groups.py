@@ -86,6 +86,12 @@ def main():
         done_id = mk("已完成的", now - 2 * DAY)
         core.call("todo_set_done", {"id": done_id, "done": True})
 
+        # 再造一条 capture 来源的条目:用来验证"来源条应出现 capture、
+        # 不出现 clipboard/todo"。save_text_entry 可指定 source。
+        resp = core.call("save_text_entry",
+                         {"text": "截图识别结果", "source": "capture"})
+        assert resp.get("ok"), resp
+
         # 让独立进程用同一数据目录读回分组键
         log = Path(data_dir) / "nextboard.log"
         proc = subprocess.Popen([str(EXE), "--todo-groups", "--data-dir", data_dir])
@@ -94,15 +100,18 @@ def main():
         except subprocess.TimeoutExpired:
             proc.kill()
             raise SystemExit("nextboard.exe --todo-groups 超时未退出")
-        line = None
-        for raw in log.read_text(encoding="utf-8", errors="replace").splitlines():
-            if "GROUPS" in raw:
-                line = raw
-        if line is None:
+        lines = [r for r in log.read_text(encoding="utf-8", errors="replace").splitlines()
+                 if "GROUPS" in r]
+        if not lines:
             raise SystemExit(f"日志里没有 GROUPS 行(看 {log})")
-        print("   ", line.strip())
-        keys = line.split("keys:")[1].strip().strip('"').split(",")
+        for r in lines:
+            print("   ", r.strip())
 
+        todo_line = next((r for r in lines if '"todo"' in r), None)
+        all_line = next((r for r in lines if '"all"' in r), None)
+        assert todo_line and all_line, f"缺少 todo/all 两个视图的读数: {lines}"
+
+        keys = todo_line.split("keys:")[1].split("|")[0].strip().strip('"').split(",")
         # 排序契约(core §5):归档垫底;未完成内 逾期 > 今日 > 未来 > 无期限
         assert keys == ["overdue", "today", "future", "none", "done"], \
             f"分组键序不符预期: {keys}"
@@ -111,6 +120,20 @@ def main():
         assert staged == keys, f"分组边界错乱: {staged}"
         print("  ✅ 分组键序 = overdue → today → future → none → done(§5 排序)")
         print("  ✅ 五个组标题各出现在对应分组的首行,无重复/错位")
+
+        # 来源条:待办视图整体隐藏(待办已是顶层标签,列出来是冗余且不生效)
+        assert "sourceBar: false" in todo_line, \
+            f"待办视图不该显示来源筛选条: {todo_line}"
+        print("  ✅ 待办视图不显示来源筛选条(无冗余的「待办」按钮)")
+
+        # 来源条:全部视图里不得出现 todo / clipboard 两个来源
+        chips = all_line.split("sourceChips:")[1].split("|")[0].strip().strip('"')
+        chip_list = [c.strip('"') for c in chips.split(",") if c.strip('"')]
+        assert "todo" not in chip_list, f"来源条不应出现「待办」chip: {chips}"
+        assert "clipboard" not in chip_list, f"来源条不应出现「剪贴板」chip: {chips}"
+        assert chip_list == ["capture"], \
+            f"本用例只造了 capture 来源,期望仅 [capture],实为 {chip_list}"
+        print(f"  ✅ 全部视图的来源 chip = {chip_list}(无 clipboard/todo)")
         print("\n全部断言通过 ✅")
     finally:
         shutil.rmtree(data_dir, ignore_errors=True)

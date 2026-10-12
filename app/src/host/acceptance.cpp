@@ -124,13 +124,25 @@ void runTodoAcceptanceFlow(PanelWindow& panel) {
 void reportTodoGroups(PanelWindow& panel) {
     // 只读自检:切待办视图 → 读回各行分组键。配合"脚本先播种各分组待办"使用,
     // 断言组标题的分界点(键序变化处即标题出现处)。
+    // 之后切回「全部」视图再读一次筛选条 —— 来源条在两视图的显示规则不同,
+    // 一次跑完两个视图的状态才能证明"待办视图不再多出待办 chip"。
     QTimer::singleShot(3000, &panel, [&panel] {
         panel.invokeAcceptance("acceptanceShowTodoGroups");
         QTimer::singleShot(800, &panel, [&panel] {
             const QVariantMap st = panel.rootProperty("acceptanceState").toMap();
             qInfo() << "GROUPS viewId:" << st.value("viewId").toString()
-                    << "keys:" << st.value("rowGroups").toString();
-            QApplication::quit();
+                    << "keys:" << st.value("rowGroups").toString()
+                    << "| sourceBar:" << st.value("sourceBarVisible").toBool()
+                    << "sourceChips:" << st.value("sourceChips").toString();
+            panel.invokeAcceptance("acceptanceShowAll");
+            QTimer::singleShot(800, &panel, [&panel] {
+                const QVariantMap st2 = panel.rootProperty("acceptanceState").toMap();
+                qInfo() << "GROUPS viewId:" << st2.value("viewId").toString()
+                        << "| sourceBar:" << st2.value("sourceBarVisible").toBool()
+                        << "sourceChips:" << st2.value("sourceChips").toString()
+                        << "| tagChips:" << st2.value("tagChips").toString();
+                QApplication::quit();
+            });
         });
     });
 }

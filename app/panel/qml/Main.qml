@@ -69,6 +69,14 @@ Rectangle {
         showTodos()
     }
 
+    /// 验收:切回「全部」视图(用于读回该视图下的筛选条状态 ——
+    /// 来源条在待办视图隐藏、在全部视图显示,两个视图都要能读到)。
+    function acceptanceShowAll() {
+        tabs.current = "all"
+        Entries.setView("all")
+        Entries.refreshNow()
+    }
+
     /// 读回:是否处于编辑态(供断言"保存成功后卡片已关")。
     readonly property string acceptanceEditId: todoEditId
 
@@ -102,6 +110,21 @@ Rectangle {
             const out = []
             const n = Math.min(list.count, 8)
             for (let i = 0; i < n; ++i) out.push(Entries.rowGroupKey(i))
+            return out.join(",")
+        })(),
+        // 筛选条状态:验证"哪些 chip 会出现"(来源条的把控逻辑较隐蔽:
+        // 默认来源不列、待办视图整体不显示,靠截图目视易漏)。
+        sourceChips: (function() {
+            const out = []
+            for (let i = 0; i < sourceBar.sourceModel.length; ++i)
+                out.push(sourceBar.sourceModel[i].value)
+            return out.join(",")
+        })(),
+        sourceBarVisible: sourceBar.visible,
+        tagChips: (function() {
+            const out = []
+            for (let i = 0; i < Entries.tagStats.length; ++i)
+                out.push(Entries.tagStats[i].tag)
             return out.join(",")
         })()
     })
@@ -839,21 +862,24 @@ Rectangle {
             ///    文案/图标与卡片来源徽标同词汇(EntryCard 的来源徽标)。
             property var sourceModel: {
                 const out = []
+                // ⚠️ 待办视图不显示来源条:待办来源恒为 'todo',而"待办"本身
+                //    已是顶层导航标签页 —— 在这里再列一个「待办」chip 是冗余
+                //    (点它也不生效:模型对 todo 视图不下发 source 过滤)。
+                if (tabs.current === "todo") return out
                 const stats = Entries.sourceStats
                 for (let i = 0; i < stats.length; ++i) {
                     const s = stats[i].source
-                    // 剪贴板是默认来源,不需要筛选项(用户关心的是"我截的/我翻的")
-                    if (s === "clipboard") continue
+                    // 剪贴板是默认来源、待办是顶层标签,都不需要来源筛选项
+                    // (用户关心的是"我截的/我翻的")
+                    if (s === "clipboard" || s === "todo") continue
                     out.push({
                         value: s,
                         label: s === "capture" ? "截图"
                              : s === "translate" ? "翻译"
-                             : s === "ocr" ? "识别"
-                             : s === "todo" ? "待办" : s,
+                             : s === "ocr" ? "识别" : s,
                         icon: s === "capture" ? "image"
                             : s === "translate" ? "translate"
-                            : s === "ocr" ? "text"
-                            : s === "todo" ? "todo" : "",
+                            : s === "ocr" ? "text" : "",
                         count: stats[i].count
                     })
                 }
