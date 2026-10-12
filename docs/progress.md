@@ -3352,3 +3352,72 @@ Uninstall: 2 sections (1 required)     ← 之前是 0 sections
 - `tools/verify_todo.py` / `check_db_integrity.py` 全绿;
 - `--todo-flow` 端到端 STEP1-5 全 match;
 - 启动截图无 QML 警告/错误。
+
+---
+
+## 2026-10-11(六)修复多屏截图位置与分辨率混乱
+
+### 现象
+
+三屏机器上触发框选截图,各屏遮罩的**方位与分辨率全乱**:主屏显示的是别屏的
+画面且被拉伸,布局完全对不上。
+
+### 根因(索引错配)
+
+宿主按 `QGuiApplication::screens()` 的下标 i 调 `nb_capture_monitor(i)`,
+而核心的 `capture_monitor(index)` 取的是 **xcap(EnumDisplayMonitors)的第 index 项**
+—— 两套枚举顺序**不同**。实测本机:
+
+| 显示器 | Qt 顺序 | xcap 顺序 |
+| --- | --- | --- |
+| 主屏 (0,0) 1920x1080 | 0 | **2** |
+| 副屏 (5,1080) | 1 | 0 |
+| 竖屏 (-1080,0) | 2 | 1 |
+
+Qt 把主屏排在最前、xcap 排在最后,于是每块遮罩都拿到了"别人"的底图:
+主屏拿到 3072x1920(差 2.25 倍)、副屏拿到 1920x1080 —— 位置与分辨率双双错乱。
+
+代码里其实早有警告(`capture.rs` 注释写着"xcap 的显示器枚举顺序不稳定"),
+但 `capture_monitor` 这个入口仍是按索引取的;`capture()` 内部那次"按坐标重匹配"
+只解决了 xcap 两次调用之间的漂移,没解决 Qt↔xcap 的错配。
+
+### 走过的一条弯路(值得记)
+
+第一版修复假设"`QScreen::name()` 与核心的设备名同源(`\\.\DISPLAY1`)",
+按名配对。写完加 `--dump-monitors` 自检一跑,**假设被实测推翻**:
+
+```
+qt name="Mi Monitor"      core: \\.\DISPLAY1
+qt name="TL160MDMP03-0"   core: \\.\DISPLAY2
+qt name="S24 PRO"         core: \\.\DISPLAY3
+```
+
+Qt 返回的是 **EDID 友好名**,核心返回的是**设备名**,两者不同源、三屏全配不上。
+教训:**配对键必须先用真实多屏环境验证,不能凭"应该同源"推断**。
+
+同一份日志给出了正确解法:两端**物理桌面原点完全一致**(0,0 / 5,1080 / -1080,0),
+只有尺寸口径不同(Qt 逻辑 vs 核心物理,150% 缩放的屏上差 1.5 倍)。
+
+### 修复
+
+- 核心新增 `MonitorHint`(宿主屏描述:name/原点/逻辑尺寸/DPR)与
+  `match_monitor()`:按 **设备名 → 物理原点 → 物理尺寸(逻辑×DPR)** 逐级配对,
+  全失败返回 None 由调用方跳过并告警 —— **绝不静默配到别的屏**(那正是本 bug)。
+- 新增 FFI `nb_capture_monitor_matched(name,x,y,w,h,dpr,...)`;旧
+  `nb_capture_monitor(index)` 保留(作兼容兜底,旧 DLL 无新导出时回退按索引)。
+- 宿主 `CoreBridge::captureMonitorMatched(QScreen*)`;`capture_session.cpp` 的
+  **框选与全屏直通**都改走它(全屏直通此前同样用光标屏索引,有同一个 bug)。
+- 顺带修 `OverlayWidget::dpr()`:原来直接信 `screen->devicePixelRatio()`,
+  改为**从底图实际尺寸 ÷ 屏幕逻辑尺寸推导**(与底图天然自洽,取不到底图才回退),
+  避免"配到别屏/底图异常"时预览被拉伸、框选换算偏移。
+- 新增只读自检 `--dump-monitors`:并排打印两端清单,并断言每屏底图尺寸
+  ≈ 几何 × DPR(配错屏时这一条立刻失败)。
+
+### 验证
+
+- `cargo test` 214 全绿(新增 4 个配对用例,其中
+  `match_monitor_by_origin_on_real_machine` 直接用本机三屏布局做回归:
+  含 150% 缩放屏与负坐标竖屏);
+- **实机自检三屏全部 `self-consistent=true`**:
+  1920x1080→1920x1080、2048x1280@1.5→3072x1920、1080x1920→1080x1920;
+- `monitor_probe` 打印出三屏的 name 与按名捕获结果(含"不存在的设备名如期报错")。

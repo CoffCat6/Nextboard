@@ -109,7 +109,8 @@ int main(int argc, char* argv[]) {
         for (int i = 1; i < argc; ++i) {
             const QString arg = QString::fromLocal8Bit(argv[i]);
             if (arg == QLatin1String("--todo-flow")
-                || arg == QLatin1String("--todo-groups")) {
+                || arg == QLatin1String("--todo-groups")
+                || arg == QLatin1String("--dump-monitors")) {
                 const QString dir = QDir(QCoreApplication::applicationDirPath())
                                         .filePath(QStringLiteral("acceptance-data"));
                 const bool created = QDir().mkpath(dir);
@@ -213,6 +214,7 @@ int main(int argc, char* argv[]) {
     bool openSettings = false;
     bool todoFlow = false;
     bool todoGroups = false;
+    bool dumpMonitors = false;
     for (int i = 1; i < argc; ++i) {
         const QString arg = QString::fromLocal8Bit(argv[i]);
         if (arg == QLatin1String("--screenshot") && i + 1 < argc)
@@ -230,10 +232,14 @@ int main(int argc, char* argv[]) {
         // 待办分组自检:只读回各行分组键(配合脚本播种数据验证组标题分界点)。
         else if (arg == QLatin1String("--todo-groups"))
             todoGroups = true;
+        // 多屏配对自检:打印两端显示器清单并核对按名配对/底图自洽性。
+        else if (arg == QLatin1String("--dump-monitors"))
+            dumpMonitors = true;
     }
     // 待办交互验收(--todo-flow):真实点击驱动整条链路,逻辑见 host/acceptance.cpp
     if (todoFlow) nb::runTodoAcceptanceFlow(panel);
     if (todoGroups) nb::reportTodoGroups(panel);
+    if (dumpMonitors) nb::reportMonitors();
     if (!shotPath.isEmpty()) {
         QTimer::singleShot(5000, &panel, [path = shotPath, queryText, openSettings,
                                           translateText, &panel] {

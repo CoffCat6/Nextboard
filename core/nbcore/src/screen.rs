@@ -54,6 +54,7 @@ mod tests {
 
     fn monitor(x: i32, y: i32, width: u32, height: u32, is_primary: bool) -> MonitorInfo {
         MonitorInfo {
+            name: String::new(),   // 落点计算与设备名无关,测试不设
             x,
             y,
             width,

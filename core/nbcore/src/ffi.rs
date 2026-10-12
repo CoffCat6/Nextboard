@@ -222,6 +222,73 @@ pub unsafe extern "C" fn nb_capture_monitor(
     report(result)
 }
 
+/// **按设备名**捕获整屏 RGBA(形如 `\\.\DISPLAY1`)。
+///
+/// 这是宿主布置多屏遮罩的**正确入口**:用 `QScreen::name()` 拿同一标识来配对,
+/// 不受两端枚举顺序差异影响(实测 Qt 主屏在前、xcap 主屏在后,按索引配对会把
+/// A 屏的底图画到 B 屏的遮罩上 —— 即"多屏位置与分辨率混乱"的根因)。
+///
+/// # Safety
+/// name 必须是 NUL 结尾的 UTF-8 串;out_* 契约同 [`nb_capture_monitor`]。
+#[no_mangle]
+pub unsafe extern "C" fn nb_capture_monitor_by_name(
+    name: *const c_char,
+    out_rgba: *mut *mut u8,
+    out_w: *mut u32,
+    out_h: *mut u32,
+) -> i32 {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let name = cstr_to_string(name)?;
+        let image = crate::capture::capture_monitor_by_name(&name)?;
+        write_rgba_out(&image, out_rgba, out_w, out_h)
+    }))
+    .unwrap_or_else(|_| Err(AppError::Panicked("nb_capture_monitor_by_name panic".into())));
+    report(result)
+}
+
+/// **按宿主屏幕描述**捕获整屏 RGBA(多屏遮罩/全屏直通的正确入口)。
+///
+/// `name` 是 Qt 的 `QScreen::name()`(可能为空;它常是 EDID 友好名,
+/// 与核心的 `\\.\DISPLAYn` 不同源,故只作加分项);真正的主力配对键是
+/// `x`/`y`(物理桌面原点,两端一致),`width`/`height` 是**逻辑像素**,
+/// 需配 `dpr` 还原后比较。详见 capture.rs 的 match_monitor。
+///
+/// # Safety
+/// name 必须是 NUL 结尾的 UTF-8 串;out_* 契约同 [`nb_capture_monitor`]。
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn nb_capture_monitor_matched(
+    name: *const c_char,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    dpr: f32,
+    out_rgba: *mut *mut u8,
+    out_w: *mut u32,
+    out_h: *mut u32,
+) -> i32 {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let name = if name.is_null() {
+            String::new()
+        } else {
+            cstr_to_string(name)?
+        };
+        let hint = crate::capture::MonitorHint {
+            name,
+            x,
+            y,
+            width,
+            height,
+            dpr,
+        };
+        let image = crate::capture::capture_monitor_matched(&hint)?;
+        write_rgba_out(&image, out_rgba, out_w, out_h)
+    }))
+    .unwrap_or_else(|_| Err(AppError::Panicked("nb_capture_monitor_matched panic".into())));
+    report(result)
+}
+
 /// 裁剪整屏 RGBA 的子区域(框选确认)。
 ///
 /// # Safety
@@ -345,6 +412,10 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
             let db = core.db.lock()?;
             Ok(serde_json::to_value(entry::list_sources(&db)?)?)
         }
+        // 显示器列表(多屏遮罩配对用):宿主用 name 与 QScreen::name() 对齐,
+        // ⚠️ 不要用数组下标配对 —— 两端枚举顺序不同(见 capture.rs 的说明)。
+        //    几何为**物理像素**(xcap 口径);Qt 侧几何是逻辑像素,混合 DPI 下不等。
+        "list_monitors" => Ok(serde_json::to_value(crate::capture::monitors())?),
         // 覆盖设置条目标签(S5.2);tags 为字符串数组
         "set_entry_tags" => {
             let core = crate::core::Core::get()?;

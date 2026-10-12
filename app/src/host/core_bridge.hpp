@@ -6,10 +6,13 @@
 #include <windows.h>
 
 #include <QString>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QJsonDocument>
 #include <QImage>
 #include <QRect>
+
+class QScreen;
 
 using NbInit = int(__cdecl*)(const char*);
 using NbCallFn = int(__cdecl*)(const char*, const char*, char**);
@@ -19,6 +22,9 @@ using NbAbiVersion = unsigned(__cdecl*)();
 using NbVersion = unsigned(__cdecl*)();
 using NbShutdown = void(__cdecl*)();
 using NbCaptureMonitor = int(__cdecl*)(unsigned, unsigned char**, unsigned*, unsigned*);
+/// 按宿主屏幕描述配对捕获(多屏遮罩的正确入口,见 capture.rs 的 match_monitor)。
+using NbCaptureMonitorMatched = int(__cdecl*)(const char*, int, int, unsigned, unsigned, float,
+                                              unsigned char**, unsigned*, unsigned*);
 using NbCaptureCrop = int(__cdecl*)(const unsigned char*, unsigned long long,
                                     unsigned, unsigned, int, int, unsigned, unsigned,
                                     unsigned char**, unsigned*, unsigned*);
@@ -52,8 +58,24 @@ public:
     /// JSON 门面调用。返回响应对象 { ok, data|error };transport 失败时返回含 error 的对象。
     QJsonObject call(const QString& method, const QJsonObject& req = {});
 
-    /// RGBA 通道:捕获显示器整屏。失败返回空图。
+    /// RGBA 通道:捕获显示器整屏(按 xcap 枚举序号)。
+    /// ⚠️ 多屏场景**不要**用本入口 —— 序号是 xcap 的顺序,与
+    ///    QGuiApplication::screens() 的顺序不同(实测主屏在其末位),
+    ///    按序号配对会把别屏的底图画到本屏遮罩上。请用 captureMonitorMatched。
     QImage captureMonitor(unsigned index);
+
+    /// RGBA 通道:**按宿主屏幕描述**配对捕获整屏(多屏遮罩/全屏直通的正确入口)。
+    /// 传 QScreen 的 name/几何/DPR,由核心按"设备名 → 物理原点 → 物理尺寸"
+    /// 逐级配对(见 core capture.rs 的 match_monitor)。配对失败返回空图。
+    QImage captureMonitorMatched(QScreen* screen);
+
+    /// 显示器列表(JSON:name/x/y/width/height/scaleFactor/isPrimary)。
+    /// 几何为**物理像素**;仅供诊断与日志,配对由核心内部完成。
+    QJsonArray listMonitors();
+
+    /// 核心是否提供"按屏描述配对捕获"(旧 DLL 没有该导出)。
+    /// 宿主据此决定走配对路径还是回退按索引。
+    bool hasMonitorMatching() const { return m_captureMonitorMatched != nullptr; }
 
     /// RGBA 通道:从整屏裁剪子区域(框选确认)。`rect` 为**物理像素**且相对该屏左上角
     /// (越界部分由核心钳制)。失败返回空图。
@@ -91,6 +113,7 @@ private:
     NbVersion m_version = nullptr;
     NbShutdown m_shutdown = nullptr;
     NbCaptureMonitor m_captureMonitor = nullptr;
+    NbCaptureMonitorMatched m_captureMonitorMatched = nullptr;
     NbCaptureCrop m_captureCrop = nullptr;
     bool m_initialized = false;
     QString m_dataDir;

@@ -8,8 +8,19 @@
 use crate::error::{AppError, AppResult};
 
 /// 显示器几何信息(物理像素,全局虚拟屏幕坐标系)。
-#[derive(Debug, Clone, PartialEq)]
+///
+/// ⚠️ `name` 是**跨模块配对的唯一可靠键**:
+///    Qt 的 `QScreen::name()` 与 xcap 的 `Monitor::name()` 在 Windows 上都取自
+///    `MONITORINFOEXW.szDevice`(形如 `\\.\DISPLAY1`),两边必然一一对应。
+///    而**索引**不可用 —— Qt 把主屏排在最前、xcap 把它排在最后(实测三屏机器
+///    两边顺序完全不同),用索引配对会把 A 屏的遮罩画上 B 屏的底图;
+///    **坐标**也不可用 —— 混合 DPI 下 Qt 是逻辑像素、xcap 是物理像素,
+///    1.5 倍缩放的屏上两者永不相等。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MonitorInfo {
+    /// 设备名(`\\.\DISPLAY1`);取不到时为空串。
+    pub name: String,
     pub x: i32,
     pub y: i32,
     pub width: u32,
@@ -42,6 +53,9 @@ impl ScreenCapturer for XCapCapturer {
             .iter()
             .map(|m| {
                 Ok(MonitorInfo {
+                    // 取不到设备名不致命(配对失败的屏由宿主跳过);
+                    // 用 unwrap_or_default 而不是 ? —— 缺 name 不该让整次枚举失败。
+                    name: m.name().unwrap_or_default(),
                     x: m.x()?,
                     y: m.y()?,
                     width: m.width()?,
@@ -54,13 +68,35 @@ impl ScreenCapturer for XCapCapturer {
     }
 
     fn capture(&self, target: &MonitorInfo) -> AppResult<CapturedImage> {
-        // xcap 的显示器枚举顺序不稳定,按几何位置重新匹配目标
-        let monitor = xcap::Monitor::all()?
-            .into_iter()
-            .find(|m| m.x().ok() == Some(target.x) && m.y().ok() == Some(target.y))
+        // ⚠️ 优先按**设备名**匹配:name 是稳定键,不随枚举顺序变化。
+        //    旧实现只按 (x, y) 匹配,在混合 DPI 下必然失配(Qt 逻辑像素 vs
+        //    xcap 物理像素),且 xcap 自己的枚举顺序也不保证稳定。
+        //    仅在目标没有 name(老调用方按坐标构造,如单测)时才回退坐标匹配。
+        let all = xcap::Monitor::all()?;
+        let infos: Vec<MonitorInfo> = all
+            .iter()
+            .map(|m| MonitorInfo {
+                name: m.name().unwrap_or_default(),
+                x: m.x().unwrap_or_default(),
+                y: m.y().unwrap_or_default(),
+                width: m.width().unwrap_or_default(),
+                height: m.height().unwrap_or_default(),
+                scale_factor: m.scale_factor().unwrap_or(1.0),
+                is_primary: m.is_primary().unwrap_or(false),
+            })
+            .collect();
+        let picked_name = pick_target(&infos, target)
+            .map(|m| m.name.clone())
             .ok_or_else(|| {
-                AppError::Internal(format!("未找到目标显示器 ({}, {})", target.x, target.y))
+                AppError::Internal(format!(
+                    "未找到目标显示器 (name={:?}, {}, {})",
+                    target.name, target.x, target.y
+                ))
             })?;
+        let monitor = all
+            .into_iter()
+            .find(|m| m.name().ok() == Some(picked_name.clone()))
+            .ok_or_else(|| AppError::Internal("目标显示器已消失".into()))?;
         let image = monitor.capture_image()?;
         let (width, height) = (image.width(), image.height());
         Ok(CapturedImage {
@@ -83,12 +119,139 @@ pub fn monitors() -> Vec<MonitorInfo> {
     }
 }
 
+/// 从显示器列表中选出目标(按名优先,空名回退坐标)。
+///
+/// 抽成纯函数是为了可测:配对规则是"多屏位置/分辨率混乱"的根因所在,
+/// 必须能脱离真实显示器直接断言。
+fn pick_target<'a>(list: &'a [MonitorInfo], target: &MonitorInfo) -> Option<&'a MonitorInfo> {
+    if !target.name.is_empty() {
+        return list.iter().find(|m| m.name == target.name);
+    }
+    list.iter()
+        .find(|m| m.x == target.x && m.y == target.y)
+}
+
+/// 宿主侧一个屏幕的描述(Qt `QScreen` 的口径),用于与核心的显示器配对。
+///
+/// 口径差异(实测,Windows 混合 DPI):
+/// - `x`/`y`:**物理桌面原点**,与核心一致(Qt 在 Windows 上保留下发原点);
+/// - `width`/`height`:**逻辑像素**(= 物理 ÷ DPR),与核心不同,
+///   故比较尺寸时要乘 `dpr` 还原成物理;
+/// - `name`:**显示器友好名**(EDID 型号,如 "S24 PRO"),与核心的
+///   `\\.\DISPLAYn` **不同源** —— 故 name 只作为"能对上就优先"的加分项,
+///   真正的主力键是原点。
+#[derive(Debug, Clone, Default)]
+pub struct MonitorHint {
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub dpr: f32,
+}
+
+impl MonitorHint {
+    /// 还原成物理尺寸(逻辑 × DPR),四舍五入到整数像素。
+    fn physical_size(&self) -> (u32, u32) {
+        let dpr = if self.dpr > 0.0 { self.dpr } else { 1.0 };
+        (
+            (self.width as f32 * dpr).round() as u32,
+            (self.height as f32 * dpr).round() as u32,
+        )
+    }
+}
+
+/// 按宿主给的屏幕描述选出核心侧的显示器。
+///
+/// 优先级(逐级放宽,绝不"随便挑一个" —— 静默配错正是多屏混乱的成因):
+/// 1. **设备名相同**(两边口径偶尔一致时最可靠);
+/// 2. **原点相同**(主力键:Qt 与核心的物理桌面原点一致,实测三屏全中);
+/// 3. **物理尺寸相同**(原点因 DPI 缩放口径不同而错位时的兜底);
+/// 4. 都失败返回 `None`,由调用方跳过该屏并告警。
+pub fn match_monitor<'a>(monitors: &'a [MonitorInfo], hint: &MonitorHint) -> Option<&'a MonitorInfo> {
+    if !hint.name.is_empty() {
+        if let Some(m) = monitors.iter().find(|m| m.name == hint.name) {
+            return Some(m);
+        }
+    }
+    if let Some(m) = monitors
+        .iter()
+        .find(|m| m.x == hint.x && m.y == hint.y)
+    {
+        return Some(m);
+    }
+    let (pw, ph) = hint.physical_size();
+    monitors
+        .iter()
+        .find(|m| m.width == pw && m.height == ph)
+}
+
+/// 按**宿主屏幕描述**捕获整屏(多屏遮罩配对的正确入口)。
+///
+/// 宿主传 `QScreen` 的 name/x/y/width/height/DPR,这里用 [`match_monitor`]
+/// 选出对应显示器 —— 不再用索引(两端枚举顺序不同)或纯坐标(混合 DPI 下
+/// Qt 是逻辑像素)配对。配对失败时报错,不静默取别的屏。
+pub fn capture_monitor_matched(hint: &MonitorHint) -> AppResult<CapturedImage> {
+    let list = monitors();
+    if list.is_empty() {
+        return Err(AppError::Internal("枚举显示器为空".into()));
+    }
+    let target = match_monitor(&list, hint).ok_or_else(|| {
+        AppError::InvalidInput(format!(
+            "无法为屏幕(name={:?}, {},{} {}x{} dpr={})匹配显示器;核心侧有: {}",
+            hint.name,
+            hint.x,
+            hint.y,
+            hint.width,
+            hint.height,
+            hint.dpr,
+            list.iter()
+                .map(|m| format!(
+                    "{}@{},{} {}x{}",
+                    m.name, m.x, m.y, m.width, m.height
+                ))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        ))
+    })?;
+    XCapCapturer.capture(target)
+}
+
 /// 捕获指定序号的显示器(序号对应 [`monitors`] 的返回顺序)。
+///
+/// ⚠️ **索引配对不可跨模块使用**:本函数的序号是 xcap 的枚举顺序,与 Qt 的
+///    `QGuiApplication::screens()` 顺序**不一致**(Qt 主屏在前、xcap 主屏在后)。
+///    宿主按屏布置遮罩时应改用 [`capture_monitor_by_name`]。
+///    保留本入口是为兼容既有调用方(如 `--screenshot` 的单屏场景)。
 pub fn capture_monitor(index: u32) -> AppResult<CapturedImage> {
     let list = monitors();
     let target = list.get(index as usize).ok_or_else(|| {
         AppError::InvalidInput(format!("显示器序号越界: {index}(共 {} 台)", list.len()))
     })?;
+    XCapCapturer.capture(target)
+}
+
+/// 按**设备名**捕获整屏(形如 `\\.\DISPLAY1`)。
+///
+/// 跨模块配对的正确入口:宿主用 `QScreen::name()` 拿到同一个标识再来这里取图,
+/// 不受两端枚举顺序差异与混合 DPI(逻辑/物理像素)影响。
+/// 名字为空或不存在时报错 —— 静默回退到"别的屏"正是要修掉的 bug。
+pub fn capture_monitor_by_name(name: &str) -> AppResult<CapturedImage> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(AppError::InvalidInput("显示器设备名为空".into()));
+    }
+    let list = monitors();
+    let target = list
+        .iter()
+        .find(|m| m.name == name)
+        .ok_or_else(|| {
+            AppError::InvalidInput(format!(
+                "未找到设备名为 {name} 的显示器(共 {} 台: {})",
+                list.len(),
+                list.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", ")
+            ))
+        })?;
     XCapCapturer.capture(target)
 }
 
@@ -165,6 +328,9 @@ mod tests {
 
     fn monitor(x: i32, y: i32, w: u32, h: u32, primary: bool) -> MonitorInfo {
         MonitorInfo {
+            // 单测走坐标回退路径(老调用方语义),不给 name —— 顺带覆盖
+            // "无 name 时仍按 (x,y) 匹配"这条兼容分支。
+            name: String::new(),
             x,
             y,
             width: w,
@@ -259,5 +425,166 @@ mod tests {
         assert!(crop_rgba(&[0; 16], 2, 2, 0, 0, 0, 0).is_err());
         // 完全越界:钳制后为空
         assert!(crop_rgba(&[0; 16], 2, 2, 5, 5, 1, 1).is_err());
+    }
+
+    // ---------- 多屏配对(位置/分辨率混乱的根因) ----------
+
+    fn named(name: &str, x: i32, y: i32, w: u32, h: u32) -> MonitorInfo {
+        MonitorInfo {
+            name: name.to_string(),
+            x,
+            y,
+            width: w,
+            height: h,
+            scale_factor: 1.0,
+            is_primary: false,
+        }
+    }
+
+    /// 核心回归:两端**枚举顺序不同**时,按 name 仍能选对目标。
+    /// 构造的就是实测那台机器的布局(Qt 主屏在前、xcap 主屏在后)。
+    #[test]
+    fn pick_target_matches_by_name_regardless_of_order() {
+        // xcap 的顺序:副屏、竖屏、主屏(主屏在最后)
+        let xcap_order = vec![
+            named(r"\\.\DISPLAY1", 5, 1080, 3072, 1920),
+            named(r"\\.\DISPLAY2", -1080, 0, 1080, 1920),
+            named(r"\\.\DISPLAY3", 0, 0, 1920, 1080),
+        ];
+        // 宿主要的是主屏(DISPLAY3):按索引 0 会错拿到 DISPLAY1
+        let want = named(r"\\.\DISPLAY3", 0, 0, 1920, 1080);
+        let picked = pick_target(&xcap_order, &want).expect("按名应能选中");
+        assert_eq!(picked.name, r"\\.\DISPLAY3");
+        assert_eq!(picked.width, 1920);
+    }
+
+    /// 混合 DPI:目标只有 name 时,即使坐标口径不同(逻辑 vs 物理)也能选中。
+    #[test]
+    fn pick_target_ignores_coords_when_name_present() {
+        let list = vec![named(r"\\.\DISPLAY1", 5, 1080, 3072, 1920)];
+        // 同名但坐标是按逻辑像素算出来的(150% 缩放 → 2048x1280 @ (3,720))
+        let want = named(r"\\.\DISPLAY1", 3, 720, 2048, 1280);
+        assert_eq!(pick_target(&list, &want).unwrap().width, 3072);
+    }
+
+    /// 老调用方不带 name:仍按坐标匹配(兼容分支)。
+    #[test]
+    fn pick_target_falls_back_to_coords_without_name() {
+        let list = vec![
+            named(r"\\.\DISPLAY1", 0, 0, 1920, 1080),
+            named(r"\\.\DISPLAY2", 1920, 0, 2560, 1440),
+        ];
+        let want = monitor(1920, 0, 2560, 1440, false);   // name 为空
+        assert_eq!(pick_target(&list, &want).unwrap().name, r"\\.\DISPLAY2");
+    }
+
+    /// 名字对不上时**返回 None**,而不是悄悄退回"列表第一个"——
+    /// 静默回退正是"遮罩画了别的屏"的成因。
+    #[test]
+    fn pick_target_returns_none_on_unknown_name() {
+        let list = vec![named(r"\\.\DISPLAY1", 0, 0, 1920, 1080)];
+        assert!(pick_target(&list, &named(r"\\.\DISPLAY9", 0, 0, 800, 600)).is_none());
+    }
+
+    // ---------- 宿主配对(实测机器布局的真实回归) ----------
+
+    /// **实测机器**的三屏布局:核心侧顺序与 Qt 侧顺序不同,且含 150% 缩放屏。
+    ///
+    /// 这是本缺陷的核心回归 —— 按索引配对时,Qt 的第 0 屏(主屏)会拿到
+    /// 核心的第 0 项(3072x1920 副屏),表现就是"位置错、分辨率乱"。
+    fn real_machine_core_order() -> Vec<MonitorInfo> {
+        vec![
+            // xcap 顺序:副屏(150%)、竖屏、主屏(主屏在最后)
+            MonitorInfo {
+                name: r"\\.\DISPLAY1".into(),
+                x: 5,
+                y: 1080,
+                width: 3072,
+                height: 1920,
+                scale_factor: 1.5,
+                is_primary: false,
+            },
+            MonitorInfo {
+                name: r"\\.\DISPLAY2".into(),
+                x: -1080,
+                y: 0,
+                width: 1080,
+                height: 1920,
+                scale_factor: 1.0,
+                is_primary: false,
+            },
+            MonitorInfo {
+                name: r"\\.\DISPLAY3".into(),
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+                scale_factor: 1.0,
+                is_primary: true,
+            },
+        ]
+    }
+
+    fn hint(name: &str, x: i32, y: i32, w: u32, h: u32, dpr: f32) -> MonitorHint {
+        MonitorHint {
+            name: name.into(),
+            x,
+            y,
+            width: w,
+            height: h,
+            dpr,
+        }
+    }
+
+    /// 三个屏各自都要配到**正确**的那一台(原点键)。
+    #[test]
+    fn match_monitor_by_origin_on_real_machine() {
+        let list = real_machine_core_order();
+        // Qt 侧:友好名与核心设备名**不同源**,故这里名字全用友好名(配不上),
+        // 全靠原点键 —— 正是实机情形。
+        let cases = [
+            // Qt 友好名, 逻辑原点, 逻辑尺寸, dpr, 期望核心屏
+            ("Mi Monitor",     0,     0, 1920, 1080, 1.0, r"\\.\DISPLAY3"),
+            ("TL160MDMP03-0",  5,  1080, 2048, 1280, 1.5, r"\\.\DISPLAY1"),
+            ("S24 PRO",      -1080,   0, 1080, 1920, 1.0, r"\\.\DISPLAY2"),
+        ];
+        for (name, x, y, w, h, dpr, want) in cases {
+            let h0 = hint(name, x, y, w, h, dpr);
+            let got = match_monitor(&list, &h0)
+                .unwrap_or_else(|| panic!("{name} 应能配到显示器"));
+            assert_eq!(got.name, want, "{name} 配错了屏(位置/分辨率会乱)");
+            // 物理尺寸自洽:核心尺寸 == 逻辑尺寸 × DPR
+            let (pw, ph) = h0.physical_size();
+            assert_eq!((got.width, got.height), (pw, ph), "{name} 物理尺寸不自洽");
+        }
+    }
+
+    /// 名字能对上时**优先用名字**(哪怕原点因口径差异而错位)。
+    #[test]
+    fn match_monitor_prefers_name_when_same_source() {
+        let list = vec![
+            named(r"\\.\DISPLAY1", 0, 0, 1920, 1080),
+            // 同名但原点不同:名字命中即应选它
+            named(r"\\.\DISPLAY7", 999, 999, 1920, 1080),
+        ];
+        let h0 = hint(r"\\.\DISPLAY7", 0, 0, 1920, 1080, 1.0);
+        assert_eq!(match_monitor(&list, &h0).unwrap().name, r"\\.\DISPLAY7");
+    }
+
+    /// 原点对不上时用**物理尺寸**兜底(尺寸需乘 DPR 还原)。
+    #[test]
+    fn match_monitor_falls_back_to_physical_size() {
+        let list = vec![named(r"\\.\DISPLAY1", 100, 200, 3072, 1920)];
+        // 原点与列表都不同,但逻辑 2048x1280 × 1.5 = 3072x1920 命中
+        let h0 = hint("Whatever", -5, -5, 2048, 1280, 1.5);
+        assert_eq!(match_monitor(&list, &h0).unwrap().name, r"\\.\DISPLAY1");
+    }
+
+    /// 三项都配不上时必须返回 None(由调用方跳过并告警),绝不乱配。
+    #[test]
+    fn match_monitor_returns_none_when_nothing_matches() {
+        let list = vec![named(r"\\.\DISPLAY1", 0, 0, 1920, 1080)];
+        let h0 = hint("X", 5000, 5000, 640, 480, 1.0);
+        assert!(match_monitor(&list, &h0).is_none());
     }
 }

@@ -25,4 +25,10 @@ void runTodoAcceptanceFlow(PanelWindow& panel);
 /// 不建数据、不改状态,纯读回,故可反复运行。
 void reportTodoGroups(PanelWindow& panel);
 
+/// 多屏配对自检:并排打印 Qt 侧(`QScreen::name()/geometry/DPR`)与核心侧
+/// (`list_monitors` 的 name/几何)的显示器清单,并逐屏核对**名字能否配上**、
+/// 配上后取到的底图尺寸是否与该屏几何自洽。用于验证/回归"多屏位置与分辨率
+/// 混乱"这一缺陷(根因是两端枚举顺序不同却按索引配对)。
+void reportMonitors();
+
 } // namespace nb

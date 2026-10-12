@@ -111,6 +111,17 @@ Media_Ocr / Storage_Streams / Win32_System_Com / Win32_System_WinRT 沿用第一
 #[no_mangle] pub extern "C" fn nb_capture_monitor(index: u32, out_rgba: *mut *mut u8,
                                        out_w: *mut u32, out_h: *mut u32) -> i32;
 //   截图专用二进制通道;返回的 buffer 用 nb_free 释放
+//   ⚠️ index 是**核心侧(xcap EnumDisplayMonitors)的枚举序号**,与宿主的
+//      QGuiApplication::screens() 顺序**不一致**(实测 Qt 主屏在前、xcap 主屏在
+//      最后)→ 多屏场景不要用本入口,见下面的 matched 版本。
+#[no_mangle] pub extern "C" fn nb_capture_monitor_matched(name: *const c_char,
+                                       x: i32, y: i32, width: u32, height: u32, dpr: f32,
+                                       out_rgba: *mut *mut u8, out_w: *mut u32,
+                                       out_h: *mut u32) -> i32;
+//   **多屏遮罩/全屏直通的正确入口**:宿主传 QScreen 的 name/几何/DPR,
+//   核心按"设备名 → 物理原点 → 物理尺寸"逐级配对(见 capture.rs match_monitor)。
+//   name 是 EDID 友好名,与核心的 \\.\DISPLAYn 不同源,仅作加分项;
+//   主力键是物理原点(两端一致)。配对失败报错,不静默取别的屏。
 #[no_mangle] pub extern "C" fn nb_free(ptr: *mut c_void);
 #[no_mangle] pub extern "C" fn nb_shutdown();   // 停监听线程、落盘、释放
 ```

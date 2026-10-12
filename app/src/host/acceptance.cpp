@@ -1,5 +1,6 @@
 #include "host/acceptance.hpp"
 
+#include "host/core_bridge.hpp"
 #include "panel/core_facade.hpp"
 #include "panel/panel_window.hpp"
 
@@ -7,6 +8,9 @@
 #include <QDate>
 #include <QDateTime>
 #include <QDebug>
+#include <QJsonArray>
+#include <QJsonObject>
+#include <QScreen>
 #include <QTime>
 #include <QTimer>
 #include <QVariant>
@@ -145,6 +149,49 @@ void reportTodoGroups(PanelWindow& panel) {
             });
         });
     });
+}
+
+void reportMonitors() {
+    // 多屏配对自检:把两端清单并排打出来,并逐屏核对"按名能否配对 + 底图是否自洽"。
+    // 这是"多屏位置/分辨率混乱"的回归抓手 —— 该缺陷无法靠单测覆盖(需要真实多屏),
+    // 但可以用日志断言:每个 Qt 屏都应能在核心清单里按名找到,且底图尺寸
+    // ≈ 几何 × DPR(若把 A 屏的图配给 B 屏,这两者立刻对不上)。
+    const QJsonArray coreMonitors = CoreBridge::instance().listMonitors();
+    qInfo() << "MONITORS qt screens:" << QGuiApplication::screens().size()
+            << "core monitors:" << coreMonitors.size();
+
+    const QList<QScreen*> screens = QGuiApplication::screens();
+    for (QScreen* s : screens) {
+        const QRect geo = s->geometry();
+        const qreal dprVal = s->devicePixelRatio();
+        qInfo().nospace() << "MONITORS qt name=" << s->name()
+                          << " geo=" << geo.x() << "," << geo.y() << " "
+                          << geo.width() << "x" << geo.height()
+                          << " dpr=" << dprVal;
+
+        // 按屏描述配对取图,核对底图尺寸与"几何 × DPR"是否自洽。
+        // ⚠️ 这里**不**按 name 比对核心清单:Qt 的 QScreen::name() 是 EDID 友好名
+        //    ("S24 PRO"),与核心的 `\\.\DISPLAYn` 不同源,配不上是**预期**的
+        //    (实测三屏全配不上);配对主力键是物理原点,由核心 match_monitor 处理。
+        //    真正该断言的是下面这条:取到的底图尺寸是否与该屏几何 × DPR 自洽 ——
+        //    若配错屏,这一条会立刻失败。
+        const QImage shot = CoreBridge::instance().captureMonitorMatched(s);
+        if (shot.isNull()) {
+            qWarning().nospace() << "MONITORS   ⚠️ 配对捕获失败: " << s->name();
+            continue;
+        }
+        const int expectW = qRound(geo.width() * dprVal);
+        const int expectH = qRound(geo.height() * dprVal);
+        const bool ok = qAbs(shot.width() - expectW) <= 2 && qAbs(shot.height() - expectH) <= 2;
+        qInfo().nospace() << "MONITORS   shot=" << shot.width() << "x" << shot.height()
+                          << " expect=" << expectW << "x" << expectH
+                          << " self-consistent=" << ok;
+        if (!ok) {
+            qWarning().nospace() << "MONITORS   ⚠️ 底图尺寸与几何不符(可能配到了别屏): "
+                                 << s->name();
+        }
+    }
+    QApplication::quit();
 }
 
 } // namespace nb

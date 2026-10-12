@@ -6,6 +6,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QImage>
+#include <QScreen>
 
 #include <windows.h>
 
@@ -56,6 +57,10 @@ bool CoreBridge::init(bool /*startHidden*/, QString* error) {
     m_version = reinterpret_cast<NbVersion>(resolve("nb_version"));
     m_shutdown = reinterpret_cast<NbShutdown>(resolve("nb_shutdown"));
     m_captureMonitor = reinterpret_cast<NbCaptureMonitor>(resolve("nb_capture_monitor"));
+    // 按屏描述配对捕获:可选导出(旧 DLL 没有)→ 取不到时调用方回退按序号,
+    // 故**不**加入下面的"致命缺失"检查,避免旧核心直接起不来。
+    m_captureMonitorMatched =
+        reinterpret_cast<NbCaptureMonitorMatched>(resolve("nb_capture_monitor_matched"));
     m_captureCrop = reinterpret_cast<NbCaptureCrop>(resolve("nb_capture_crop"));
     if (!m_init || !m_callFn || !m_freeString || !m_shutdown || !m_abi) {
         if (error) *error = QStringLiteral("nbcore.dll 导出缺失");
@@ -193,6 +198,35 @@ QImage CoreBridge::captureMonitor(unsigned index) {
         rgba, static_cast<unsigned long long>(w) * h * 4, m_freeBuffer};
     return QImage(rgba, static_cast<int>(w), static_cast<int>(h), QImage::Format_RGBA8888,
                   &releaseCoreBuffer, buffer);
+}
+
+QImage CoreBridge::captureMonitorMatched(QScreen* screen) {
+    if (!m_captureMonitorMatched || !m_freeBuffer || !screen) return {};
+    const QRect geo = screen->geometry();
+    const QByteArray nameUtf8 = screen->name().toUtf8();
+    unsigned char* rgba = nullptr;
+    unsigned w = 0, h = 0;
+    const int rc = m_captureMonitorMatched(
+        nameUtf8.constData(),
+        geo.x(), geo.y(),
+        static_cast<unsigned>(geo.width()), static_cast<unsigned>(geo.height()),
+        static_cast<float>(screen->devicePixelRatio()),
+        &rgba, &w, &h);
+    if (rc != 0 || !rgba || w == 0 || h == 0) {
+        if (rgba) m_freeBuffer(rgba, 0);
+        return {};
+    }
+    // 零拷贝语义与 captureMonitor 完全一致(同一 releaseCoreBuffer 回调)
+    auto* buffer = new CoreBuffer{
+        rgba, static_cast<unsigned long long>(w) * h * 4, m_freeBuffer};
+    return QImage(rgba, static_cast<int>(w), static_cast<int>(h), QImage::Format_RGBA8888,
+                  &releaseCoreBuffer, buffer);
+}
+
+QJsonArray CoreBridge::listMonitors() {
+    const QJsonObject resp = call(QStringLiteral("list_monitors"));
+    if (!resp.value("ok").toBool()) return {};
+    return resp.value("data").toArray();
 }
 
 QImage CoreBridge::captureCrop(const QImage& screen, const QRect& rect) {

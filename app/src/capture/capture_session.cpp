@@ -213,9 +213,31 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured, bool allo
     }
 
     CoreBridge& core = CoreBridge::instance();
+    // ⚠️ 多屏配对必须由**核心按屏描述**完成,不能用索引 —— 这是
+    //    "多屏位置/分辨率混乱"的根因:QGuiApplication::screens() 的顺序与
+    //    核心侧(xcap EnumDisplayMonitors)的**顺序不同**(实测:Qt 把主屏排在
+    //    最前,xcap 把它排在最后),按索引取图会把 A 屏的底图画到 B 屏遮罩上
+    //    —— 表现为位置错位、分辨率也对不上。
+    //    也不能用 QScreen::name():它返回的是 EDID 友好名("S24 PRO"),
+    //    与核心的 `\\.\DISPLAYn` **不同源**(实测三屏全配不上)。
+    //    可靠的键是**物理桌面原点**(两端一致)+ 物理尺寸兜底,逻辑在
+    //    core 的 match_monitor(有单测覆盖实测机器布局)。
+    //    回退策略:核心未导出配对接口(旧 DLL)时才退回按索引。
+    const bool matched = core.hasMonitorMatching();
+    auto frozenFor = [&core, matched](QScreen* screen, int index) -> QImage {
+        if (matched) {
+            const QImage img = core.captureMonitorMatched(screen);
+            if (!img.isNull()) return img;
+            qWarning() << "屏" << screen->name() << "(索引" << index
+                       << ")配对捕获失败,回退按索引取图";
+        }
+        return core.captureMonitor(static_cast<unsigned>(index));
+    };
+
     if (intent == CaptureIntent::Fullscreen) {
         // 直通:捕获 → 入库(source=capture)→ 写剪贴板,同步完成
-        const QImage shot = core.captureMonitor(static_cast<unsigned>(cursorScreen));
+        // (同样按名配对:光标屏的索引在两端含义不同)
+        const QImage shot = frozenFor(screens[cursorScreen], cursorScreen);
         if (shot.isNull()) {
             qWarning() << "全屏捕获失败";
         } else {
@@ -247,9 +269,11 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured, bool allo
     }
     for (int i = 0; i < screens.size(); ++i) {
         QScreen* screen = screens[i];
-        const QImage frozen = core.captureMonitor(static_cast<unsigned>(i));
+        // 按**设备名**取本屏底图(见上方 byName 注释:索引在两端口径不同)
+        const QImage frozen = frozenFor(screen, i);
         if (frozen.isNull()) {
-            qWarning() << "屏" << i << "捕获失败,跳过该屏遮罩";
+            qWarning() << "屏" << screen->name() << "(索引" << i
+                       << ")捕获失败,跳过该屏遮罩";
             continue;
         }
         auto* overlay = new OverlayWidget(frozen, i, screen, autoConfirm, rightClickCancel);
@@ -361,9 +385,23 @@ OverlayWidget::OverlayWidget(QImage frozen, int screenIndex, QScreen* screen, bo
 }
 
 qreal OverlayWidget::dpr() const {
-    // 用所属屏幕的 DPR 而非窗口的:窗口在 show 之前 DPR 可能还是主屏的值,
-    // 而本遮罩的底图是按 m_screen 采的,两者必须同一口径。
-    return m_screen ? m_screen->devicePixelRatio() : devicePixelRatioF();
+    // ⚠️ 缩放比**从底图实际尺寸推导**,而不是直接信 `screen->devicePixelRatio()`:
+    //    底图是核心按物理像素采的,而 geometry() 是 Qt 的逻辑像素,两者的比值
+    //    就是本屏真实的"物理/逻辑"比例 —— 与底图天然自洽。
+    //    直接用 devicePixelRatio() 在混合 DPI 下会与实际取到的底图脱节:
+    //    一旦某屏走了回退取图(尺寸与预期不符),预览会被拉伸、框选换算也偏,
+    //    表现就是"分辨率乱了"。取不到底图时才退回屏幕 DPR。
+    if (m_screen) {
+        const QSize logical = m_screen->geometry().size();
+        if (!m_frozen.isNull() && logical.width() > 0 && logical.height() > 0) {
+            const qreal sx = static_cast<qreal>(m_frozen.width()) / logical.width();
+            const qreal sy = static_cast<qreal>(m_frozen.height()) / logical.height();
+            // 横竖比应一致(等比缩放);不一致说明底图异常,退回屏幕 DPR 更安全
+            if (qAbs(sx - sy) < 0.01 && sx > 0.1 && sx < 8.0) return sx;
+        }
+        return m_screen->devicePixelRatio();
+    }
+    return devicePixelRatioF();
 }
 
 QRect OverlayWidget::selectionPhysical() const {
