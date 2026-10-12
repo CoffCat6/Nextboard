@@ -338,6 +338,19 @@ Rectangle {
                 border.width: option.selected ? 0 : 1
                 border.color: option.dotColor
             }
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                // `·` 分隔名与计数:直接拼空格时形如 "1 1" 会糊成一片,
+                // 分不清哪个是名字哪个是数量(实测反馈)。
+                text: option.count > 0 ? option.label + " · " + option.count : option.label
+                font.pixelSize: Theme.metrics.fontCaption
+                // ⚠️ 选中态文字统一用 accent,不用标签自己的派生色(dotColor):
+                //    dotColor 在暗色下是**亮柔彩**(设计给"点"用),直接拿来当
+                //    文字色对比度不足且观感发虚,实测"看不清"。标签色由色点承担,
+                //    文字保持 accent 这一统一强调语言,与来源选中态同口径。
+                color: option.selected ? Theme.colors.accent
+                                       : Theme.colors.textSecondary
+            }
         }
         MouseArea {
             id: optionMa
