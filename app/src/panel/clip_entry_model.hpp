@@ -93,6 +93,14 @@ public:
     /// 批量给多条条目**追加**标签(S5.2):是"加"不是"覆盖"。
     /// 返回 { ok, changed };成功后重拉列表与标签统计。
     Q_INVOKABLE QVariantMap addTagsBulk(const QStringList& ids, const QStringList& tags);
+    /// 批量删除(条目多选):单事务(含 todo_meta 级联);失效 id 静默跳过。
+    /// 返回 { ok, deleted: [id...] };成功后重拉。
+    Q_INVOKABLE QVariantMap deleteBulk(const QStringList& ids);
+    /// 批量固定/取消固定(条目多选)。返回 { ok, changed };成功后重拉。
+    Q_INVOKABLE QVariantMap setPinnedBulk(const QStringList& ids, bool pinned);
+    /// 批量完成/取消待办(条目多选):只对 todo 条目生效,返回 { ok, changed }。
+    /// 成功后重拉(待办计数/分组随之刷新)。
+    Q_INVOKABLE QVariantMap todoSetDoneBulk(const QStringList& ids, bool done);
     /// 待办完成态切换(docs/05-todo.md §5):成功后重拉列表并刷新计数。
     Q_INVOKABLE void todoSetDone(const QString& id, bool done);
     /// 只更新待办时刻(times 键:dueAt/remindAt/notifyAt,毫秒;null = 清空该时刻)。
@@ -109,6 +117,13 @@ public:
     /// ⚠️ 只查**已加载**的行(首屏 limit 50):托盘子菜单展示的条目取自同一
     ///    排序的前 N 条,必在首屏内;超出的场景由 QML 侧退化处理(不定位)。
     Q_INVOKABLE int indexOfId(const QString& id) const;
+    /// 行号 → 条目 id(多选范围选择用);越界返回空串。
+    Q_INVOKABLE QString idAt(int row) const;
+    /// 条目 id → 类型(多选工具条"选中集里是否有待办"判定);不存在返回空串。
+    Q_INVOKABLE QString kindOfId(const QString& id) const;
+    /// 条目 id → 是否已固定(多选工具条「固定/取消固定」文案切换)。
+    /// ⚠️ 只查**已加载**的行:多选集合本就来自已加载行,查不到视为未固定。
+    Q_INVOKABLE bool isPinned(const QString& id) const;
     /// 第 row 行的**待办分组键**(QML 智能分组用):overdue/today/future/none/done;
     /// 非待办行或越界返回空串。
     /// ⚠️ 分组判定放 C++ 而不是 QML:标题是否显示 = "本行键 != 上一行键",

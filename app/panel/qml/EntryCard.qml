@@ -53,6 +53,17 @@ Rectangle {
     /// 关闭菜单的那一次点击不应顺带触发复制/收起面板。
     property bool menuOpenElsewhere: false
 
+    // ---- 条目多选(选择模式) ----
+    /// 是否处于**选择模式**(父级注入;模式内单击 = 切换选中,不复制)。
+    /// ⚠️ 单击语义的替换是模式级的:复制动作在普通模式才有 —— 若让两种语义
+    ///    并存(如"点复选框才选中"),普通点击仍会复制并收起面板,多选根本
+    ///    操作不了(第一代待办"单击勾掉任务"是同一教训)。
+    property bool selectMode: false
+    /// 本条目当前是否被选中(父级按 entryId 注入)。
+    property bool selected: false
+    /// 单击上抛:参数是 Shift 键状态,父级据此做范围选择。
+    signal toggleSelected(bool shiftHeld)
+
     /// ⚠️ 列表开了 `reuseItems`(见 Main.qml):委托被回收进池、之后**复用**到别的行,
     /// 而不是销毁重建。模型角色(entryId/kind/text…)会在复用时被 ListView 自动刷新,
     /// 但委托里的**内部状态不会**。不重置就会串味:上一条文本卡的"展开"状态会被带进
@@ -191,18 +202,33 @@ Rectangle {
     readonly property int maxImageCardHeight: 300
 
     // §18/28:Surface + 1px Border,hover 换 SurfaceHover(强调色不铺满列表);
-    // 菜单打开时用 AccentSoft + Accent 边框表"当前操作对象"(§18 Selected)。
+    // 菜单打开时用 AccentSoft + Accent 边框表"当前操作对象"(§18 Selected);
+    // 选择模式下选中项用同一 Accent 语言 —— 选中态与"当前操作对象"共用
+    // 强调语言是刻意的:两者都是"正在被操作的对象"。
     radius: Theme.metrics.radiusCard
-    color: root.menuOpen ? Theme.colors.surfaceSelected
+    color: root.selected || root.menuOpen ? Theme.colors.surfaceSelected
          : ma.containsMouse ? Theme.colors.surfaceHover
          : Theme.colors.surface
     border.width: Theme.metrics.borderWidth
-    border.color: root.menuOpen ? Theme.colors.accent
+    border.color: root.selected || root.menuOpen ? Theme.colors.accent
                 : ma.containsMouse ? Theme.colors.borderStrong
                 : Theme.colors.border
     Behavior on color { ColorAnimation { duration: Theme.animation.fast } }
     Behavior on border.color { ColorAnimation { duration: Theme.animation.fast } }
     implicitHeight: cardLayout.implicitHeight + 24
+
+    // 选择模式:左缘 Accent 竖条(与分类行选中项的指示条同一视觉词汇),
+    // 只在"选中"时显示 —— selectMode 本身不代表选中。
+    Rectangle {
+        visible: root.selected
+        anchors.left: parent.left
+        anchors.leftMargin: 3
+        anchors.verticalCenter: parent.verticalCenter
+        width: 3
+        height: parent.height - 16
+        radius: 1
+        color: Theme.colors.accent
+    }
 
     // ---- 公共操作(右键菜单 / 快捷按钮 / 点击手势共用) ----
 
@@ -266,6 +292,10 @@ Rectangle {
                     // 待办态快照:菜单里「完成/取消完成」的文案与动作都靠它
                     todoDone: root.todoDone
                 })
+            } else if (root.selectMode) {
+                // ⚠️ 选择模式内单击 = 切换选中,**不复制**(复制会收起面板,
+                //    多选根本没法连续点)。右键菜单在模式内仍可用(右键不受影响)。
+                root.toggleSelected(mouse.modifiers & Qt.ShiftModifier)
             } else if (root.kind === "todo") {
                 // 待办单击 = 无动作:首版单击切换完成态,结果"点一下卡片看正文"
                 // 就把任务勾掉了(误触率过高)。完成态入口 = 左侧复选框 / 右键菜单。

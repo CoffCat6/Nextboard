@@ -3469,3 +3469,53 @@ Qt 返回的是 **EDID 友好名**,核心返回的是**设备名**,两者不同�
   全部视图只列有数据的来源(无 clipboard/todo)、浮层可打开且初始角标 0、
   设「截图」来源后角标 1 + 列表收窄到 capture 总数 1、清除后回到未筛选态 —— 全绿;
 - 启动日志无 QML 警告/错误,截图确认布局正常。
+
+---
+
+## 2026-10-13(一)条目多选与批量操作
+
+### 诉求与决策(用户确认)
+
+多选后批量固定/完成/加标签/删除。四项决策:**操作后不退出选择模式**
+(用户常连续多批)、**全选只覆盖已加载行**(工具条提示范围)、
+**不实现批量复制**(剪贴板只能存一份,"批量复制"本质是拼文本,价值低)。
+
+### 改动
+
+**core**(三个 bulk + 单测,217 绿):
+- `delete_bulk`:单事务逐条 `DELETE ... RETURNING blob_path`(一次拿到路径并删行,
+  失效 id 静默跳过);**todo_meta 级联在事务内**(第一版放 FFI 层先删 meta,
+  被自己注释里"必须同事务"的要求当场推翻 —— 行删除失败会留下"meta 没了、
+  待办还在"的错位状态);blob 文件清理在事务外(文件删除不可回滚,不进事务)。
+- `set_pinned_bulk`:单语句 IN 更新,返回真实 changed。
+- `todo::set_done_bulk`:混选语义 —— 靠 `EXISTS kind='todo'` 过滤,只数真实
+  生效的 todo;**状态过滤**(`done_at IS NULL`/`IS NOT NULL`)修掉"重复完成
+  虚报 changed"(SQLite 的 UPDATE 命中即计,不做值未变跳过,单测踩到)。
+- 动态 IN 占位符的两个 Rust 坑:placeholders 临时值要落变量(format! 里的
+  临时活不过语句);`&i64::from(x)` / `&done.then(...)` 的临时值塞进
+  `Vec<&dyn ToSql>` 后悬垂(E0716)—— 都要先落变量再取引用。
+
+**宿主**:
+- 模型:`deleteBulk`/`setPinnedBulk`/`todoSetDoneBulk` + 三个只读 helper
+  (`idAt`/`kindOfId`/`isPinned`,供范围选择与工具条文案)。
+- EntryCard:`selectMode`/`selected` 属性 + `toggleSelected(shiftHeld)` 信号;
+  选中态 = surfaceSelected 底 + accent 边框 + 左缘竖条(与"当前操作对象"
+  共用强调语言,刻意为之:都是"正在被操作的对象");**模式内单击 = 切换选中,
+  不复制**(复制会收起面板,多选没法连续点 —— 待办"单击勾掉任务"同一教训)。
+- Main.qml:选择态归 QML(`selectedIds` 按 id 维护,模型 reset 后仍有效);
+  Shift 范围选(锚点行 → 当前行的已加载区间);工具条(全选/固定/完成/加标签/
+  删除/取消,「完成」只在选中集含待办时可见、「固定/取消固定」按多数态切文案);
+  右键菜单「多选…」进入并预选本条;Esc 分层把"退出选择模式"排最前;
+  Ctrl+A 仅选择模式内生效(不抢输入框的"全选文本")。
+- 批量删除走**确认卡片**(显示将删条数,决策点 4);批量加标签复用标签编辑
+  卡片形态(追加语义);操作后**保留选择模式**、清空选择集(被删 id 无意义)。
+
+### 验证
+
+- `cargo test` 217 绿(新增 3 个 bulk 用例:blob 收集、meta 级联无孤儿、
+  混选计数只数 todo、幂等重复完成计 0);
+- `verify_todo.py` 扩展批量断言组:固定(失效 id 跳过)→ 完成(混选只数 todo)
+  → 批量删除(deleted 名单核对 + meta 无孤儿)→ 清理现场,全绿;
+  顺手修脚本一处 `save_text_entry` 取 id 的口径错(返回 {entry:{...}} 非
+  平铺 id,写成 data["id"] 会 KeyError);
+- `verify_todo_groups.py` / `check_db_integrity.py` 全绿;构建无警告。

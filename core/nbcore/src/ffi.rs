@@ -468,6 +468,61 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
             let changed = entry::add_tags_bulk(&db, &ids, &tags)?;
             Ok(serde_json::json!({ "changed": changed }))
         }
+        // 批量删除(条目多选):单事务(行删除 + todo_meta 级联都在事务内);
+        // 失效 id 静默跳过。返回 { deleted: [...] };blobs 的文件清理在事务外
+        // (文件删除不可回滚,不进事务,与单条 delete 同一职责切分)。
+        "delete_entries_bulk" => {
+            let core = crate::core::Core::get()?;
+            let ids: Vec<String> = req
+                .get("ids")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .ok_or_else(|| AppError::InvalidInput("缺少 ids 数组".into()))?;
+            let db = core.db.lock()?;
+            let r = entry::delete_bulk(&db, &ids)?;
+            for path in &r.blobs {
+                crate::clip::remove_blob(&crate::clip::resolve_blob_path(&core.blobs_dir, path));
+            }
+            Ok(serde_json::json!({ "deleted": r.deleted }))
+        }
+        // 批量固定/取消固定(条目多选):返回 { changed }。
+        "set_pinned_bulk" => {
+            let core = crate::core::Core::get()?;
+            let ids: Vec<String> = req
+                .get("ids")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .ok_or_else(|| AppError::InvalidInput("缺少 ids 数组".into()))?;
+            let pinned = req.get("pinned").and_then(|v| v.as_bool()).unwrap_or(false);
+            let db = core.db.lock()?;
+            let changed = entry::set_pinned_bulk(&db, &ids, pinned)?;
+            Ok(serde_json::json!({ "changed": changed }))
+        }
+        // 批量完成/取消待办(条目多选):只对 todo 条目生效,返回 { changed }。
+        "todo_set_done_bulk" => {
+            let core = crate::core::Core::get()?;
+            let ids: Vec<String> = req
+                .get("ids")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .ok_or_else(|| AppError::InvalidInput("缺少 ids 数组".into()))?;
+            let done = req.get("done").and_then(|v| v.as_bool()).unwrap_or(true);
+            let db = core.db.lock()?;
+            let changed = todo::set_done_bulk(&db, &ids, done)?;
+            Ok(serde_json::json!({ "changed": changed }))
+        }
         "entry_counts" => {
             let core = crate::core::Core::get()?;
             let db = core.db.lock()?;

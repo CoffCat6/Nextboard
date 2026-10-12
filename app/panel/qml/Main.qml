@@ -212,6 +212,126 @@ Rectangle {
         filterPopupOpen = false
     }
 
+    /// 批量删除确认卡片:将删除的条数(确认文案用)。
+    property int bulkDeleteCount: 0
+    // ---- 条目多选:批量操作 ----
+    /// 批量删除确认卡片:打开前把"将删除条数"写进卡片文案(决策点 4:不设
+    /// 硬上限,但确认必须显示数量 —— 批量删除不可逆)。
+    function openBulkDeleteConfirm() {
+        if (selectedIds.length === 0) return
+        bulkDeleteCount = selectedIds.length
+        bulkDeleteCard.visible = true
+    }
+    /// 执行批量删除:成功后**保留选择模式**(决策点 1:不自动退出),
+    /// 清空选择集 —— 被删的 id 已无意义,残留会让工具条显示虚数。
+    function commitBulkDelete() {
+        bulkDeleteCard.visible = false
+        const r = Entries.deleteBulk(selectedIds)
+        if (!r.ok) { Core.showToast(r.message); return }
+        const n = r.deleted ? r.deleted.length : 0
+        selectedIds = []
+        Core.showToast("已删除 " + n + " 条")
+    }
+    /// 批量加标签:打开输入卡片(复用标签编辑卡片的形态)。
+    function openBulkTagEditor() {
+        if (selectedIds.length === 0) return
+        bulkTagInput.text = ""
+        bulkTagCard.visible = true
+        bulkTagInput.forceActiveFocus()
+    }
+    /// 提交批量加标签:解析/去重与单条标签编辑同一套口径。
+    function commitBulkTag() {
+        const parts = bulkTagInput.text.split(/[,，\\s]+/)
+        const tags = []
+        for (let i = 0; i < parts.length; ++i) {
+            const t = parts[i].trim()
+            if (t.length > 0 && tags.indexOf(t) < 0) tags.push(t)
+        }
+        if (tags.length === 0) { bulkTagCard.visible = false; return }
+        bulkTagCard.visible = false
+        const r = Entries.addTagsBulk(selectedIds, tags)
+        if (!r.ok) { Core.showToast(r.message); return }
+        Core.showToast("已为 " + r.changed + " 条添加标签")
+    }
+
+    // ---- 条目多选(选择模式) ----
+    /// 是否处于选择模式。进入/退出见 toggleSelectMode / exitSelectMode。
+    property bool selectMode: false
+    /// 已选条目 id 集合(字符串数组;选择态归 QML 而非 C++ 模型 ——
+    /// 模型 reset 时行集会变,选择集按 id 维护反而稳定)。
+    property var selectedIds: []
+    /// 范围选择(Shift)的锚点行号;-1 = 尚无锚点。
+    property int selectionAnchor: -1
+
+    /// 进入/退出选择模式。退出时清空选择集。
+    function toggleSelectMode() {
+        selectMode = !selectMode
+        if (!selectMode) selectedIds = []
+        selectionAnchor = -1
+    }
+    function exitSelectMode() {
+        if (selectMode) toggleSelectMode()
+    }
+
+    /// 单击切换选中(Shift = 从锚点行到当前行的范围)。
+    /// ⚠️ 范围只覆盖**已加载**的行(≤ 首屏 limit 50)—— 全选范围同口径,
+    ///    "选该条件下全部"需要 core 传全量 id,方案里明确不做。
+    function toggleSelectedIndex(index, shiftHeld) {
+        const id = Entries.idAt(index)
+        if (id === "") return
+        if (shiftHeld && selectionAnchor >= 0) {
+            const from = Math.min(selectionAnchor, index)
+            const to = Math.max(selectionAnchor, index)
+            const ids = selectedIds.slice()
+            for (let i = from; i <= to; ++i) {
+                const rowId = Entries.idAt(i)
+                if (rowId === "") continue
+                if (ids.indexOf(rowId) < 0) ids.push(rowId)
+            }
+            selectedIds = ids
+        } else {
+            const ids = selectedIds.slice()
+            const pos = ids.indexOf(id)
+            if (pos >= 0) ids.splice(pos, 1)
+            else ids.push(id)
+            selectedIds = ids
+            selectionAnchor = index
+        }
+    }
+
+    /// 全选当前视图的**已加载行**(Ctrl+A / 工具条按钮共用)。
+    /// ⚠️ 行数上限 = 已加载行数,不追页:工具条会提示范围,见 selectedCountText。
+    function selectAllLoaded() {
+        const ids = []
+        const n = list.count
+        for (let i = 0; i < n; ++i) {
+            const id = Entries.idAt(i)
+            if (id !== "") ids.push(id)
+        }
+        selectedIds = ids
+    }
+
+    /// 工具条与选择态的文案(含"已加载行"范围提示,决策点 2 的落点)。
+    readonly property string selectedCountText:
+        selectedIds.length >= list.count && list.count > 0
+            ? "已选 " + selectedIds.length + " 项(当前视图全部)"
+            : "已选 " + selectedIds.length + " 项"
+
+    /// 选中集合里是否有待办(工具条「完成」按钮的可用性)。
+    readonly property bool selectionHasTodo: (function() {
+        for (let i = 0; i < selectedIds.length; ++i)
+            if (Entries.kindOfId(selectedIds[i]) === "todo") return true
+        return false
+    })()
+
+    /// 选中集合是否全部已固定(「固定/取消固定」文案切换)。
+    readonly property bool selectionAllPinned: (function() {
+        if (selectedIds.length === 0) return false
+        for (let i = 0; i < selectedIds.length; ++i)
+            if (!Entries.isPinned(selectedIds[i])) return false
+        return true
+    })()
+
     /// 生效筛选的展示文案(用于分类行右侧的活动 chip):
     /// 让用户一眼看出"列表明明少了东西,是因为这两个条件"。
     readonly property string activeSourceLabel:
@@ -718,10 +838,16 @@ Rectangle {
 
     Keys.onEscapePressed: {
         // 分层处理,一次 Esc 只消费一层(自上而下):
-        //   筛选浮层 → 设置抽屉 → 翻译页自己的浮层 → 收起面板
+        //   选择模式 → 筛选浮层 → 设置抽屉 → 翻译页浮层 → 收起面板
         // 翻译页的 Esc 语义与 ✕ 一致:**直接收起**,不再顺带切回列表页。
-        // ⚠️ 筛选浮层排在最前:它是"贴在某按钮下的轻浮层",用户按 Esc 最可能
-        //    是想关它;若排在抽屉之后,抽屉没开时这一层就永远轮不到。
+        // ⚠️ 选择模式排在最前:它是"覆盖整列表的操作态",用户在模式内按 Esc
+        //    最可能是想退出多选;且退出比关浮层"损失"更小(选择集可重建)。
+        // ⚠️ 筛选浮层次之:它是"贴在某按钮下的轻浮层",若排在抽屉之后,
+        //    抽屉没开时这一层就永远轮不到。
+        if (root.selectMode) {
+            root.exitSelectMode()
+            return
+        }
         if (root.filterPopupOpen) {
             root.closeFilterPopup()
             return
@@ -738,8 +864,19 @@ Rectangle {
         }
         panelWindow.hidePanel()
     }
-    // Ctrl+F / Ctrl+K 聚焦搜索(§27);Ctrl+1..9 复制当前视图第 N 条(第一代 F2)。
+    // Ctrl+F / Ctrl+K 聚焦搜索(§27);Ctrl+1..9 复制当前视图第 N 条(第一代 F2);
+    // Ctrl+A = 选择模式内全选已加载行(模式外不拦截 —— 系统约定 Ctrl+A 是
+    // "全选文本",抢了会破坏搜索框等输入处的行为)。
     Keys.onPressed: function(event) {
+        if (event.key === Qt.Key_A
+                && (event.modifiers & Qt.ControlModifier)
+                && root.selectMode
+                && panelWindow.mode === "list"
+                && !(searchInput.activeFocus)) {
+            root.selectAllLoaded()
+            event.accepted = true
+            return
+        }
         if ((event.key === Qt.Key_F || event.key === Qt.Key_K)
                 && (event.modifiers & Qt.ControlModifier)) {
             searchInput.forceActiveFocus()
@@ -1101,7 +1238,106 @@ Rectangle {
                     onClicked: filterButton.clicked()
                 }
             }
+
+            // ---- 多选入口 ----
+            // ⚠️ 放分类行行尾(与「筛选」并排):多选是对**当前视图**的操作,
+            //    归属同一行;选择模式的完整工具条在进入后才出现(见 selectToolBar)。
+            // 图标复用 "todo"(复选框):多选的本义就是"勾选若干条"。
+            ThemedButton {
+                objectName: "selectModeButton"
+                Layout.alignment: Qt.AlignVCenter
+                size: "sm"
+                // 进入选择模式后转 primary(模式开关的状态可见性)
+                variant: root.selectMode ? "primary" : "secondary"
+                iconName: "todo"
+                text: root.selectMode ? "退出多选" : "多选"
+                onClicked: root.toggleSelectMode()
+            }
         }
+        // ---- 选择模式工具条(仅 selectMode 时出现) ----
+        // 操作集合:复制(不提供,见方案决策点 3)/固定/完成/加标签/删除。
+        // ⚠️ 与"生效筛选行"同一占位规则:进入模式才占一行;条目按钮在
+        //    selectedIds 为空时禁用(避免点了没反应)。
+        // ⚠️ 删除必须走确认卡片(bulkConfirmCard),不直接删 —— 批量删除不可逆。
+        RowLayout {
+            id: selectToolBar
+            objectName: "selectToolBar"
+            Layout.fillWidth: true
+            Layout.leftMargin: Theme.metrics.spacingMd
+            Layout.rightMargin: Theme.metrics.spacingMd
+            Layout.bottomMargin: Theme.metrics.spacingSm
+            spacing: Theme.metrics.spacingXs
+            visible: root.selectMode
+
+            Text {
+                // 含范围提示(决策点 2):全选只覆盖已加载行,选满时明示
+                // "当前视图全部",未满时说明是已加载部分 —— 用户不会误以为
+                // "全选 = 该条件下所有条目都进选择集"。
+                text: root.selectedCountText
+                       + (root.selectedIds.length > 0
+                          && root.selectedIds.length < list.count
+                          ? "(已加载行)" : "")
+                font.pixelSize: Theme.metrics.fontCaption
+                color: Theme.colors.textSecondary
+            }
+            ThemedButton {
+                variant: "ghost"; size: "sm"; iconName: "all"
+                text: "全选"
+                enabled: list.count > 0
+                onClicked: root.selectAllLoaded()
+            }
+            ThemedButton {
+                variant: "ghost"; size: "sm"; iconName: "pin"
+                text: root.selectionAllPinned ? "取消固定" : "固定"
+                enabled: root.selectedIds.length > 0
+                onClicked: {
+                    const r = Entries.setPinnedBulk(
+                        root.selectedIds, !root.selectionAllPinned)
+                    if (!r.ok) { Core.showToast(r.message); return }
+                    Core.showToast((root.selectionAllPinned ? "已取消固定 " : "已固定 ")
+                                   + r.changed + " 条")
+                }
+            }
+            // 「完成/取消完成」只对选中集里的待办生效(core 侧已过滤非 todo),
+            // 按钮在有 todo 时才可用 —— 对纯文本集禁用,避免"完成 0 条"的空操作。
+            ThemedButton {
+                variant: "ghost"; size: "sm"; iconName: "todo"
+                text: "完成"
+                visible: root.selectionHasTodo
+                enabled: root.selectedIds.length > 0
+                onClicked: {
+                    // 只把选中集里的 **todo id** 传下去(文本混选时剔除)
+                    const todoIds = []
+                    for (let i = 0; i < root.selectedIds.length; ++i)
+                        if (Entries.kindOfId(root.selectedIds[i]) === "todo")
+                            todoIds.push(root.selectedIds[i])
+                    const r = Entries.todoSetDoneBulk(todoIds, true)
+                    if (!r.ok) { Core.showToast(r.message); return }
+                    Core.showToast("已完成 " + r.changed + " 条待办")
+                }
+            }
+            ThemedButton {
+                variant: "ghost"; size: "sm"; iconName: "pencil"
+                text: "加标签"
+                enabled: root.selectedIds.length > 0
+                onClicked: root.openBulkTagEditor()
+            }
+            ThemedButton {
+                objectName: "bulkDeleteButton"
+                variant: "ghost"; size: "sm"; iconName: "trash"
+                text: "删除"
+                enabled: root.selectedIds.length > 0
+                onClicked: root.openBulkDeleteConfirm()
+            }
+            Item { Layout.fillWidth: true }
+            ThemedButton {
+                variant: "secondary"; size: "sm"
+                text: "取消"
+                onClicked: root.exitSelectMode()
+            }
+        }
+
+
         // ---- 生效筛选行(仅在有筛选时出现;可换行,不再挤分类行) ----
         // ⚠️ 为什么从分类行里搬出来:RowLayout 空间不足时会**按比例压缩**各子项,
         //    chip 多时把分类项与按钮挤变形、文字截断(实测:两个 chip + 5 个分类
@@ -1491,6 +1727,16 @@ Rectangle {
                                && root.menuTarget.entryId === rowWrap.entryId)
                               || root.highlightTodoId === rowWrap.entryId
                     menuOpenElsewhere: root.menuTarget !== null
+                    // ---- 条目多选 ----
+                    selectMode: root.selectMode
+                    selected: root.selectMode
+                              && root.selectedIds.indexOf(rowWrap.entryId) >= 0
+                    // Shift 范围选择:锚点与目标行号都在委托层可得(index)。
+                    // ⚠️ toggleSelected 的参数是 Shift 键状态,范围选择在
+                    //    toggleSelectedIndex 里完成(锚点行号由 Main 侧维护)。
+                    onToggleSelected: function(shiftHeld) {
+                        root.toggleSelectedIndex(index, shiftHeld)
+                    }
                     onContextMenuRequested: function(entry) { root.openEntryMenu(entry) }
                     onMenuDismissRequested: root.closeEntryMenu()
                     onTodoEditRequested: function(entry) { root.openTodoComposer(entry) }
@@ -1790,6 +2036,15 @@ Rectangle {
             }
             addSep()
 
+            // 组 1.5:多选入口(进入选择模式并预选本条 —— 从单条自然过渡到批量)
+            addAction("多选…", function() {
+                if (!root.selectMode) root.toggleSelectMode()
+                // 已在集合里则不重复加入(幂等,重复右键不会"选两次")
+                if (root.selectedIds.indexOf(entry.entryId) < 0)
+                    root.selectedIds = root.selectedIds.concat([entry.entryId])
+            })
+            addSep()
+
             // 组 2:通用操作(复制 / 贴图)
             addAction("复制", function() { root.copyEntryAndHide(entry.entryId) })
             if (entry.kind === "file")
@@ -2012,6 +2267,161 @@ Rectangle {
             }
         }
     }
+    // ---- 批量删除确认卡片(条目多选) ----
+    // 复用 tagRenameCard 的"屏障 + 居中卡片"模式;删除不可逆,必须显式确认,
+    // 且确认文案里**必须显示将删除的条数**(方案决策点 4:不设硬上限,
+    // 但数量必须让用户在按下前看到)。
+    MouseArea {
+        id: bulkDeleteBarrier
+        anchors.fill: parent
+        z: 950
+        visible: bulkDeleteCard.visible
+        enabled: visible
+        acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+        onClicked: bulkDeleteCard.visible = false
+    }
+
+    Rectangle {
+        id: bulkDeleteCard
+        z: 960
+        visible: false
+        anchors.centerIn: parent
+        width: Math.min(340, root.width - 48)
+        height: bulkDeleteLayout.implicitHeight + 2 * Theme.metrics.spacingMd
+        radius: Theme.metrics.radiusCard
+        color: Theme.colors.surface
+        border.width: Theme.metrics.borderWidth
+        border.color: Theme.colors.borderStrong
+
+        ColumnLayout {
+            id: bulkDeleteLayout
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: Theme.metrics.spacingMd
+            spacing: Theme.metrics.spacingSm
+
+            Text {
+                Layout.fillWidth: true
+                text: "删除 " + root.bulkDeleteCount + " 条条目?"
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.metrics.fontSection
+                font.weight: Font.DemiBold
+                color: Theme.colors.error
+            }
+            Text {
+                Layout.fillWidth: true
+                text: "选中的条目将连同图片与待办数据一起删除,不可恢复。"
+                wrapMode: Text.Wrap
+                font.pixelSize: Theme.metrics.fontCaption
+                color: Theme.colors.textSecondary
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Theme.metrics.spacingSm
+                Item { Layout.fillWidth: true }
+                ThemedButton {
+                    variant: "secondary"; size: "sm"
+                    text: "取消"
+                    onClicked: bulkDeleteCard.visible = false
+                }
+                ThemedButton {
+                    objectName: "bulkDeleteConfirm"
+                    variant: "danger"; size: "sm"
+                    text: "删除"
+                    onClicked: root.commitBulkDelete()
+                }
+            }
+        }
+    }
+
+    // ---- 批量加标签卡片(条目多选) ----
+    // 与批量删除同一模式;追加语义(add_tags_bulk 是"加"不是"覆盖"),
+    // 已有同标签的条目不会重复。
+    MouseArea {
+        id: bulkTagBarrier
+        anchors.fill: parent
+        z: 950
+        visible: bulkTagCard.visible
+        enabled: visible
+        acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+        onClicked: bulkTagCard.visible = false
+    }
+
+    Rectangle {
+        id: bulkTagCard
+        z: 960
+        visible: false
+        anchors.centerIn: parent
+        width: Math.min(340, root.width - 48)
+        height: bulkTagLayout.implicitHeight + 2 * Theme.metrics.spacingMd
+        radius: Theme.metrics.radiusCard
+        color: Theme.colors.surface
+        border.width: Theme.metrics.borderWidth
+        border.color: Theme.colors.borderStrong
+
+        ColumnLayout {
+            id: bulkTagLayout
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: Theme.metrics.spacingMd
+            spacing: Theme.metrics.spacingSm
+
+            Text {
+                Layout.fillWidth: true
+                text: "为 " + root.selectedIds.length + " 条条目加标签"
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.metrics.fontSection
+                font.weight: Font.DemiBold
+                color: Theme.colors.textPrimary
+            }
+            Text {
+                Layout.fillWidth: true
+                text: "逗号分隔,可多个;是追加而不是覆盖,已有标签保留。"
+                wrapMode: Text.Wrap
+                font.pixelSize: Theme.metrics.fontCaption
+                color: Theme.colors.textSecondary
+            }
+            TextField {
+                id: bulkTagInput
+                Layout.fillWidth: true
+                placeholderText: "标签,多个用逗号分隔"
+                placeholderTextColor: Theme.colors.textTertiary
+                color: Theme.colors.textPrimary
+                selectionColor: Theme.colors.accent
+                selectedTextColor: Theme.colors.accentText
+                font.pixelSize: Theme.metrics.fontSecondary
+                background: Rectangle {
+                    color: Theme.colors.surfaceSecondary
+                    radius: Theme.metrics.radiusInput
+                    border.width: Theme.metrics.borderWidth
+                    border.color: bulkTagInput.activeFocus ? Theme.colors.accent
+                                                           : Theme.colors.border
+                }
+                Keys.onReturnPressed: root.commitBulkTag()
+                Keys.onEnterPressed: root.commitBulkTag()
+                Keys.onEscapePressed: bulkTagCard.visible = false
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Theme.metrics.spacingSm
+                Item { Layout.fillWidth: true }
+                ThemedButton {
+                    variant: "secondary"; size: "sm"
+                    text: "取消"
+                    onClicked: bulkTagCard.visible = false
+                }
+                ThemedButton {
+                    objectName: "bulkTagConfirm"
+                    variant: "primary"; size: "sm"
+                    text: "添加"
+                    onClicked: root.commitBulkTag()
+                }
+            }
+        }
+    }
+
 
     // ---- 待办新建/编辑卡片(docs/05-todo.md §6.2) ----
     // 复用 tagEditorCard 的"屏障 + 居中卡片"模式;宽一点(380)给时间字段留位置。

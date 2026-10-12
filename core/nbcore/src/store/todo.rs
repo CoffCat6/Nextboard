@@ -371,6 +371,49 @@ pub fn set_done(conn: &Connection, id: &str, done: bool) -> AppResult<()> {
     Ok(())
 }
 
+/// 批量完成态切换(条目多选用):返回**真实**完成/取消的条数。
+///
+/// 语义:
+/// - 非 todo 条目或已处于目标态的条目不计入 —— 宿主多选可能混选文本与待办,
+///   "完成 3 条"必须是真实生效数,不能把混入的文本条目也算进去
+///   (靠 JOIN clip_entries 的 kind='todo' 过滤,而不是先查再改);
+///   已处于目标态的也不计入:SQLite 的 UPDATE **命中即计**、不做"值未变则
+///   跳过",不加状态过滤会把"重复完成"虚报成 changed(单测踩到);
+/// - reminded/notified 不复位(与单条 set_done 同一语义:批量完成是把
+///   "已提醒过"的任务归档,复位会让调度线程把它们再报一遍);
+/// - 无事务包裹:单条 UPDATE 原子,批量语义就是"改到多少算多少",
+///   部分失效不回滚(与 delete_bulk 的整体事务取舍不同 —— 固定/完成态
+///   是幂等操作,重试无副作用,不需要原子性)。
+pub fn set_done_bulk(conn: &Connection, ids: &[String], done: bool) -> AppResult<i64> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let placeholders = vec!["?"; ids.len()].join(",");
+    // 状态过滤:done=true 只改"未完成"的;false 只改"已完成"的
+    // (两侧互补,等价于"目标态 != 当前态")
+    let state_filter = if done {
+        "todo_meta.done_at IS NULL"
+    } else {
+        "todo_meta.done_at IS NOT NULL"
+    };
+    let sql = format!(
+        "UPDATE todo_meta SET done_at = ?1 \
+         WHERE id IN ({placeholders}) \
+           AND {state_filter} \
+           AND EXISTS (SELECT 1 FROM clip_entries e \
+                       WHERE e.id = todo_meta.id AND e.kind = 'todo')"
+    );
+    // ⚠️ 临时值先落变量再取引用:`&done.then(...)` 的临时 Option 活不过当前
+    //    语句,塞进 Vec<&dyn ToSql> 后调用时已悬垂(E0716,实测编译错)。
+    let done_at = done.then(|| Some(now_ms()));
+    let mut params_vec: Vec<&dyn rusqlite::ToSql> = vec![&done_at];
+    for id in ids {
+        params_vec.push(id);
+    }
+    let changed = conn.execute(&sql, params_vec.as_slice())?;
+    Ok(changed as i64)
+}
+
 /// 删除待办:条目与扩展表一起删(调用方负责清理 blobs —— 待办无 blob,此处无需)。
 pub fn delete(conn: &Connection, id: &str) -> AppResult<()> {
     let n = conn.execute("DELETE FROM todo_meta WHERE id = ?1", params![id])?;
@@ -930,5 +973,44 @@ mod tests {
         assert!(item.done_at.is_none());
         assert_eq!(item.entry.text_content.as_deref(), Some("任务"));
         assert!(get(&conn, "nope").expect("get2").is_none());
+    }
+
+    // ---------- 批量完成态(条目多选用) ----------
+
+    /// **混选语义**是本函数的核心回归:多选可能混选文本与待办,
+    /// 返回值必须是真实生效数(只数 todo),不能把混入的文本算进去。
+    #[test]
+    fn set_done_bulk_counts_only_todo_entries() {
+        let mut conn = crate::store::memory();
+        let now = now_ms();
+        let t1 = create_at(&mut conn, "待办一", Some(now - DAY), None, None, now);
+        let t2 = create_at(&mut conn, "待办二", None, None, None, now);
+        // 普通文本条目:多选时会被混进来,但完成态只对 todo 生效
+        entry::insert(&conn, &plain_entry("plain", "普通文本", now)).expect("plain");
+
+        let ids = vec![t1.clone(), t2.clone(), "plain".to_string(), "ghost".to_string()];
+        let n = set_done_bulk(&conn, &ids, true).unwrap();
+        assert_eq!(n, 2, "混选时只数真实完成的 todo,plain/ghost 不计");
+
+        let done = |id: &str| {
+            conn.query_row(
+                "SELECT done_at IS NOT NULL FROM todo_meta WHERE id = ?1",
+                params![id],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap()
+        };
+        assert!(done(&t1) && done(&t2));
+
+        // 批量取消完成:同样只数 todo
+        assert_eq!(set_done_bulk(&conn, &ids, false).unwrap(), 2);
+        assert!(!done(&t1));
+
+        // 幂等:已完成再完成 → 0(宿主 toast 不虚报)
+        set_done_bulk(&conn, &[t1.clone()], true).unwrap();
+        assert_eq!(set_done_bulk(&conn, &[t1.clone()], true).unwrap(), 0);
+
+        // 空入参
+        assert_eq!(set_done_bulk(&conn, &[], true).unwrap(), 0);
     }
 }

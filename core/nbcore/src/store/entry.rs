@@ -556,6 +556,95 @@ pub fn set_pinned(conn: &Connection, id: &str, pinned: bool) -> AppResult<()> {
     Ok(())
 }
 
+// ---------- 多选批量操作(条目多选,S6 前置能力) ----------
+
+/// 批量删除结果:删除成功的 id 与应清理的 blob 路径。
+///
+/// blob 路径返回给调用方(FFI 层)统一删文件,与单条 `delete` 同一职责切分:
+/// 事务管数据库行,文件系统清理放事务外(文件删除不可回滚,不该进事务)。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkDeleteResult {
+    pub deleted: Vec<String>,
+    pub blobs: Vec<String>,
+}
+
+/// 批量删除:**单事务**完成,失效 id 静默跳过。
+///
+/// 语义(与单条 delete 的差异及理由):
+/// - 不对"id 不存在"报错 —— 多选期间条目可能已被淘汰/在另一端删除,
+///   部分失效是常态,整体失败反而让用户没法继续;返回值里带
+///   `deleted` 供宿主核对"删了几条"。
+/// - 必须单事务:中途失败(如磁盘满)不能留下"删了一半"的状态 ——
+///   FTS 触发器会逐行同步删除索引,半途而废的删除会让搜索结果与
+///   列表不一致(历史上 v6 迁移踩过"资产不一致"的坑)。
+/// - FTS 触发器随行删除自动同步,无需手动清理。
+pub fn delete_bulk(conn: &Connection, ids: &[String]) -> AppResult<BulkDeleteResult> {
+    if ids.is_empty() {
+        return Ok(BulkDeleteResult {
+            deleted: Vec::new(),
+            blobs: Vec::new(),
+        });
+    }
+    let tx = conn.unchecked_transaction()?;
+    let mut deleted = Vec::with_capacity(ids.len());
+    let mut blobs = Vec::new();
+    {
+        let mut stmt = tx.prepare(
+            "DELETE FROM clip_entries WHERE id = ?1 \
+             RETURNING blob_path",
+        )?;
+        for id in ids {
+            // RETURNING 一次拿到 blob_path 并删行:不存在时返回 0 行 = 静默跳过
+            let rows = stmt
+                .query_map(params![id], |row| row.get::<_, Option<String>>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if rows.is_empty() {
+                continue;
+            }
+            // ⚠️ todo_meta 级联**必须在本事务内**:放 FFI 层先删的话,
+            //    行删除一旦失败会留下"meta 没了、待办还在"的错位状态
+            //    (待办列表/计数全部读 meta)。DELETE FROM clip_entries 的
+            //    触发器只管 FTS,不管 meta,所以这里显式删。
+            tx.execute("DELETE FROM todo_meta WHERE id = ?1", params![id])?;
+            deleted.push(id.clone());
+            if let Some(Some(path)) = rows.into_iter().next() {
+                blobs.push(path);
+            }
+        }
+    }
+    tx.commit()?;
+    Ok(BulkDeleteResult { deleted, blobs })
+}
+
+/// 批量设置固定状态:单语句 IN 更新,返回实际改动的条数。
+///
+/// 不存在的 id 自然不计入 changed(与 delete_bulk 的"静默跳过"同一取舍)。
+/// ⚠️ IN 占位符按 ids 长度动态拼 —— SQLite 无数组绑定,拼参数个数是标准做法;
+///    ids 来自宿主多选(≤ 已加载行数,几十条量级),无长度风险,仍加空集短路。
+/// 固定是**幂等**操作,部分失败不回滚(与 delete_bulk 的整体事务取舍不同:
+/// 删除不可逆需要原子性,固定可重试不需要)。
+pub fn set_pinned_bulk(conn: &Connection, ids: &[String], pinned: bool) -> AppResult<i64> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    // ⚠️ placeholders 必须先绑定到变量:写进 format! 的临时值活不过整条
+    //    语句,SQL 字符串里留下的引用会悬垂(E0716,实测编译错)。
+    let placeholders = vec!["?"; ids.len()].join(",");
+    let sql = format!(
+        "UPDATE clip_entries SET pinned = ?1 WHERE id IN ({placeholders})"
+    );
+    // ⚠️ 临时值必须先落变量再取引用:`&i64::from(pinned)` 的临时 i64 活不过
+    //    当前语句,塞进 Vec<&dyn ToSql> 后调用时已悬垂(E0716,实测编译错)。
+    let pinned_i64 = i64::from(pinned);
+    let mut params_vec: Vec<&dyn rusqlite::ToSql> = vec![&pinned_i64];
+    for id in ids {
+        params_vec.push(id);
+    }
+    let changed = conn.execute(&sql, params_vec.as_slice())?;
+    Ok(changed as i64)
+}
+
 /// 标签及其条目数（S5.2 标签筛选条用），按条目数降序、同名升序。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1866,5 +1955,87 @@ mod tests {
         // 空入参:直接 0,不报错
         assert_eq!(add_tags_bulk(&conn, &[], &["x".to_string()]).unwrap(), 0);
         assert_eq!(add_tags_bulk(&conn, &ids, &["  ".to_string()]).unwrap(), 0);
+    }
+
+    // ---------- 多选批量操作 ----------
+
+    #[test]
+    fn delete_bulk_removes_rows_and_collects_blobs() {
+        let conn = crate::store::memory();
+        insert(&conn, &entry("a", "h-a", "甲", false, 100)).unwrap();
+        insert(&conn, &entry("b", "h-b", "乙", false, 200)).unwrap();
+        insert(&conn, &image_entry("img", "h-i", "blobs/p1.png", false, 300)).unwrap();
+        // 造一条 todo(带 meta 行):验证 bulk 删除的 **meta 级联** ——
+        // 行与 meta 必须一起走,残留孤儿行会让待办计数/列表错乱。
+        let mut td = entry("td", "h-td", "待办条目", false, 400);
+        td.kind = EntryKind::Todo;
+        insert(&conn, &td).unwrap();
+        conn.execute(
+            "INSERT INTO todo_meta (id, due_at, remind_at, notify_at) VALUES ('td', NULL, NULL, NULL)",
+            [],
+        )
+        .unwrap();
+
+        let ids = vec![
+            "a".to_string(),
+            "img".to_string(),
+            "td".to_string(),
+            "ghost".to_string(),   // 不存在:静默跳过
+        ];
+        let r = delete_bulk(&conn, &ids).unwrap();
+        assert_eq!(r.deleted, vec!["a", "img", "td"], "失效 id 不计入 deleted");
+        assert_eq!(r.blobs, vec!["blobs/p1.png"], "只有图片条目带 blob");
+        // meta 级联:td 的 todo_meta 行必须一起消失
+        let meta_left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM todo_meta WHERE id = 'td'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(meta_left, 0, "todo_meta 不得残留孤儿行");
+        // 库里只剩 b
+        let (_, total) = list(&conn, None, None, None, None, None, 10, 0).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(get(&conn, "b").unwrap().unwrap().id, "b");
+        // 全部失效 id:空结果而非报错(幂等重试安全)
+        let r = delete_bulk(&conn, &["ghost".to_string()]).unwrap();
+        assert!(r.deleted.is_empty() && r.blobs.is_empty());
+        // 空入参短路
+        assert!(delete_bulk(&conn, &[]).unwrap().deleted.is_empty());
+    }
+
+    #[test]
+    fn delete_bulk_is_atomic_on_failure() {
+        let conn = crate::store::memory();
+        insert(&conn, &entry("a", "h-a", "甲", false, 100)).unwrap();
+        // 事务性验证:单测里难以注入磁盘错误,退而验证"RETURNING 路径下
+        // 删除与 blob 收集同事务"——即删除行数与 blobs 数一致(半途而废
+        // 会出现 deleted 多、blobs 少的错位)。
+        insert(&conn, &image_entry("i1", "h-1", "blobs/x.png", false, 200)).unwrap();
+        insert(&conn, &image_entry("i2", "h-2", "blobs/y.png", false, 300)).unwrap();
+        let r = delete_bulk(
+            &conn,
+            &["i1".to_string(), "i2".to_string(), "a".to_string()],
+        )
+        .unwrap();
+        assert_eq!(r.deleted.len(), 3);
+        assert_eq!(r.blobs.len(), 2, "文本无 blob,图片两条都收集到");
+        assert_eq!(r.blobs, vec!["blobs/x.png", "blobs/y.png"]);
+    }
+
+    #[test]
+    fn set_pinned_bulk_updates_only_existing() {
+        let conn = crate::store::memory();
+        insert(&conn, &entry("a", "h-a", "甲", false, 100)).unwrap();
+        insert(&conn, &entry("b", "h-b", "乙", false, 200)).unwrap();
+        let ids = vec!["a".to_string(), "ghost".to_string()];
+        let n = set_pinned_bulk(&conn, &ids, true).unwrap();
+        assert_eq!(n, 1, "ghost 不存在不计入");
+        assert!(get(&conn, "a").unwrap().unwrap().pinned);
+        assert!(!get(&conn, "b").unwrap().unwrap().pinned, "未选中的不动");
+        // 再固定一次(幂等):changed 仍为 1(SQLite UPDATE 命中即计,语义可接受)
+        assert_eq!(set_pinned_bulk(&conn, &ids, true).unwrap(), 1);
+        // 取消固定
+        assert_eq!(set_pinned_bulk(&conn, &["a".to_string()], false).unwrap(), 1);
+        assert!(!get(&conn, "a").unwrap().unwrap().pinned);
+        // 空入参
+        assert_eq!(set_pinned_bulk(&conn, &[], true).unwrap(), 0);
     }
 }

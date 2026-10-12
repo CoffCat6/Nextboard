@@ -257,6 +257,46 @@ QVariantMap ClipEntryModel::addTagsBulk(const QStringList& ids, const QStringLis
     return {{"ok", true}, {"changed", resp.value("data").toMap().value("changed").toInt()}};
 }
 
+// ---- 条目多选批量操作 ----
+// 统一形态:调 FFI → 失败带 message 返回、成功 reload。批量后**清空选择状态
+// 是调用方(Main.qml)的职责** —— 模型不知道选择集合的存在(见方案:选择态归 QML)。
+
+QVariantMap ClipEntryModel::deleteBulk(const QStringList& ids) {
+    if (ids.isEmpty()) return {{"ok", true}, {"deleted", QStringList{}}};
+    const QVariantMap resp = CoreFacade::instance().call(
+        "delete_entries_bulk", QVariantMap{{"ids", ids}});
+    if (!resp.value("ok").toBool()) {
+        return {{"ok", false},
+                {"message", resp.value("error").toMap().value("message").toString()}};
+    }
+    reload(m_limit);
+    return {{"ok", true}, {"deleted", resp.value("data").toMap().value("deleted").toList()}};
+}
+
+QVariantMap ClipEntryModel::setPinnedBulk(const QStringList& ids, bool pinned) {
+    if (ids.isEmpty()) return {{"ok", true}, {"changed", 0}};
+    const QVariantMap resp = CoreFacade::instance().call(
+        "set_pinned_bulk", QVariantMap{{"ids", ids}, {"pinned", pinned}});
+    if (!resp.value("ok").toBool()) {
+        return {{"ok", false},
+                {"message", resp.value("error").toMap().value("message").toString()}};
+    }
+    reload(m_limit);
+    return {{"ok", true}, {"changed", resp.value("data").toMap().value("changed").toInt()}};
+}
+
+QVariantMap ClipEntryModel::todoSetDoneBulk(const QStringList& ids, bool done) {
+    if (ids.isEmpty()) return {{"ok", true}, {"changed", 0}};
+    const QVariantMap resp = CoreFacade::instance().call(
+        "todo_set_done_bulk", QVariantMap{{"ids", ids}, {"done", done}});
+    if (!resp.value("ok").toBool()) {
+        return {{"ok", false},
+                {"message", resp.value("error").toMap().value("message").toString()}};
+    }
+    reload(m_limit);
+    return {{"ok", true}, {"changed", resp.value("data").toMap().value("changed").toInt()}};
+}
+
 // ---- 待办(docs/05-todo.md §5/§6) ----
 
 /// times 里的时刻 → FFI 三态参数:键缺失/无效 = 不传(null),null/0 = 明确清空。
@@ -386,6 +426,24 @@ QString ClipEntryModel::rowGroupKey(int row) const {
     const QDate due = QDateTime::fromMSecsSinceEpoch(r.todoDueAt).date();
     return (due == QDate::currentDate()) ? QStringLiteral("today")
                                          : QStringLiteral("future");
+}
+
+QString ClipEntryModel::idAt(int row) const {
+    return (row >= 0 && row < m_rows.size()) ? m_rows[row].id : QString();
+}
+
+QString ClipEntryModel::kindOfId(const QString& id) const {
+    for (const Row& r : m_rows) {
+        if (r.id == id) return r.kind;
+    }
+    return QString();
+}
+
+bool ClipEntryModel::isPinned(const QString& id) const {
+    for (const Row& r : m_rows) {
+        if (r.id == id) return r.pinned;
+    }
+    return false;
 }
 
 QString ClipEntryModel::imageUrlForBlob(const QString& blobPath, bool thumb) {

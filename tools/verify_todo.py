@@ -208,6 +208,51 @@ def main():
     assert not any(p["id"] == soon for p in pending2), "播报确认后不应再弹"
     print("  ✅ 到点扫描触发 + 气泡播报去重")
 
+    # ---- 批量操作(条目多选) ----
+    # 三个 bulk 端点:删除(含 todo_meta 级联)/固定/完成。混选语义:
+    # 失效 id 与非 todo 条目静默跳过,返回值 = 真实生效数。
+    bulk_keep = core.call("todo_create", {"text": "批量保留", "dueAt": now + DAY})["data"]["id"]
+    bulk_del1 = core.call("todo_create", {"text": "批量删一"})["data"]["id"]
+    bulk_del2 = core.call("todo_create", {"text": "批量删二"})["data"]["id"]
+    # 文本条目混进批量删除(应被一并删除 —— 批量删除对任何类型生效)
+    # ⚠️ save_text_entry 返回 { entry: {...} },id 在 entry 里(与 todo_create
+    #    的平铺 {id} 不同)—— 写成 data["id"] 会 KeyError(实测踩到)。
+    txt = core.call("save_text_entry", {"text": "批量删的文本"})["data"]["entry"]["id"]
+
+    # 固定:3 个有效 id + 1 个失效 id → changed 只数真实命中的
+    r = core.call("set_pinned_bulk", {"ids": [bulk_keep, txt, "ghost"], "pinned": True})
+    assert r["data"]["changed"] == 2, r
+    got = core.call("get_entry", {"id": bulk_keep})["data"]
+    assert got["pinned"] is True, got
+    # 完成:todo_set_done_bulk 只数 todo(文本条目混入不计)
+    r = core.call("todo_set_done_bulk",
+                  {"ids": [bulk_keep, txt, "ghost"], "done": True})
+    assert r["data"]["changed"] == 1, f"混选时只应完成 1 条 todo: {r}"
+    got = core.call("todo_get", {"id": bulk_keep})["data"]
+    assert got["doneAt"] > 0, got
+    # 取消固定 + 取消完成(批量)
+    assert core.call("set_pinned_bulk", {"ids": [bulk_keep], "pinned": False})["data"]["changed"] == 1
+    assert core.call("todo_set_done_bulk", {"ids": [bulk_keep], "done": False})["data"]["changed"] == 1
+
+    # 删除:2 个 todo + 1 个文本 + 1 个失效 id → deleted 含 3 个真实删除
+    r = core.call("delete_entries_bulk",
+                  {"ids": [bulk_del1, bulk_del2, txt, "ghost"]})["data"]
+    assert sorted(r["deleted"]) == sorted([bulk_del1, bulk_del2, txt]), r
+    after = core.call("todo_list", {"done": "all", "limit": 50, "offset": 0})["data"]
+    ids_left = [i["id"] for i in after["items"]]
+    assert bulk_del1 not in ids_left and bulk_del2 not in ids_left, ids_left
+    # meta 级联:被删的 todo 不得残留孤儿 meta 行
+    con = sqlite3.connect(db)
+    orphan = con.execute(
+        "SELECT COUNT(*) FROM todo_meta WHERE id IN (?, ?)",
+        (bulk_del1, bulk_del2)).fetchone()[0]
+    con.close()
+    assert orphan == 0, f"批量删除残留孤儿 meta: {orphan}"
+    print("  ✅ 批量删除/固定/完成(混选跳过失效与文本,meta 无孤儿)")
+
+    # 清掉批量保留的,恢复原断言现场
+    core.call("delete_entries_bulk", {"ids": [bulk_keep]})
+
     # ---- 清空已完成 / 删除 ----
     core.call("todo_clear_done")
     ids = [i["id"] for i in core.call("todo_list", {"done": "all", "limit": 50, "offset": 0})["data"]["items"]]
