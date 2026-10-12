@@ -22,7 +22,8 @@ Item {
     ///  "all" | "text" | "image" | "file" | "todo" —— 内容类型(导航标签页 / 条目类型徽标),
     ///  其中 "pin" 同时兼作"固定"状态标识;
     ///  "chevron" | "pencil" | "trash"    —— 卡片右下角操作按钮(展开收起 / 编辑 / 删除),
-    ///  其中 "chevron" 只画一个方向,反向由使用处 rotation: 180 翻转。
+    ///  其中 "chevron" 只画一个方向,反向由使用处 rotation: 180 翻转;
+    ///  "filter"                          —— 筛选入口(漏斗),头部「筛选」按钮用。
     property string kind: ""
     /// 描边与填充色(由调用方按所在处的文字色注入)
     property color color: Theme.colors.textPrimary
@@ -370,6 +371,45 @@ Item {
             x: 6.6 * root.unit; y: 9.4 * root.unit
             rotation: -45
             transformOrigin: Item.Center
+            color: root.color
+        }
+    }
+
+    // ---- 筛选:漏斗(上宽下窄的梯形轮廓 + 短颈) ----
+    // 用"两条斜边 + 顶部横边 + 底部短颈"构成经典漏斗;不画内部斜纹
+    // (16px 视口下内部细节会糊成一团,且与"文本"的横线系撞脸)。
+    // ⚠️ 斜边用 rotation 摆角度,定位全用常量数值 —— 不要引用自身尺寸,
+    //    rotation 下自引用会触发绑定环挂死(与 chevron/pencil/todo 同规矩)。
+    Item {
+        anchors.fill: parent
+        visible: root.kind === "filter"
+
+        Rectangle {   // 顶部横边(漏斗口)
+            x: 1.8 * root.unit; y: 3.2 * root.unit
+            width: 12.4 * root.unit; height: root.stroke * root.unit
+            radius: height / 2
+            color: root.color
+        }
+        Rectangle {   // 左斜边(从左上收向中下)
+            width: 7.6 * root.unit; height: root.stroke * root.unit
+            radius: height / 2
+            x: 3.5 * root.unit; y: 6.2 * root.unit
+            rotation: 58
+            transformOrigin: Item.Center
+            color: root.color
+        }
+        Rectangle {   // 右斜边(镜像)
+            width: 7.6 * root.unit; height: root.stroke * root.unit
+            radius: height / 2
+            x: 4.9 * root.unit; y: 6.2 * root.unit
+            rotation: -58
+            transformOrigin: Item.Center
+            color: root.color
+        }
+        Rectangle {   // 短颈(漏斗下口)
+            x: 7.1 * root.unit; y: 9.4 * root.unit
+            width: 1.8 * root.unit; height: root.stroke * root.unit
+            radius: height / 2
             color: root.color
         }
     }

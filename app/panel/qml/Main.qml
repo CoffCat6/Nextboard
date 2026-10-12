@@ -77,6 +77,30 @@ Rectangle {
         Entries.refreshNow()
     }
 
+    /// 验收:打开筛选浮层(读回其内容与几何)。
+    function acceptanceOpenFilter() {
+        openFilterPopup()
+    }
+
+    /// 验收:按值切换来源筛选(等价点浮层里的来源项)。
+    function acceptanceToggleSource(value) {
+        toggleSourceFilter(value)
+    }
+
+    /// 验收:设「截图」来源筛选(有 capture 条目时)并打开浮层。
+    function acceptanceSetSource() {
+        openFilterPopup()
+        if (Entries.sourceStats.length > 0) toggleSourceFilter("capture")
+    }
+
+    /// 验收:清掉来源筛选。
+    function acceptanceClearSource() {
+        if (activeSource !== "") {
+            activeSource = ""
+            Entries.setSource("")
+        }
+    }
+
     /// 读回:是否处于编辑态(供断言"保存成功后卡片已关")。
     readonly property string acceptanceEditId: todoEditId
 
@@ -112,15 +136,21 @@ Rectangle {
             for (let i = 0; i < n; ++i) out.push(Entries.rowGroupKey(i))
             return out.join(",")
         })(),
-        // 筛选条状态:验证"哪些 chip 会出现"(来源条的把控逻辑较隐蔽:
-        // 默认来源不列、待办视图整体不显示,靠截图目视易漏)。
+        // 筛选状态自检:浮层里的可选项 + 分类行上的生效 chip。
+        // ⚠️ 来源/标签条已并入筛选浮层(方案 A),这里跟着改为读浮层的数据源
+        //    (filterSourceFlow.model / Entries.tagStats)—— 读已删除的
+        //    sourceBar 会让整个 acceptanceState 绑定失效(实测踩过)。
         sourceChips: (function() {
             const out = []
-            for (let i = 0; i < sourceBar.sourceModel.length; ++i)
-                out.push(sourceBar.sourceModel[i].value)
+            const model = filterSourceFlow.model
+            for (let i = 0; i < model.length; ++i) out.push(model[i].value)
             return out.join(",")
         })(),
-        sourceBarVisible: sourceBar.visible,
+        filterActive: root.filterActive,
+        filterCount: root.filterCount,
+        filterPopupOpen: root.filterPopupOpen,
+        activeSource: root.activeSource,
+        activeTag: root.activeTag,
         tagChips: (function() {
             const out = []
             for (let i = 0; i < Entries.tagStats.length; ++i)
@@ -153,6 +183,188 @@ Rectangle {
         Entries.setSource(root.activeSource)
     }
 
+    /// 筛选是否处于"生效"状态(任一维度被设置)。
+    readonly property bool filterActive: activeSource !== "" || activeTag !== ""
+    /// 生效的筛选维度个数(「筛选」按钮上的角标)。
+    /// ⚠️ 只数**维度**不数条件:目前来源与标签各只能选一个(模型侧就是单值),
+    ///    将来若支持多选,这里改成"条件总数"即可,按钮文案与角标口径不变。
+    readonly property int filterCount: (activeSource !== "" ? 1 : 0)
+                                      + (activeTag !== "" ? 1 : 0)
+
+    /// 清空全部筛选条件(浮层底部「清除筛选」与激活 chip 的 ✕ 共用)。
+    function clearFilters() {
+        if (activeSource !== "") {
+            activeSource = ""
+            Entries.setSource("")
+        }
+        if (activeTag !== "") {
+            activeTag = ""
+            Entries.setTag("")
+        }
+    }
+
+    /// 筛选浮层的开关。Esc / 点外部由屏障与 dismissListOverlays 收口。
+    property bool filterPopupOpen: false
+    function openFilterPopup() {
+        filterPopupOpen = true
+    }
+    function closeFilterPopup() {
+        filterPopupOpen = false
+    }
+
+    /// 生效筛选的展示文案(用于分类行右侧的活动 chip):
+    /// 让用户一眼看出"列表明明少了东西,是因为这两个条件"。
+    readonly property string activeSourceLabel:
+        activeSource === "capture" ? "截图"
+      : activeSource === "translate" ? "翻译"
+      : activeSource === "ocr" ? "识别"
+      : activeSource
+    readonly property string activeSourceIcon:
+        activeSource === "capture" ? "image"
+      : activeSource === "translate" ? "translate"
+      : activeSource === "ocr" ? "text" : ""
+
+    // ---- 筛选相关内联组件(仅本文件用;与 TodoTimeField 同一手法) ----
+
+    /// 生效筛选的「可移除 chip」:显示在分类行右侧,点击 ✕ 解除该条件。
+    /// 与 FilterOption 的区别:本组件是"已生效"的呈现(带 ✕),不承担选择。
+    component FilterChip: Rectangle {
+        id: chip
+        property string label: ""
+        property string iconKind: ""
+        /// 标签类用彩色点(与卡片标签同色);来源类用图标,不需要点。
+        property color dotColor: "transparent"
+        signal removeRequested()
+
+        height: 22
+        width: chipRow.implicitWidth + 16
+        radius: Theme.metrics.radiusBadge
+        // 生效态用 accentSoft 底 + accent 边框:与分类行里选中的导航项同一语言,
+        // 表达"这是一个正在起作用的条件",而不是普通按钮。
+        color: Theme.colors.accentSoft
+        border.width: Theme.metrics.borderWidth
+        border.color: Theme.colors.accent
+
+        Row {
+            id: chipRow
+            anchors.centerIn: parent
+            spacing: 4
+            HeaderIcon {
+                anchors.verticalCenter: parent.verticalCenter
+                visible: chip.iconKind !== ""
+                kind: chip.iconKind
+                color: Theme.colors.accent
+                size: Theme.metrics.fontMicro
+            }
+            Rectangle {
+                anchors.verticalCenter: parent.verticalCenter
+                visible: chip.dotColor !== "transparent"
+                width: 6; height: 6; radius: 3
+                color: chip.dotColor
+            }
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: chip.label
+                font.pixelSize: Theme.metrics.fontCaption
+                color: Theme.colors.textPrimary
+            }
+            // ✕ 解除:声明在最后 → 命中优先级最高(同父级重叠后声明者优先),
+            // 不会与 chip 的悬停/其它热区互相吞点击。
+            Item {
+                anchors.verticalCenter: parent.verticalCenter
+                width: 14; height: 14
+                HeaderIcon {
+                    anchors.centerIn: parent
+                    kind: "chevron"
+                    color: chipRemoveMa.containsMouse ? Theme.colors.error
+                                                     : Theme.colors.textSecondary
+                    size: 10
+                    rotation: 45   // chevron 转 45° = ✕(省一个图标)
+                }
+                MouseArea {
+                    id: chipRemoveMa
+                    anchors.fill: parent
+                    anchors.margins: -3
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: chip.removeRequested()
+                }
+            }
+        }
+    }
+
+    /// 筛选浮层里的一个可选项(来源/标签共用)。
+    /// 与 FilterChip 同一视觉语言,但表达"可选中"而非"已生效":
+    /// 选中态由 accent 边框 + 实心色点承担(与旧筛选条同一套判定,不改观感)。
+    component FilterOption: Rectangle {
+        id: option
+        property string label: ""
+        property string iconKind: ""
+        property int count: 0
+        property bool selected: false
+        property color dotColor: "transparent"
+        signal clicked()
+        signal rightClicked()
+
+        height: 22
+        width: optionRow.implicitWidth + 16
+        radius: Theme.metrics.radiusBadge
+        color: optionMa.containsMouse ? Theme.colors.surfaceHover
+                                      : Theme.colors.surfaceSecondary
+        border.width: Theme.metrics.borderWidth
+        border.color: option.selected ? Theme.colors.accent : Theme.colors.border
+        Behavior on color { ColorAnimation { duration: Theme.animation.fast } }
+        Behavior on border.color { ColorAnimation { duration: Theme.animation.fast } }
+
+        Row {
+            id: optionRow
+            anchors.centerIn: parent
+            spacing: 5
+            HeaderIcon {
+                anchors.verticalCenter: parent.verticalCenter
+                visible: option.iconKind !== ""
+                kind: option.iconKind
+                color: option.selected ? Theme.colors.accent
+                                       : Theme.colors.textSecondary
+                size: Theme.metrics.fontMicro
+            }
+            // 色点:选中实心、未选中空心 —— "选中"在灰度屏/色弱下也读得出
+            // (只靠颜色深浅区分对色觉障碍不友好;与旧筛选条同一取舍)。
+            Rectangle {
+                anchors.verticalCenter: parent.verticalCenter
+                visible: option.dotColor !== "transparent"
+                width: 6; height: 6; radius: 3
+                color: option.selected ? option.dotColor : "transparent"
+                border.width: option.selected ? 0 : 1
+                border.color: option.dotColor
+            }
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                // `·` 分隔名与计数:直接拼空格时形如 "1 1" 会糊成一片,
+                // 分不清哪个是名字哪个是数量(实测反馈)。
+                text: option.count > 0 ? option.label + " · " + option.count : option.label
+                font.pixelSize: Theme.metrics.fontCaption
+                // 标签选中态用标签自己的色;未选中中性灰 ——
+                // 全部着色会盖住分类行的层级(§47 配色比例)。
+                color: option.selected
+                       ? (option.dotColor !== "transparent" ? option.dotColor
+                                                             : Theme.colors.accent)
+                       : Theme.colors.textSecondary
+            }
+        }
+        MouseArea {
+            id: optionMa
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            acceptedButtons: Qt.LeftButton | Qt.RightButton
+            onClicked: function(mouse) {
+                if (mouse.button === Qt.RightButton) option.rightClicked()
+                else option.clicked()
+            }
+        }
+    }
+
     /// 标签编辑:目标条目 id 与内联卡片可见性。
     property string tagEditId: ""
 
@@ -173,6 +385,8 @@ Rectangle {
         if (root.tagEditId !== "") root.tagEditId = ""
         // 标签重命名卡片同理(新增时容易漏,漏了它会残留在翻译页上)
         if (tagRenameCard.visible) tagRenameCard.visible = false
+        // 筛选浮层(Popup)渲染在 overlay 层,不清会浮在翻译页上(同抽屉的坑)
+        if (root.filterPopupOpen) root.closeFilterPopup()
     }
 
     /// C++ 侧(PanelWindow::showTranslate)调用:切到翻译页并预填原文。
@@ -504,8 +718,14 @@ Rectangle {
 
     Keys.onEscapePressed: {
         // 分层处理,一次 Esc 只消费一层(自上而下):
-        //   设置抽屉 → 翻译页自己的浮层 → 收起面板
+        //   筛选浮层 → 设置抽屉 → 翻译页自己的浮层 → 收起面板
         // 翻译页的 Esc 语义与 ✕ 一致:**直接收起**,不再顺带切回列表页。
+        // ⚠️ 筛选浮层排在最前:它是"贴在某按钮下的轻浮层",用户按 Esc 最可能
+        //    是想关它;若排在抽屉之后,抽屉没开时这一层就永远轮不到。
+        if (root.filterPopupOpen) {
+            root.closeFilterPopup()
+            return
+        }
         if (settingsDrawerLoader.item && settingsDrawerLoader.item.opened) {
             settingsDrawerLoader.item.close()
             return
@@ -736,286 +956,326 @@ Rectangle {
             }
         }
 
-        // ---- 分类标签(§15 选中态:AccentSoft 底 + Accent 字 + 左侧指示条) ----
-        Row {
+        // ---- 分类标签 + 筛选入口(§15 选中态:AccentSoft 底 + Accent 字 + 左侧指示条) ----
+        // 布局:分类项左对齐,「筛选」按钮与生效条件右对齐。
+        // ⚠️ 用 RowLayout 而非 Row:右对齐需要一个 fillWidth 的弹性空隙,
+        //    Row 没有 Layout 附件属性。
+        RowLayout {
             id: tabs
             Layout.fillWidth: true
             Layout.leftMargin: Theme.metrics.spacingMd
             Layout.rightMargin: Theme.metrics.spacingMd
             Layout.topMargin: Theme.metrics.spacingSm
-            Layout.bottomMargin: Theme.metrics.spacingXs + 2
+            Layout.bottomMargin: Theme.metrics.spacingSm
             spacing: Theme.metrics.spacingXs
 
             property string current: "all"
 
-            Repeater {
-                model: ListModel {
-                    ListElement { label: "全部"; viewId: "all" }
-                    ListElement { label: "文本"; viewId: "text" }
-                    ListElement { label: "图片"; viewId: "image" }
-                    ListElement { label: "文件"; viewId: "file" }
-                    ListElement { label: "待办"; viewId: "todo" }
-                    ListElement { label: "固定"; viewId: "pinned" }
-                }
-                delegate: Rectangle {
-                    id: tabDelegate
-                    required property string label
-                    required property string viewId
-                    // 计数来自 Core.counts(单一数据源 + countsChanged 通知)。
-                    // 待办页显示**未完成数**(todoOpen),归档不占导航计数(§6.3)。
-                    readonly property var count: viewId === "todo"
-                        ? Core.counts.todoOpen : Core.counts[viewId]
-                    readonly property bool selected: tabs.current === tabDelegate.viewId
-                    /// 图标种类与 viewId 同源;"pinned" 复用图钉图标(与头部「固定」按钮同符号)。
-                    readonly property string iconKind:
-                        tabDelegate.viewId === "pinned" ? "pin" : tabDelegate.viewId
-                    radius: Theme.metrics.radiusInput
-                    height: Theme.metrics.navItemHeight
-                    // 图标 + 间距 + 文字(与 ThemedButton 的 hasIcon 同口径)
-                    // + 左右内边距 + 左侧指示条占位。总内边距刻意与改造前一致(22px),
-                    // 免得 5 个标签页一起变宽把头部挤变形(Main.qml 的 PANEL_MIN_W 有下限)。
-                    width: tabInner.implicitWidth + 6 + 2 * Theme.metrics.spacingSm
-                    color: selected ? Theme.colors.accentSoft
-                         : tabMa.containsMouse ? Theme.colors.surfaceHover
-                         : "transparent"
-                    border.width: Theme.metrics.borderWidth
-                    border.color: selected ? Theme.colors.accent : "transparent"
-                    Behavior on color { ColorAnimation { duration: Theme.animation.fast } }
-
-                    // 左侧 Accent 指示条(§15:2~3px)
-                    Rectangle {
-                        visible: tabDelegate.selected
-                        anchors.left: parent.left
-                        anchors.leftMargin: 3
-                        anchors.verticalCenter: parent.verticalCenter
-                        width: 3
-                        height: parent.height - 12
-                        radius: 1
-                        color: Theme.colors.accent
-                    }
-
-                    Row {
-                        id: tabInner
-                        anchors.centerIn: parent
-                        spacing: 6
-                        HeaderIcon {
-                            anchors.verticalCenter: parent.verticalCenter
-                            kind: tabDelegate.iconKind
-                            // 图标跟随文字色:选中态 textPrimary,未选中 textSecondary
-                            color: tabDelegate.selected ? Theme.colors.textPrimary
-                                                      : Theme.colors.textSecondary
-                            size: 14
-                        }
-                        Text {
-                            id: tabLabel
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: tabDelegate.count !== undefined
-                                  ? tabDelegate.label + " " + tabDelegate.count
-                                  : tabDelegate.label
-                            color: tabDelegate.selected ? Theme.colors.textPrimary
-                                 : Theme.colors.textSecondary
-                            font.family: Theme.fontFamily
-                            font.pixelSize: Theme.metrics.fontSecondary
-                        }
-                    }
-                    MouseArea {
-                        id: tabMa
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            tabs.current = tabDelegate.viewId
-                            // 切分类时清掉来源筛选:来源与分类是**两个正交维度**,
-                            // 叠加起来(如"图片"页 + "截图"来源)容易得到空列表,
-                            // 让用户以为是数据丢了。标签筛选保留(细分维度)。
-                            if (root.activeSource !== "") {
-                                root.activeSource = ""
-                                Entries.setSource("")
-                            }
-                            Entries.setView(tabDelegate.viewId)
-                        }
-                    }
-                }
-            }
-        }
-
-        // ---- 来源筛选条(S5.1):只看截图/翻译结果/识别文字 ----
-        // 与标签筛选同一交互语言(再点一次取消),但**不是动态列表**:
-        // 来源是固定枚举,条数由数据决定,只在有对应条目时出现。
-        // 位置在标签条之上:来源是更粗的分类,标签是更细的维度。
-        Flickable {
-            id: sourceBar
-            Layout.fillWidth: true
-            Layout.leftMargin: Theme.metrics.spacingMd
-            Layout.rightMargin: Theme.metrics.spacingMd
-            implicitHeight: visible ? 24 : 0
-            // 至少有一个非 clipboard 来源时才显示(纯剪贴板用户不占这一行)
-            visible: sourceModel.length > 0
-            contentWidth: sourceRow.implicitWidth
-            contentHeight: height
-            clip: true
-            boundsBehavior: Flickable.StopAtBounds
-
-            /// 来源选项:值 + 中文文案 + 图标 + 计数,由 Entries.sourceStats 映射而来。
-            /// ⚠️ 计数来自 core 的 list_sources(SQL 精确 COUNT),
-            ///    不写死"5 种来源"——没有数据的来源不出现,不占筛选条。
-            ///    文案/图标与卡片来源徽标同词汇(EntryCard 的来源徽标)。
-            property var sourceModel: {
-                const out = []
-                // ⚠️ 待办视图不显示来源条:待办来源恒为 'todo',而"待办"本身
-                //    已是顶层导航标签页 —— 在这里再列一个「待办」chip 是冗余
-                //    (点它也不生效:模型对 todo 视图不下发 source 过滤)。
-                if (tabs.current === "todo") return out
-                const stats = Entries.sourceStats
-                for (let i = 0; i < stats.length; ++i) {
-                    const s = stats[i].source
-                    // 剪贴板是默认来源、待办是顶层标签,都不需要来源筛选项
-                    // (用户关心的是"我截的/我翻的")
-                    if (s === "clipboard" || s === "todo") continue
-                    out.push({
-                        value: s,
-                        label: s === "capture" ? "截图"
-                             : s === "translate" ? "翻译"
-                             : s === "ocr" ? "识别" : s,
-                        icon: s === "capture" ? "image"
-                            : s === "translate" ? "translate"
-                            : s === "ocr" ? "text" : "",
-                        count: stats[i].count
-                    })
-                }
-                return out
-            }
-
+            // 分类项本身仍用 Row 包住(Repeater 需要行容器),宽度自然收窄不占满,
+            // 后面的 Item{fillWidth} 负责把「筛选」推到右端。
             Row {
-                id: sourceRow
-                spacing: 6
+                id: tabRow
+                Layout.alignment: Qt.AlignVCenter
+                spacing: Theme.metrics.spacingXs
+
                 Repeater {
-                    model: sourceBar.sourceModel
+                    model: ListModel {
+                        ListElement { label: "全部"; viewId: "all" }
+                        ListElement { label: "文本"; viewId: "text" }
+                        ListElement { label: "图片"; viewId: "image" }
+                        ListElement { label: "文件"; viewId: "file" }
+                        ListElement { label: "待办"; viewId: "todo" }
+                        ListElement { label: "固定"; viewId: "pinned" }
+                    }
                     delegate: Rectangle {
-                        id: sourceChip
-                        required property var modelData
-                        readonly property bool active: root.activeSource === modelData.value
-                        height: 22
-                        width: sourceChipText.implicitWidth + 20
-                        radius: Theme.metrics.radiusBadge
-                        color: sourceChipMa.containsMouse ? Theme.colors.surfaceHover
-                             : Theme.colors.surfaceSecondary
+                        id: tabDelegate
+                        required property string label
+                        required property string viewId
+                        // 计数来自 Core.counts(单一数据源 + countsChanged 通知)。
+                        // 待办页显示**未完成数**(todoOpen),归档不占导航计数(§6.3)。
+                        readonly property var count: viewId === "todo"
+                            ? Core.counts.todoOpen : Core.counts[viewId]
+                        readonly property bool selected: tabs.current === tabDelegate.viewId
+                        // ⚠️ 零计数分类**隐藏**("文件 0" 这类空标签页占位是纯噪音,
+                        //    用户点进去只会看到空列表)。"全部"恒显示(它是归位锚点,
+                        //    数量为 0 时也必须留着);当前选中项恒显示 —— 否则用户在
+                        //    "文本"页删光文本后,连"自己现在在哪"都看不到了。
+                        readonly property bool empty: tabDelegate.count === 0
+                        visible: !empty || tabDelegate.viewId === "all" || selected
+                        /// 图标种类与 viewId 同源;"pinned" 复用图钉图标(与头部「固定」按钮同符号)。
+                        readonly property string iconKind:
+                            tabDelegate.viewId === "pinned" ? "pin" : tabDelegate.viewId
+                        radius: Theme.metrics.radiusInput
+                        height: Theme.metrics.navItemHeight
+                        // 计数并入文字,用 `·` 分开(与筛选 chip 同一口径:
+                        // "全部 32" 里的 32 是数量,不是名字的一部分)。
+                        width: tabInner.implicitWidth + 6 + 2 * Theme.metrics.spacingSm
+                        color: selected ? Theme.colors.accentSoft
+                             : tabMa.containsMouse ? Theme.colors.surfaceHover
+                             : "transparent"
                         border.width: Theme.metrics.borderWidth
-                        border.color: sourceChip.active ? Theme.colors.accent
-                                                        : Theme.colors.border
+                        border.color: selected ? Theme.colors.accent : "transparent"
                         Behavior on color { ColorAnimation { duration: Theme.animation.fast } }
-                        Behavior on border.color { ColorAnimation { duration: Theme.animation.fast } }
+
+                        // 左侧 Accent 指示条(§15:2~3px)
+                        Rectangle {
+                            visible: tabDelegate.selected
+                            anchors.left: parent.left
+                            anchors.leftMargin: 3
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 3
+                            height: parent.height - 12
+                            radius: 1
+                            color: Theme.colors.accent
+                        }
+
                         Row {
-                            id: sourceChipText
+                            id: tabInner
                             anchors.centerIn: parent
-                            spacing: 5
-                            // 图标与卡片上的来源徽标同词汇(HeaderIcon 的 kind)
+                            spacing: 6
                             HeaderIcon {
                                 anchors.verticalCenter: parent.verticalCenter
-                                kind: sourceChip.modelData.icon
-                                color: sourceChip.active ? Theme.colors.accent
-                                                         : Theme.colors.textSecondary
-                                size: Theme.metrics.fontMicro
+                                kind: tabDelegate.iconKind
+                                // 图标跟随文字色:选中态 textPrimary,未选中 textSecondary
+                                color: tabDelegate.selected ? Theme.colors.textPrimary
+                                                          : Theme.colors.textSecondary
+                                size: 14
                             }
                             Text {
+                                id: tabLabel
                                 anchors.verticalCenter: parent.verticalCenter
-                                text: sourceChip.modelData.label + " " + sourceChip.modelData.count
-                                font.pixelSize: Theme.metrics.fontCaption
-                                color: sourceChip.active ? Theme.colors.accent
-                                                         : Theme.colors.textSecondary
+                                text: tabDelegate.count !== undefined
+                                      ? tabDelegate.label + " " + tabDelegate.count
+                                      : tabDelegate.label
+                                color: tabDelegate.selected ? Theme.colors.textPrimary
+                                     : Theme.colors.textSecondary
+                                font.family: Theme.fontFamily
+                                font.pixelSize: Theme.metrics.fontSecondary
                             }
                         }
                         MouseArea {
-                            id: sourceChipMa
+                            id: tabMa
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: root.toggleSourceFilter(sourceChip.modelData.value)
+                            onClicked: {
+                                tabs.current = tabDelegate.viewId
+                                // 切分类时清掉来源筛选:来源与分类是**两个正交维度**,
+                                // 叠加起来(如"图片"页 + "截图"来源)容易得到空列表,
+                                // 让用户以为是数据丢了。标签筛选保留(细分维度)。
+                                if (root.activeSource !== "") {
+                                    root.activeSource = ""
+                                    Entries.setSource("")
+                                }
+                                Entries.setView(tabDelegate.viewId)
+                            }
                         }
                     }
                 }
             }
+
+            // 弹性空隙:把下面的「筛选」按钮与激活条件推到行尾
+            Item { Layout.fillWidth: true }
+
+            // ---- 生效筛选:可移除 chip(仅在有筛选时出现) ----
+            // 目的不是"再放一个按钮",而是告诉用户"列表变少是因为这两个条件"。
+            // 点击 ✕ 即解除该维度 —— 比"回到浮层里找那个已选中的项"快得多。
+            FilterChip {
+                id: sourceActiveChip
+                Layout.alignment: Qt.AlignVCenter
+                visible: root.activeSource !== ""
+                label: root.activeSourceLabel
+                iconKind: root.activeSourceIcon
+                onRemoveRequested: {
+                    root.activeSource = ""
+                    Entries.setSource("")
+                }
+            }
+            FilterChip {
+                id: tagActiveChip
+                Layout.alignment: Qt.AlignVCenter
+                visible: root.activeTag !== ""
+                label: root.activeTag
+                // 标签用标签自己的色(与卡片/浮层里的同名标签同色)
+                dotColor: Theme.tagColor(root.activeTag)
+                onRemoveRequested: {
+                    root.activeTag = ""
+                    Entries.setTag("")
+                }
+            }
+
+            // ---- 筛选入口 ----
+            ThemedButton {
+                id: filterButton
+                objectName: "filterButton"
+                Layout.alignment: Qt.AlignVCenter
+                size: "sm"
+                // 有筛选时用 primary 强调,并显示维度数角标(如「筛选 2」)
+                variant: root.filterActive ? "primary" : "secondary"
+                iconName: "filter"
+                text: root.filterCount > 0
+                      ? "筛选 " + root.filterCount : "筛选"
+                onClicked: root.filterPopupOpen ? root.closeFilterPopup()
+                                                : root.openFilterPopup()
+            }
         }
 
-        // ---- 标签筛选条(S5.2):有标签时才出现;再点一次取消筛选 ----
-        Flickable {
-            id: tagBar
-            Layout.fillWidth: true
-            Layout.leftMargin: Theme.metrics.spacingMd
-            Layout.rightMargin: Theme.metrics.spacingMd
-            implicitHeight: visible ? 24 : 0
-            visible: Entries.tagStats.length > 0
-            contentWidth: tagRow.implicitWidth
-            contentHeight: height
-            clip: true
-            boundsBehavior: Flickable.StopAtBounds
+        // ---- 筛选浮层(S5.1/S5.2 合并入口) ----
+        // 方案 A:来源与标签收进一个浮层,默认**不占**任何垂直空间。
+        // 动机:三行筛选(分类/来源/标签)共约 90px,在 800x600 面板里占 15%
+        // (最小高 380 时占 24%),且三者语义不同却渲染成同一套胶囊 ——
+        // 分类是**导航**,来源/标签是**过滤**,平铺在一起没有主次。
+        // 现结构:分类行常驻(导航),过滤条件按需在浮层里设置,
+        // 生效后以可移除 chip 回到分类行右侧(见 tabs 里的 FilterChip)。
+        //
+        // ⚠️ 用 Popup 而非普通 Item + z:面板高度有限,浮层若内联展开会挤压列表;
+        //    Popup 渲染在 overlay 层,不参与主布局(与时间选择器同一取舍)。
+        Popup {
+            id: filterPopup
+            objectName: "filterPopup"
+            // 锚到「筛选」按钮下方,右边缘与按钮对齐(贴住行尾,不超出面板)
+            x: Math.max(Theme.metrics.spacingMd,
+                        filterButton.mapToItem(null, filterButton.width, 0).x
+                        - width)
+            y: filterButton.mapToItem(null, 0, filterButton.height).y + 6
+            width: Math.min(320, root.width - 2 * Theme.metrics.spacingMd)
+            padding: Theme.metrics.spacingMd
+            // 关闭策略:点外部/按 Esc 都关。与时间选择器不同,这里**没有**
+            // "关闭会吞掉后续点击"的顾虑 —— 浮层里只有筛选开关,点外部本来就
+            // 期望"关掉并继续之前的事"。
+            closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+            modal: false
+            visible: root.filterPopupOpen
+            onClosed: root.filterPopupOpen = false
 
-            Row {
-                id: tagRow
-                spacing: 6
-                Repeater {
-                    model: Entries.tagStats
-                    delegate: Rectangle {
-                        id: tagChip
-                        required property var modelData
-                        readonly property bool active: root.activeTag === modelData.tag
-                        /// 标签自己的派生色:**与卡片上的同名标签同色**(同一纯函数、
-                        /// 无状态,筛选条与条目两端不可能取到不同值)。
-                        readonly property color tagFg: Theme.tagColor(modelData.tag)
-                        height: 22
-                        width: tagChipText.implicitWidth + 16
-                        radius: Theme.metrics.radiusBadge
-                        // 活跃态:文字用标签自己的色,底色**保持中性**(surfaceSecondary,
-                        // 与非活跃同底),靠"同色边框 + 色点实心"表达选中。
-                        //
-                        // ⚠️ 为什么不用"标签色半透明叠底"(更直觉的做法):浅色调色板是按
-                        // "在 surfaceSecondary 上 ≥ 4.7:1"定出来的,余量只有 0.2 —— 压一层
-                        // 同色相叠底会立刻跌破 4.5:1(实测最差 4.02)。要两者兼得只能把浅色
-                        // 调色板整体压暗,那又会让标签在卡片上显得沉重。故活跃态改由
-                        // 边框/色点承担(实测边框与底的 ΔE ≥ 58,足够醒目)。
-                        color: tagChipMa.containsMouse ? Theme.colors.surfaceHover
-                             : Theme.colors.surfaceSecondary
-                        border.width: Theme.metrics.borderWidth
-                        border.color: tagChip.active ? tagChip.tagFg : Theme.colors.border
-                        Behavior on color { ColorAnimation { duration: Theme.animation.fast } }
-                        Behavior on border.color { ColorAnimation { duration: Theme.animation.fast } }
-                        Row {
-                            id: tagChipText
-                            anchors.centerIn: parent
-                            spacing: 4
-                            // 色点:标签色在筛选条上的"锚",不依赖文字颜色即可对号入座。
-                            // 活跃态实心、非活跃态空心 —— 这样"选中"在灰度屏/色弱下也读得出
-                            // (只靠颜色深浅区分对色觉障碍不友好)。
-                            Rectangle {
-                                anchors.verticalCenter: parent.verticalCenter
-                                width: 6; height: 6; radius: 3
-                                color: tagChip.active ? tagChip.tagFg : "transparent"
-                                border.width: tagChip.active ? 0 : 1
-                                border.color: tagChip.tagFg
-                            }
-                            Text {
-                                anchors.verticalCenter: parent.verticalCenter
-                                text: tagChip.modelData.tag + " " + tagChip.modelData.count
-                                font.pixelSize: Theme.metrics.fontCaption
-                                // 活跃态用标签色,非活跃态中性灰:
-                                // 全部着色会盖住分类标签页的层级(§47 配色比例)
-                                color: tagChip.active ? tagChip.tagFg : Theme.colors.textSecondary
-                            }
+            background: Rectangle {
+                radius: Theme.metrics.radiusCard
+                color: Theme.colors.surface
+                border.width: Theme.metrics.borderWidth
+                border.color: Theme.colors.borderStrong
+            }
+
+            contentItem: ColumnLayout {
+                spacing: Theme.metrics.spacingSm
+
+                // ---- 标题行:标题 + 「清除筛选」 ----
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.metrics.spacingSm
+                    Text {
+                        text: "筛选"
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.metrics.fontSection
+                        font.weight: Font.DemiBold
+                        color: Theme.colors.textPrimary
+                    }
+                    Item { Layout.fillWidth: true }
+                    ThemedButton {
+                        objectName: "filterClear"
+                        variant: "ghost"
+                        size: "sm"
+                        text: "清除筛选"
+                        enabled: root.filterActive
+                        onClicked: root.clearFilters()
+                    }
+                }
+
+                // ---- 来源组(仅有可选来源时显示) ----
+                // 来源选项:值 + 中文文案 + 图标 + 计数。
+                // ⚠️ 计数来自 core 的 list_sources(SQL 精确 COUNT),不写死
+                //    "5 种来源" —— 没有数据的来源不出现,不占位置;
+                //    文案/图标与卡片来源徽标同词汇(EntryCard 的来源徽标)。
+                Text {
+                    Layout.fillWidth: true
+                    visible: filterSourceFlow.count > 0
+                    text: "来源"
+                    font.pixelSize: Theme.metrics.fontCaption
+                    color: Theme.colors.textSecondary
+                }
+                Flow {
+                    id: filterSourceFlow
+                    Layout.fillWidth: true
+                    spacing: Theme.metrics.spacingXs
+                    // ⚠️ 待办视图不列来源:待办来源恒为 'todo',而"待办"本身已是
+                    //    顶层导航标签页 —— 再列一个「待办」是冗余且点不生效
+                    //    (模型对 todo 视图不下发 source 过滤)。
+                    readonly property var model: {
+                        const out = []
+                        if (tabs.current === "todo") return out
+                        const stats = Entries.sourceStats
+                        for (let i = 0; i < stats.length; ++i) {
+                            const s = stats[i].source
+                            // 剪贴板是默认来源、待办是顶层标签,都不需要筛选项;
+                            // 零计数来源也跳过(点了会得到空列表,属纯噪音)。
+                            if (s === "clipboard" || s === "todo"
+                                || stats[i].count <= 0) continue
+                            out.push({
+                                value: s,
+                                label: s === "capture" ? "截图"
+                                     : s === "translate" ? "翻译"
+                                     : s === "ocr" ? "识别" : s,
+                                icon: s === "capture" ? "image"
+                                    : s === "translate" ? "translate"
+                                    : s === "ocr" ? "text" : "",
+                                count: stats[i].count
+                            })
                         }
-                        MouseArea {
-                            id: tagChipMa
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            acceptedButtons: Qt.LeftButton | Qt.RightButton
-                            onClicked: function(mouse) {
-                                // 左键 = 筛选/取消;右键 = 重命名该标签(管理入口)
-                                // 放在筛选项上:标签的"全集"就在这条筛选条上,
-                                // 不必先进某条目的标签编辑器。
-                                if (mouse.button === Qt.RightButton)
-                                    root.openTagRename(tagChip.modelData.tag)
-                                else {
-                                    root.activeTag = tagChip.active ? "" : tagChip.modelData.tag
+                        return out
+                    }
+                    Repeater {
+                        model: filterSourceFlow.model
+                        delegate: FilterOption {
+                            required property var modelData
+                            label: modelData.label
+                            iconKind: modelData.icon
+                            count: modelData.count
+                            selected: root.activeSource === modelData.value
+                            onClicked: root.toggleSourceFilter(modelData.value)
+                        }
+                    }
+                }
+
+                // ---- 标签组(仅有标签时显示) ----
+                Text {
+                    Layout.fillWidth: true
+                    visible: Entries.tagStats.length > 0
+                    text: "标签"
+                    font.pixelSize: Theme.metrics.fontCaption
+                    color: Theme.colors.textSecondary
+                }
+                // ⚠️ 标签数量可能很多,浮层里给**限高 + 滚动**:
+                //    直接铺开会把浮层撑得比屏幕还高(标签条此前靠横向滚动回避,
+                //    浮层里改用纵向滚动,更符合"分组列表"的形态)。
+                Flickable {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: Math.min(filterTagFlow.implicitHeight, 140)
+                    visible: Entries.tagStats.length > 0
+                    contentWidth: width
+                    contentHeight: filterTagFlow.implicitHeight
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                    Flow {
+                        id: filterTagFlow
+                        width: parent.width
+                        spacing: Theme.metrics.spacingXs
+                        Repeater {
+                            model: Entries.tagStats
+                            delegate: FilterOption {
+                                required property var modelData
+                                label: modelData.tag
+                                count: modelData.count
+                                // 标签用它自己的派生色(与卡片上的同名标签同色,
+                                // 同一纯函数无状态,两端不可能取到不同值)
+                                dotColor: Theme.tagColor(modelData.tag)
+                                selected: root.activeTag === modelData.tag
+                                // 右键 = 重命名(与旧筛选条同一交互:标签的"全集"
+                                // 就在这里,不必先进某条目的标签编辑器)
+                                onRightClicked: root.openTagRename(modelData.tag)
+                                onClicked: {
+                                    root.activeTag = (root.activeTag === modelData.tag)
+                                                     ? "" : modelData.tag
                                     Entries.setTag(root.activeTag)
                                 }
                             }
@@ -1024,6 +1284,7 @@ Rectangle {
                 }
             }
         }
+
 
         // ---- 列表(§19 新条目淡入,§43 ListView 回收) ----
         ListView {

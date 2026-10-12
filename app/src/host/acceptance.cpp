@@ -128,24 +128,52 @@ void runTodoAcceptanceFlow(PanelWindow& panel) {
 void reportTodoGroups(PanelWindow& panel) {
     // 只读自检:切待办视图 → 读回各行分组键。配合"脚本先播种各分组待办"使用,
     // 断言组标题的分界点(键序变化处即标题出现处)。
-    // 之后切回「全部」视图再读一次筛选条 —— 来源条在两视图的显示规则不同,
-    // 一次跑完两个视图的状态才能证明"待办视图不再多出待办 chip"。
+    // 之后切回「全部」视图,顺带验证筛选浮层的数据源(方案 A:来源/标签已并入
+    // 浮层,旧的 sourceBar 不再存在)。
     QTimer::singleShot(3000, &panel, [&panel] {
         panel.invokeAcceptance("acceptanceShowTodoGroups");
         QTimer::singleShot(800, &panel, [&panel] {
             const QVariantMap st = panel.rootProperty("acceptanceState").toMap();
             qInfo() << "GROUPS viewId:" << st.value("viewId").toString()
                     << "keys:" << st.value("rowGroups").toString()
-                    << "| sourceBar:" << st.value("sourceBarVisible").toBool()
+                    << "| filterActive:" << st.value("filterActive").toBool()
                     << "sourceChips:" << st.value("sourceChips").toString();
             panel.invokeAcceptance("acceptanceShowAll");
             QTimer::singleShot(800, &panel, [&panel] {
                 const QVariantMap st2 = panel.rootProperty("acceptanceState").toMap();
                 qInfo() << "GROUPS viewId:" << st2.value("viewId").toString()
-                        << "| sourceBar:" << st2.value("sourceBarVisible").toBool()
-                        << "sourceChips:" << st2.value("sourceChips").toString()
-                        << "| tagChips:" << st2.value("tagChips").toString();
-                QApplication::quit();
+                        << "| sourceChips:" << st2.value("sourceChips").toString()
+                        << "| tagChips:" << st2.value("tagChips").toString()
+                        << "| filterActive:" << st2.value("filterActive").toBool();
+                // 打开筛选浮层 → 读回状态(验证浮层可用且角标口径正确)
+                panel.invokeAcceptance("acceptanceOpenFilter");
+                QTimer::singleShot(400, &panel, [&panel] {
+                    const QVariantMap st3 = panel.rootProperty("acceptanceState").toMap();
+                    qInfo() << "FILTER popupOpen:" << st3.value("filterPopupOpen").toBool()
+                            << "active:" << st3.value("filterActive").toBool()
+                            << "count:" << st3.value("filterCount").toInt();
+                    // 设一个来源筛选 → 角标应变 1、列表应收窄、popup 仍开着(浮层里选完
+                    // 就关要再开一次,太啰嗦 —— 选完不关,由用户看效果后自行关闭)。
+                    panel.invokeAcceptance("acceptanceSetSource");
+                    QTimer::singleShot(600, &panel, [&panel] {
+                        const QVariantMap st4 = panel.rootProperty("acceptanceState").toMap();
+                        const QVariantMap resp = CoreFacade::instance().call(
+                            "list_entries", QVariantMap{{"source", "capture"},
+                                                        {"limit", 50}, {"offset", 0}});
+                        qInfo() << "FILTER afterSet active:" << st4.value("filterActive").toBool()
+                                << "count:" << st4.value("filterCount").toInt()
+                                << "activeSource:" << st4.value("activeSource").toString()
+                                << "| listTotal:" << resp.value("data").toMap().value("total").toInt();
+                        // 清掉筛选收尾,并读回确认回到未筛选态
+                        panel.invokeAcceptance("acceptanceClearSource");
+                        QTimer::singleShot(500, &panel, [&panel] {
+                            const QVariantMap st5 = panel.rootProperty("acceptanceState").toMap();
+                            qInfo() << "FILTER afterClear active:" << st5.value("filterActive").toBool()
+                                    << "count:" << st5.value("filterCount").toInt();
+                            QApplication::quit();
+                        });
+                    });
+                });
             });
         });
     });
