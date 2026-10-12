@@ -1077,33 +1077,6 @@ Rectangle {
             // 弹性空隙:把下面的「筛选」按钮与激活条件推到行尾
             Item { Layout.fillWidth: true }
 
-            // ---- 生效筛选:可移除 chip(仅在有筛选时出现) ----
-            // 目的不是"再放一个按钮",而是告诉用户"列表变少是因为这两个条件"。
-            // 点击 ✕ 即解除该维度 —— 比"回到浮层里找那个已选中的项"快得多。
-            FilterChip {
-                id: sourceActiveChip
-                Layout.alignment: Qt.AlignVCenter
-                visible: root.activeSource !== ""
-                label: root.activeSourceLabel
-                iconKind: root.activeSourceIcon
-                onRemoveRequested: {
-                    root.activeSource = ""
-                    Entries.setSource("")
-                }
-            }
-            FilterChip {
-                id: tagActiveChip
-                Layout.alignment: Qt.AlignVCenter
-                visible: root.activeTag !== ""
-                label: root.activeTag
-                // 标签用标签自己的色(与卡片/浮层里的同名标签同色)
-                dotColor: Theme.tagColor(root.activeTag)
-                onRemoveRequested: {
-                    root.activeTag = ""
-                    Entries.setTag("")
-                }
-            }
-
             // ---- 筛选入口 ----
             ThemedButton {
                 id: filterButton
@@ -1129,6 +1102,55 @@ Rectangle {
                 }
             }
         }
+        // ---- 生效筛选行(仅在有筛选时出现;可换行,不再挤分类行) ----
+        // ⚠️ 为什么从分类行里搬出来:RowLayout 空间不足时会**按比例压缩**各子项,
+        //    chip 多时把分类项与按钮挤变形、文字截断(实测:两个 chip + 5 个分类
+        //    + 筛选按钮在 800px 下已放不下)。独立行 + Flow 可换行,宽度天然够。
+        // 目的不是"再放一行按钮",而是告诉用户"列表变少是因为这些条件";
+        // 点击 ✕ 即解除该维度 —— 比"回到浮层里找那个已选中的项"快得多。
+        // 仅在有筛选时出现:默认零筛选时本行整体不占高度(方案 A 的省空间承诺)。
+        Flow {
+            id: activeFilterBar
+            Layout.fillWidth: true
+            Layout.leftMargin: Theme.metrics.spacingMd
+            Layout.rightMargin: Theme.metrics.spacingMd
+            Layout.bottomMargin: visible ? Theme.metrics.spacingSm : 0
+            spacing: Theme.metrics.spacingXs
+            visible: root.filterActive
+
+            FilterChip {
+                visible: root.activeSource !== ""
+                label: root.activeSourceLabel
+                iconKind: root.activeSourceIcon
+                onRemoveRequested: {
+                    root.activeSource = ""
+                    Entries.setSource("")
+                }
+            }
+            FilterChip {
+                visible: root.activeTag !== ""
+                label: root.activeTag
+                // 标签用标签自己的色(与卡片/浮层里的同名标签同色)
+                dotColor: Theme.tagColor(root.activeTag)
+                onRemoveRequested: {
+                    root.activeTag = ""
+                    Entries.setTag("")
+                }
+            }
+            // chip 多时兜底:一键全清,不用逐个点 ✕
+            ThemedButton {
+                // Flow 是 positioner:子项 anchors 会被忽略;垂直对齐用 y 微调
+                // (chip 高 22、sm 按钮 28,y=(28-22)/2 让按钮与 chip 齐平)。
+                objectName: "activeClearFilters"
+                variant: "ghost"
+                size: "sm"
+                text: "清除全部"
+                y: (height - 22) / 2
+                onClicked: root.clearFilters()
+            }
+        }
+
+
 
         // ---- 筛选浮层(S5.1/S5.2 合并入口) ----
         // 方案 A:来源与标签收进一个浮层,默认**不占**任何垂直空间。
@@ -1136,7 +1158,7 @@ Rectangle {
         // (最小高 380 时占 24%),且三者语义不同却渲染成同一套胶囊 ——
         // 分类是**导航**,来源/标签是**过滤**,平铺在一起没有主次。
         // 现结构:分类行常驻(导航),过滤条件按需在浮层里设置,
-        // 生效后以可移除 chip 回到分类行右侧(见 tabs 里的 FilterChip)。
+        // 生效后以可移除 chip 显示在其下方的独立行(activeFilterBar,可换行)。
         //
         // ⚠️ 用 Popup 而非普通 Item + z:面板高度有限,浮层若内联展开会挤压列表;
         //    Popup 渲染在 overlay 层,不参与主布局(与时间选择器同一取舍)。
@@ -1515,6 +1537,10 @@ Rectangle {
                     text: {
                         if (Entries.errorText !== "") return "加载失败"
                         if (searchInput.text !== "") return "没有匹配的历史记录"
+                        // ⚠️ 有筛选条件时列表为空 ≠ 剪贴板是空的 —— 数据就在那里,
+                        //    只是被条件筛掉了。沿用"剪贴板是空的"会误导用户以为
+                        //    数据丢了(实测:来源+标签叠加后命中的空状态)。
+                        if (root.filterActive) return "没有匹配的条目"
                         if (tabs.current === "pinned") return "暂无固定条目"
                         if (tabs.current === "todo") return "还没有待办"
                         return "剪贴板是空的"
@@ -1529,16 +1555,32 @@ Rectangle {
                     text: {
                         if (Entries.errorText !== "") return Entries.errorText
                         if (searchInput.text !== "") return "换个关键词试试,或清除搜索条件"
+                        // 筛选无结果的副文案:给出最快的出口(一键清除),并隐藏
+                        // "复制任意内容"引导 —— 那句在筛选态下是错误指引。
+                        if (root.filterActive) return "当前筛选条件下没有条目"
                         if (tabs.current === "pinned") return "右键条目选择「固定」即可常驻这里"
                         if (tabs.current === "todo") return "点右上角「待办」按钮,新建一条"
                         return "复制任意内容,它会自动出现在这里"
                     }
                 }
+                // 筛选无结果的快捷出口:一键清除全部条件(搜索态没有等价动作,
+                // 故与快捷键提示同规则地只在对应态显示)。
+                ThemedButton {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    objectName: "emptyClearFilters"
+                    variant: "secondary"
+                    size: "sm"
+                    visible: root.filterActive && Entries.errorText === ""
+                             && searchInput.text === ""
+                    text: "清除筛选"
+                    onClicked: root.clearFilters()
+                }
                 Row {
                     anchors.horizontalCenter: parent.horizontalCenter
                     spacing: Theme.metrics.spacingXs
+                    // 筛选态下这一行换成「清除筛选」按钮,不重复占位
                     visible: Entries.errorText === "" && searchInput.text === ""
-                             && tabs.current !== "todo"
+                             && tabs.current !== "todo" && !root.filterActive
                     KeyCap { label: "Ctrl" }
                     KeyCap { label: "Shift" }
                     KeyCap { label: "V" }
