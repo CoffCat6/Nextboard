@@ -626,7 +626,9 @@ Item {
                                 anchors.right: parent.right
                                 anchors.top: parent.top
                                 anchors.leftMargin: Theme.metrics.spacingSm
-                                anchors.rightMargin: Theme.metrics.spacingSm
+                                // 右侧让出操作按钮宽度,否则长文本会压到按钮下面
+                                // (省略号省略的是被遮住的部分,看起来像"文字被按钮切掉了")
+                                anchors.rightMargin: 150
                                 anchors.topMargin: Theme.metrics.spacingSm
                                 spacing: 2
 
@@ -657,12 +659,38 @@ Item {
                                 }
                             }
 
+                            // ⚠️ 声明顺序即命中优先级(QML 同父级重叠项**后声明者优先**):
+                            //    这个铺满卡片的"回填"热区必须排在操作按钮**之前**,
+                            //    否则它会把右侧两个按钮整个盖住、按钮点不着
+                            //    (EntryCard 的 ✕ 被打开热区盖住是同一个坑)。
                             MouseArea {
                                 id: cardMouse
                                 anchors.fill: parent
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: root.applyHistoryItem(modelData)
+                            }
+
+                            // 每条历史的"存为条目"入口(S5.1):翻译产物可直接进素材库,
+                            // 参与搜索/固定/贴图 —— 而不必先回填到输入框再点上方按钮。
+                            // 声明在 cardMouse 之后 → 命中优先级更高,不会误触发"回填"。
+                            RowLayout {
+                                anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.rightMargin: Theme.metrics.spacingSm
+                                spacing: Theme.metrics.spacingXs
+                                ThemedButton {
+                                    variant: "ghost"
+                                    size: "sm"
+                                    text: "存原文"
+                                    onClicked: root.saveAsEntry(modelData.sourceText, "原文")
+                                }
+                                ThemedButton {
+                                    variant: "ghost"
+                                    size: "sm"
+                                    text: "存译文"
+                                    onClicked: root.saveAsEntry(modelData.targetText, "译文")
+                                }
                             }
                         }
                     }

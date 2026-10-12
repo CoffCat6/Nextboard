@@ -650,7 +650,7 @@ mod tests {
         let _todo = create_at(&mut conn, "待办", Some(now - DAY), None, None, now);
         entry::insert(&conn, &plain_entry("plain", "普通文本", now)).expect("insert");
 
-        let (items, _) = entry::list(&conn, None, None, None, None, 50, 0).expect("all");
+        let (items, _) = entry::list(&conn, None, None, None, None, None, 50, 0).expect("all");
         let todo_row = items.iter().find(|e| e.kind == EntryKind::Todo).expect("todo row");
         let badge = todo_row.todo.expect("todo 条目应带徽标");
         assert!(badge.overdue, "逾期应在 list_entries 上就算出来");
@@ -908,12 +908,12 @@ mod tests {
         let now = now_ms();
         create_at(&mut conn, "记住要买牛奶", None, None, None, now);
         // FTS 路径(中文短语)
-        let (items, _) = entry::list(&conn, Some("买牛奶"), Some(EntryKind::Todo), None, None, 50, 0)
+        let (items, _) = entry::list(&conn, Some("买牛奶"), Some(EntryKind::Todo), None, None, None, 50, 0)
             .expect("fts");
         assert_eq!(items.len(), 1);
         // LIKE 回退路径(拆词后仍应命中)
         let (items, _) =
-            entry::list(&conn, Some("牛奶"), None, None, None, 50, 0).expect("like");
+            entry::list(&conn, Some("牛奶"), None, None, None, None, 50, 0).expect("like");
         assert_eq!(items.len(), 1);
     }
 

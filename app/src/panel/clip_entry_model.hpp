@@ -28,6 +28,9 @@ class ClipEntryModel : public QAbstractListModel {
     /// ⚠️ 属性名不能叫 `tags`:模型另有一个**角色**名为 tags(条目自身标签),
     /// 属性与角色同名会让委托里的 `tags` 取到统计值而不是该条目的标签。
     Q_PROPERTY(QVariantList tagStats READ tagStats NOTIFY tagStatsChanged)
+    /// 各来源及条目数([{source, count}]),驱动面板的来源筛选条(S5.1)。
+    /// 与 tagStats 同一口径:由数据决定有哪些来源,计数为 0 的不出现。
+    Q_PROPERTY(QVariantList sourceStats READ sourceStats NOTIFY sourceStatsChanged)
 public:
     enum Roles {
         IdRole = Qt::UserRole + 1,
@@ -63,6 +66,7 @@ public:
     bool hasMore() const { return m_rows.size() < m_total; }
     const QString& errorText() const { return m_errorText; }
     const QVariantList& tagStats() const { return m_tags; }
+    const QVariantList& sourceStats() const { return m_sources; }
 
     // ---- QML 接口 ----
     Q_INVOKABLE void setView(const QString& view);      // all|text|image|file|pinned|todo
@@ -78,8 +82,17 @@ public:
     Q_INVOKABLE void togglePin(const QString& id, bool pinned);
     /// 标签筛选(S5.2):空串 = 不筛选;与分类/搜索可叠加。
     Q_INVOKABLE void setTag(const QString& tag);
+    /// 来源筛选(S5.1):clipboard/capture/translate/ocr/todo;空串 = 不筛选。
+    /// 与卡片上的来源徽标同口径;待办视图忽略它(待办来源恒为 todo)。
+    Q_INVOKABLE void setSource(const QString& source);
     /// 覆盖设置条目的标签(S5.2);成功后重拉列表与标签统计。
     Q_INVOKABLE void saveTags(const QString& id, const QStringList& tags);
+    /// 重命名标签(S5.2):所有带该标签的条目就地替换,单事务完成。
+    /// to 为空 = 删除该标签;返回 { ok, changed };成功后重拉并刷新标签统计。
+    Q_INVOKABLE QVariantMap renameTag(const QString& from, const QString& to);
+    /// 批量给多条条目**追加**标签(S5.2):是"加"不是"覆盖"。
+    /// 返回 { ok, changed };成功后重拉列表与标签统计。
+    Q_INVOKABLE QVariantMap addTagsBulk(const QStringList& ids, const QStringList& tags);
     /// 待办完成态切换(docs/05-todo.md §5):成功后重拉列表并刷新计数。
     Q_INVOKABLE void todoSetDone(const QString& id, bool done);
     /// 只更新待办时刻(times 键:dueAt/remindAt/notifyAt,毫秒;null = 清空该时刻)。
@@ -96,6 +109,12 @@ public:
     /// ⚠️ 只查**已加载**的行(首屏 limit 50):托盘子菜单展示的条目取自同一
     ///    排序的前 N 条,必在首屏内;超出的场景由 QML 侧退化处理(不定位)。
     Q_INVOKABLE int indexOfId(const QString& id) const;
+    /// 第 row 行的**待办分组键**(QML 智能分组用):overdue/today/future/none/done;
+    /// 非待办行或越界返回空串。
+    /// ⚠️ 分组判定放 C++ 而不是 QML:标题是否显示 = "本行键 != 上一行键",
+    ///    QML 逐行算会与委托复用状态纠缠(复用会跨行串味),这里按行号现算,
+    ///    与 core §5 的排序口径同源(逾期>今日>未来>无期限,归档垫底)。
+    Q_INVOKABLE QString rowGroupKey(int row) const;
     /// 清空已完成的待办(归档清理)。
     Q_INVOKABLE void todoClearDone();
     /// 面板**隐藏**时调用:清空全部行 —— QML 侧委托随之销毁,图片纹理一并释放;
@@ -111,16 +130,19 @@ signals:
     void hasMoreChanged();
     void errorTextChanged();
     void tagStatsChanged();
+    void sourceStatsChanged();
     void toast(const QString& message);
 
 private:
     void reload(int limit);            // 全量重拉(视图/搜索/刷新)
     void applyPage(const QVariantMap& resp, bool append);
-    /// 组装一次列表请求(query/tag/kind/pinned 与待办 done 口径都在这里统一)。
+    /// 组装一次列表请求(query/tag/source/kind/pinned 与待办 done 口径都在这里统一)。
     /// ⚠️ reload 与 fetchMore 必须共用本函数:两处各写一份曾导致翻页与首屏口径漂移。
     QVariantMap buildListRequest(int limit, int offset) const;
     /// 重新拉取标签统计(与列表同源:applyPage 后刷新)。
     void refreshTags();
+    /// 重新拉取来源统计(S5.1 来源筛选条,与列表同源刷新)。
+    void refreshSources();
     /// 由 blob 路径拼出 file:// URL(thumb=true 时取同目录 .thumb<版本>.png 缩略图,
     /// 命名规则见 CoreBridge::thumbnailPathFor)。
     /// 静态且只依赖入参:列表重绘时**不得**再走同步 FFI 查询。
@@ -152,7 +174,9 @@ private:
     QString m_query;
     QString m_pendingQuery;
     QString m_tag;          // 标签筛选(空 = 不筛选)
+    QString m_source;       // 来源筛选(空 = 不筛选,S5.1)
     QVariantList m_tags;    // [{tag, count}]
+    QVariantList m_sources; // [{source, count}]
     QString m_errorText;
     int m_total = 0;
     int m_limit = 50;

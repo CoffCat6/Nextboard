@@ -77,9 +77,12 @@ QVariantMap ClipEntryModel::buildListRequest(int limit, int offset) const {
         if (!kind.isEmpty()) req.insert("kind", kind);
         if (m_view == QLatin1String("pinned")) req.insert("pinned", true);
     }
-    // 搜索/标签筛选与主列表同口径叠加(两个端点都认这两个键)
+    // 搜索/标签/来源筛选与主列表同口径叠加(两个端点都认这几个键;
+    // todo_list 不吃 source —— 待办来源恒为 'todo',无需筛选)
     if (!m_query.trimmed().isEmpty()) req.insert("query", m_query);
     if (!m_tag.isEmpty()) req.insert("tag", m_tag);
+    if (!m_source.isEmpty() && m_view != QLatin1String("todo"))
+        req.insert("source", m_source);
     return req;
 }
 
@@ -190,6 +193,12 @@ void ClipEntryModel::setTag(const QString& tag) {
     reload(m_limit);
 }
 
+void ClipEntryModel::setSource(const QString& source) {
+    if (m_source == source) return;
+    m_source = source;
+    reload(m_limit);
+}
+
 void ClipEntryModel::saveTags(const QString& id, const QStringList& tags) {
     const QVariantMap resp =
         CoreFacade::instance().call("set_entry_tags", {{"id", id}, {"tags", tags}});
@@ -209,6 +218,43 @@ void ClipEntryModel::refreshTags() {
     if (list == m_tags) return;   // 无变化不发信号,避免无谓的绑定重算
     m_tags = list;
     emit tagStatsChanged();
+}
+
+void ClipEntryModel::refreshSources() {
+    const QVariantMap resp = CoreFacade::instance().call("list_sources");
+    if (!resp.value("ok").toBool()) return;
+    const QVariantList list = resp.value("data").toList();
+    if (list == m_sources) return;   // 同上:无变化不发信号
+    m_sources = list;
+    emit sourceStatsChanged();
+}
+
+QVariantMap ClipEntryModel::renameTag(const QString& from, const QString& to) {
+    QVariantMap req{{"from", from}, {"to", to}};
+    const QVariantMap resp = CoreFacade::instance().call("rename_tag", req);
+    if (!resp.value("ok").toBool()) {
+        return {{"ok", false},
+                {"message", resp.value("error").toMap().value("message").toString()}};
+    }
+    // 当前筛选的正是被改名的标签 → 跟随到新名(否则列表会突然空掉)
+    if (!m_tag.isEmpty() && m_tag == from) {
+        m_tag = to.trimmed();
+        emit tagStatsChanged();   // 让 QML 的 activeTag 也能同步
+    }
+    reload(m_limit);
+    return {{"ok", true}, {"changed", resp.value("data").toMap().value("changed").toInt()}};
+}
+
+QVariantMap ClipEntryModel::addTagsBulk(const QStringList& ids, const QStringList& tags) {
+    if (ids.isEmpty() || tags.isEmpty()) return {{"ok", true}, {"changed", 0}};
+    const QVariantMap resp = CoreFacade::instance().call(
+        "add_tags_bulk", QVariantMap{{"ids", ids}, {"tags", tags}});
+    if (!resp.value("ok").toBool()) {
+        return {{"ok", false},
+                {"message", resp.value("error").toMap().value("message").toString()}};
+    }
+    reload(m_limit);
+    return {{"ok", true}, {"changed", resp.value("data").toMap().value("changed").toInt()}};
 }
 
 // ---- 待办(docs/05-todo.md §5/§6) ----
@@ -326,6 +372,20 @@ int ClipEntryModel::indexOfId(const QString& id) const {
         if (m_rows[i].id == id) return i;
     }
     return -1;
+}
+
+QString ClipEntryModel::rowGroupKey(int row) const {
+    if (row < 0 || row >= m_rows.size()) return QString();
+    const Row& r = m_rows[row];
+    if (r.kind != QLatin1String("todo")) return QString();
+    // ⚠️ 分组顺序必须与 core §5 的 ORDER BY 完全一致,否则标题会错位
+    //    (core: 归档垫底;未完成内 逾期 > 今日 > 未来 > 无期限)。
+    if (r.todoDone) return QStringLiteral("done");
+    if (r.todoOverdue) return QStringLiteral("overdue");
+    if (r.todoDueAt <= 0) return QStringLiteral("none");
+    const QDate due = QDateTime::fromMSecsSinceEpoch(r.todoDueAt).date();
+    return (due == QDate::currentDate()) ? QStringLiteral("today")
+                                         : QStringLiteral("future");
 }
 
 QString ClipEntryModel::imageUrlForBlob(const QString& blobPath, bool thumb) {
@@ -457,6 +517,7 @@ void ClipEntryModel::applyPage(const QVariantMap& resp, bool append) {
     // 分类徽标与列表同源:列表重拉后同步刷新计数(无变化则不发信号)
     CoreFacade::instance().refreshCounts();
     refreshTags();   // 标签筛选条同理
+    refreshSources();   // 来源筛选条(S5.1)同理
 }
 
 } // namespace nb

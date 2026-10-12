@@ -733,7 +733,7 @@ pub fn spawn_thumbnail_backfill(core: &'static Core) {
                 let Ok(db) = core.db.lock() else {
                     return;
                 };
-                match entry::list(&db, None, Some(EntryKind::Image), None, None, 10_000, 0) {
+                match entry::list(&db, None, Some(EntryKind::Image), None, None, None, 10_000, 0) {
                     Ok((items, _)) => items,
                     Err(err) => {
                         warn!("缩略图回填:读取图片条目失败: {err}");

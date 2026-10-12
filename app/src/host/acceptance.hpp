@@ -20,4 +20,9 @@ class PanelWindow;
 /// 结束后调用 QApplication::quit()。
 void runTodoAcceptanceFlow(PanelWindow& panel);
 
+/// 只做一件事:切到待办视图并把各行分组键打出来(STEP5 的自检独立入口)。
+/// 供"先用脚本播种各种分组的待办,再校验组标题分界点"使用 ——
+/// 不建数据、不改状态,纯读回,故可反复运行。
+void reportTodoGroups(PanelWindow& panel);
+
 } // namespace nb

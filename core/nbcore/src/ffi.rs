@@ -316,6 +316,8 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
             };
             let pinned = req.get("pinned").and_then(|v| v.as_bool());
             let tag = str_opt(req, "tag");   // S5.2 标签筛选
+            // source 筛选(S5.1):只看截图/翻译结果等;缺省与空串都视为不过滤
+            let source = str_opt(req, "source");
             let limit = req.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
             let offset = req.get("offset").and_then(|v| v.as_i64()).unwrap_or(0);
             let db = core.db.lock()?;
@@ -325,6 +327,7 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
                 kind,
                 pinned,
                 tag.as_deref(),
+                source.as_deref(),
                 limit,
                 offset,
             )?;
@@ -335,6 +338,12 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
             let core = crate::core::Core::get()?;
             let db = core.db.lock()?;
             Ok(serde_json::to_value(entry::list_tags(&db)?)?)
+        }
+        // 各来源及条目数(S5.1 来源筛选条):由数据决定有哪些来源
+        "list_sources" => {
+            let core = crate::core::Core::get()?;
+            let db = core.db.lock()?;
+            Ok(serde_json::to_value(entry::list_sources(&db)?)?)
         }
         // 覆盖设置条目标签(S5.2);tags 为字符串数组
         "set_entry_tags" => {
@@ -352,6 +361,41 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
             let db = core.db.lock()?;
             entry::set_tags(&db, &id, &tags)?;
             Ok(serde_json::Value::Null)
+        }
+        // 重命名标签(S5.2):所有带该标签的条目就地替换,单事务完成。
+        // to 为空 = 删除该标签;返回 { changed } 供宿主提示"已更新 N 条"。
+        "rename_tag" => {
+            let core = crate::core::Core::get()?;
+            let from = str_req(req, "from")?;
+            let to = str_opt(req, "to").unwrap_or_default();
+            let db = core.db.lock()?;
+            let changed = entry::rename_tag(&db, &from, &to)?;
+            Ok(serde_json::json!({ "changed": changed }))
+        }
+        // 批量追加标签(S5.2):ids 中不存在的条目静默跳过;返回 { changed }。
+        "add_tags_bulk" => {
+            let core = crate::core::Core::get()?;
+            let ids: Vec<String> = req
+                .get("ids")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .ok_or_else(|| AppError::InvalidInput("缺少 ids 数组".into()))?;
+            let tags: Vec<String> = req
+                .get("tags")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .ok_or_else(|| AppError::InvalidInput("缺少 tags 数组".into()))?;
+            let db = core.db.lock()?;
+            let changed = entry::add_tags_bulk(&db, &ids, &tags)?;
+            Ok(serde_json::json!({ "changed": changed }))
         }
         "entry_counts" => {
             let core = crate::core::Core::get()?;

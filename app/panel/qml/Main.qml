@@ -64,6 +64,11 @@ Rectangle {
         todoInput.text = acceptanceInputText
     }
 
+    /// 验收:切到待办视图并读回分组(§6.3 智能分组的分界点自检)。
+    function acceptanceShowTodoGroups() {
+        showTodos()
+    }
+
     /// 读回:是否处于编辑态(供断言"保存成功后卡片已关")。
     readonly property string acceptanceEditId: todoEditId
 
@@ -87,7 +92,18 @@ Rectangle {
         overlayH: Overlay.overlay ? Overlay.overlay.height : -1,
         dueFieldMs: todoDueField.ms,
         remindFieldMs: todoRemindField.ms,
-        errorText: todoError.text
+        errorText: todoError.text,
+        // 待办分组自检(§6.3):当前视图 + 前若干行的分组键,
+        // 用来验证"组标题是否落在正确分界点"。纯读回,不改状态。
+        // ⚠️ 属性值位置只接受**表达式**,块语句必须包成 IIFE(直接写
+        //    { const ...; for ...; return } 会被当成对象字面量而报语法错)。
+        viewId: tabs.current,
+        rowGroups: (function() {
+            const out = []
+            const n = Math.min(list.count, 8)
+            for (let i = 0; i < n; ++i) out.push(Entries.rowGroupKey(i))
+            return out.join(",")
+        })()
     })
 
     // ---- 右键菜单:全面板**唯一实例** ----
@@ -101,6 +117,18 @@ Rectangle {
 
     /// 标签筛选(S5.2):空串 = 不筛选。与分类标签/搜索叠加。
     property string activeTag: ""
+
+    /// 来源筛选(S5.1):空串 = 不筛选。只看截图/翻译结果/识别文字等。
+    /// 与卡片来源徽标同口径,可与分类/搜索/标签叠加。
+    property string activeSource: ""
+
+    /// 来源筛选条的可选项(值/文案/图标/计数),由 refreshSourceStats 填充。
+    /// 计数取自 Core.counts 的按来源统计(entry_counts 已有各分类计数,
+    /// 来源计数在 setSource 首次生效时按需拉取)。
+    function toggleSourceFilter(value) {
+        root.activeSource = (root.activeSource === value) ? "" : value
+        Entries.setSource(root.activeSource)
+    }
 
     /// 标签编辑:目标条目 id 与内联卡片可见性。
     property string tagEditId: ""
@@ -120,6 +148,8 @@ Rectangle {
             settingsDrawerLoader.item.close()
         if (root.menuTarget !== null) root.closeEntryMenu()
         if (root.tagEditId !== "") root.tagEditId = ""
+        // 标签重命名卡片同理(新增时容易漏,漏了它会残留在翻译页上)
+        if (tagRenameCard.visible) tagRenameCard.visible = false
     }
 
     /// C++ 侧(PanelWindow::showTranslate)调用:切到翻译页并预填原文。
@@ -148,6 +178,42 @@ Rectangle {
         }
         tagEditorCard.visible = false
         Entries.saveTags(tagEditId, tags)
+    }
+
+    // ---- 标签重命名(S5.2 标签管理) ----
+    /// 待重命名的原标签名(空 = 卡片未打开)。
+    property string tagRenameFrom: ""
+
+    /// 打开重命名卡片(右键标签筛选条的 chip)。
+    function openTagRename(tag) {
+        tagRenameFrom = tag
+        tagRenameInput.text = tag
+        tagRenameError.text = ""
+        tagRenameCard.visible = true
+        tagRenameInput.forceActiveFocus()
+        tagRenameInput.selectAll()
+    }
+
+    /// 提交重命名:空名 = 删除该标签(core 侧语义)。
+    /// 失败(如与原标签一字不差的空名)把原因显示在卡片里,不关卡片。
+    function commitTagRename() {
+        const to = tagRenameInput.text.trim()
+        if (to === tagRenameFrom) {
+            tagRenameCard.visible = false   // 没改:静默关闭
+            return
+        }
+        const resp = Entries.renameTag(tagRenameFrom, to)
+        if (resp.ok !== true) {
+            tagRenameError.text = resp.message ? resp.message : "重命名失败"
+            return
+        }
+        tagRenameCard.visible = false
+        // 当前筛选的就是被改名的标签 → 跟随到新名(否则列表空掉,见模型侧注释)
+        if (root.activeTag === tagRenameFrom) {
+            root.activeTag = to
+        }
+        Core.showToast(to === "" ? "标签已删除"
+                                 : "已重命名为「" + to + "」(" + resp.changed + " 条)")
     }
 
     // ---- 待办(docs/05-todo.md §6) ----
@@ -187,7 +253,7 @@ Rectangle {
 
     /// 待办到点后由 C++(PanelWindow::showCenteredOnTodos)直调:切到"待办"视图。
     /// 托盘「今日待办」子菜单点击某条 → C++ 传条目 id 调本函数,定位并高亮该条。
-    /// ⚠️ 必须先清搜索词/标签筛选:残留条件会把待办过滤掉,用户会看到空列表。
+    /// ⚠️ 必须先清搜索词/标签/来源筛选:残留条件会把待办过滤掉,用户会看到空列表。
     function showTodos(focusId) {
         if (searchInput.text !== "") {
             searchInput.clear()
@@ -196,6 +262,10 @@ Rectangle {
         if (root.activeTag !== "") {
             root.activeTag = ""
             Entries.setTag("")
+        }
+        if (root.activeSource !== "") {
+            root.activeSource = ""
+            Entries.setSource("")
         }
         tabs.current = "todo"
         Entries.setView("todo")
@@ -732,7 +802,109 @@ Rectangle {
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
                             tabs.current = tabDelegate.viewId
+                            // 切分类时清掉来源筛选:来源与分类是**两个正交维度**,
+                            // 叠加起来(如"图片"页 + "截图"来源)容易得到空列表,
+                            // 让用户以为是数据丢了。标签筛选保留(细分维度)。
+                            if (root.activeSource !== "") {
+                                root.activeSource = ""
+                                Entries.setSource("")
+                            }
                             Entries.setView(tabDelegate.viewId)
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- 来源筛选条(S5.1):只看截图/翻译结果/识别文字 ----
+        // 与标签筛选同一交互语言(再点一次取消),但**不是动态列表**:
+        // 来源是固定枚举,条数由数据决定,只在有对应条目时出现。
+        // 位置在标签条之上:来源是更粗的分类,标签是更细的维度。
+        Flickable {
+            id: sourceBar
+            Layout.fillWidth: true
+            Layout.leftMargin: Theme.metrics.spacingMd
+            Layout.rightMargin: Theme.metrics.spacingMd
+            implicitHeight: visible ? 24 : 0
+            // 至少有一个非 clipboard 来源时才显示(纯剪贴板用户不占这一行)
+            visible: sourceModel.length > 0
+            contentWidth: sourceRow.implicitWidth
+            contentHeight: height
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+
+            /// 来源选项:值 + 中文文案 + 图标 + 计数,由 Entries.sourceStats 映射而来。
+            /// ⚠️ 计数来自 core 的 list_sources(SQL 精确 COUNT),
+            ///    不写死"5 种来源"——没有数据的来源不出现,不占筛选条。
+            ///    文案/图标与卡片来源徽标同词汇(EntryCard 的来源徽标)。
+            property var sourceModel: {
+                const out = []
+                const stats = Entries.sourceStats
+                for (let i = 0; i < stats.length; ++i) {
+                    const s = stats[i].source
+                    // 剪贴板是默认来源,不需要筛选项(用户关心的是"我截的/我翻的")
+                    if (s === "clipboard") continue
+                    out.push({
+                        value: s,
+                        label: s === "capture" ? "截图"
+                             : s === "translate" ? "翻译"
+                             : s === "ocr" ? "识别"
+                             : s === "todo" ? "待办" : s,
+                        icon: s === "capture" ? "image"
+                            : s === "translate" ? "translate"
+                            : s === "ocr" ? "text"
+                            : s === "todo" ? "todo" : "",
+                        count: stats[i].count
+                    })
+                }
+                return out
+            }
+
+            Row {
+                id: sourceRow
+                spacing: 6
+                Repeater {
+                    model: sourceBar.sourceModel
+                    delegate: Rectangle {
+                        id: sourceChip
+                        required property var modelData
+                        readonly property bool active: root.activeSource === modelData.value
+                        height: 22
+                        width: sourceChipText.implicitWidth + 20
+                        radius: Theme.metrics.radiusBadge
+                        color: sourceChipMa.containsMouse ? Theme.colors.surfaceHover
+                             : Theme.colors.surfaceSecondary
+                        border.width: Theme.metrics.borderWidth
+                        border.color: sourceChip.active ? Theme.colors.accent
+                                                        : Theme.colors.border
+                        Behavior on color { ColorAnimation { duration: Theme.animation.fast } }
+                        Behavior on border.color { ColorAnimation { duration: Theme.animation.fast } }
+                        Row {
+                            id: sourceChipText
+                            anchors.centerIn: parent
+                            spacing: 5
+                            // 图标与卡片上的来源徽标同词汇(HeaderIcon 的 kind)
+                            HeaderIcon {
+                                anchors.verticalCenter: parent.verticalCenter
+                                kind: sourceChip.modelData.icon
+                                color: sourceChip.active ? Theme.colors.accent
+                                                         : Theme.colors.textSecondary
+                                size: Theme.metrics.fontMicro
+                            }
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: sourceChip.modelData.label + " " + sourceChip.modelData.count
+                                font.pixelSize: Theme.metrics.fontCaption
+                                color: sourceChip.active ? Theme.colors.accent
+                                                         : Theme.colors.textSecondary
+                            }
+                        }
+                        MouseArea {
+                            id: sourceChipMa
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.toggleSourceFilter(sourceChip.modelData.value)
                         }
                     }
                 }
@@ -809,9 +981,17 @@ Rectangle {
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                root.activeTag = tagChip.active ? "" : tagChip.modelData.tag
-                                Entries.setTag(root.activeTag)
+                            acceptedButtons: Qt.LeftButton | Qt.RightButton
+                            onClicked: function(mouse) {
+                                // 左键 = 筛选/取消;右键 = 重命名该标签(管理入口)
+                                // 放在筛选项上:标签的"全集"就在这条筛选条上,
+                                // 不必先进某条目的标签编辑器。
+                                if (mouse.button === Qt.RightButton)
+                                    root.openTagRename(tagChip.modelData.tag)
+                                else {
+                                    root.activeTag = tagChip.active ? "" : tagChip.modelData.tag
+                                    Entries.setTag(root.activeTag)
+                                }
                             }
                         }
                     }
@@ -860,25 +1040,100 @@ Rectangle {
                 }
             }
 
-            delegate: EntryCard {
+            // ---- 待办视图智能分组(docs/05-todo.md §6.3) ----
+            // 只在"待办"视图插组标题;其它视图保持原扁平列表。
+            // 分组边界由模型排序保证(core §5:逾期>今日>未来>无期限,归档垫底),
+            // 这里只在"当前行与上一行不同组"时插标题 —— 不额外算分组、不额外取数。
+            delegate: Item {
+                id: rowWrap
                 required property int index
+                // 角色透传:委托根不再是 EntryCard,角色注入改由本层显式转发。
+                // ⚠️ 逐个列出而不是只在 EntryCard 上写同名绑定 —— 委托根的
+                //    required property 才是 ListView 注入角色的落点。
+                required property string entryId
+                required property string kind
+                required property string text
+                required property string preview
+                required property string imageUrl
+                required property string timeText
+                required property string sizeText
+                required property bool pinned
+                required property string source
+                required property var tags
+                required property real todoDueAt
+                required property real todoRemindAt
+                required property bool todoDone
+                required property bool todoOverdue
+
                 width: list.width
-                // 「当前操作对象」高亮:只有被右键的那张卡片亮起(菜单为面板级单例)
-                // ⚠️ entryId 是 EntryCard 自身的 required property(模型按角色名注入),
-                //    **不要**在这里再声明一遍 —— 同名重复声明会让委托实例化失败,
-                //    表现是"列表计数正常但整页空白、空状态也不出现"(实测)。
-                menuOpen: root.menuTarget !== null && root.menuTarget.entryId === entryId
-                          // 托盘「今日待办」点击定位的条目:同一高亮形态,
-                          // 由 locateTodo 置位、定时器 1.8s 后自动熄灭
-                          || root.highlightTodoId === entryId
-                // 防御:菜单打开期间,任何卡片都吞掉点击(即使屏障因平台差异没拦住)
-                menuOpenElsewhere: root.menuTarget !== null
-                // 待办扩展角色(docs/05-todo.md §6.3);非 todo 行为默认值。
-                // ⚠️ required property 由 ListView 按角色名注入,**不要**在此写
-                //    `todoDueAt: todoDueAt` 之类的同名自绑定 —— 那是绑定环。
-                onContextMenuRequested: function(entry) { root.openEntryMenu(entry) }
-                onMenuDismissRequested: root.closeEntryMenu()
-                onTodoEditRequested: function(entry) { root.openTodoComposer(entry) }
+                implicitHeight: groupLabel.visible
+                                ? groupLabel.implicitHeight + 6 + card.implicitHeight
+                                : card.implicitHeight
+
+                /// 当前行所属分组键;仅待办视图有意义(其它视图返回空 = 不分组)。
+                /// ⚠️ 判定放 C++(Entries.rowGroupKey):按行号**现算**,
+                ///    且与 core §5 的 ORDER BY 同源;QML 侧若再算一遍,
+                ///    既与委托复用状态纠缠,两份口径也迟早漂移。
+                readonly property string groupKey: Entries.rowGroupKey(index)
+                /// 是否显示组标题:与上一行不同组即插一个。
+                readonly property bool needsHeader: {
+                    if (groupKey === "") return false
+                    if (index === 0) return true
+                    return Entries.rowGroupKey(index - 1) !== groupKey
+                }
+                readonly property string groupLabelText: {
+                    switch (groupKey) {
+                    case "overdue": return "已逾期"
+                    case "today": return "今天"
+                    case "future": return "以后"
+                    case "none": return "无期限"
+                    case "done": return "已完成"
+                    default: return ""
+                    }
+                }
+
+                Text {
+                    id: groupLabel
+                    visible: rowWrap.needsHeader
+                    anchors.top: parent.top
+                    anchors.left: parent.left
+                    anchors.leftMargin: 2
+                    text: rowWrap.groupLabelText
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.metrics.fontCaption
+                    font.weight: Font.DemiBold
+                    // 逾期组用 error 色,与卡片上的逾期红字同一语义
+                    color: rowWrap.groupKey === "overdue" ? Theme.colors.error
+                                                          : Theme.colors.textSecondary
+                }
+
+                EntryCard {
+                    id: card
+                    anchors.top: groupLabel.visible ? groupLabel.bottom : parent.top
+                    anchors.topMargin: groupLabel.visible ? 6 : 0
+                    width: rowWrap.width
+                    entryId: rowWrap.entryId
+                    kind: rowWrap.kind
+                    text: rowWrap.text
+                    preview: rowWrap.preview
+                    imageUrl: rowWrap.imageUrl
+                    timeText: rowWrap.timeText
+                    sizeText: rowWrap.sizeText
+                    pinned: rowWrap.pinned
+                    source: rowWrap.source
+                    tags: rowWrap.tags
+                    todoDueAt: rowWrap.todoDueAt
+                    todoRemindAt: rowWrap.todoRemindAt
+                    todoDone: rowWrap.todoDone
+                    todoOverdue: rowWrap.todoOverdue
+                    menuOpen: (root.menuTarget !== null
+                               && root.menuTarget.entryId === rowWrap.entryId)
+                              || root.highlightTodoId === rowWrap.entryId
+                    menuOpenElsewhere: root.menuTarget !== null
+                    onContextMenuRequested: function(entry) { root.openEntryMenu(entry) }
+                    onMenuDismissRequested: root.closeEntryMenu()
+                    onTodoEditRequested: function(entry) { root.openTodoComposer(entry) }
+                }
             }
         }
 
@@ -1273,6 +1528,105 @@ Rectangle {
                     size: "sm"
                     text: "保存"
                     onClicked: root.commitTagEditor()
+                }
+            }
+        }
+    }
+
+    // ---- 标签重命名卡片(S5.2 标签管理) ----
+    // 与标签编辑卡片同一"屏障 + 居中卡片"模式;入口是右键标签筛选条的 chip。
+    MouseArea {
+        id: tagRenameBarrier
+        anchors.fill: parent
+        z: 950
+        visible: tagRenameCard.visible
+        enabled: visible
+        acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+        onClicked: tagRenameCard.visible = false
+    }
+
+    Rectangle {
+        id: tagRenameCard
+        z: 960
+        visible: false
+        anchors.centerIn: parent
+        width: Math.min(320, root.width - 48)
+        height: tagRenameLayout.implicitHeight + 2 * Theme.metrics.spacingMd
+        radius: Theme.metrics.radiusCard
+        color: Theme.colors.surface
+        border.width: Theme.metrics.borderWidth
+        border.color: Theme.colors.borderStrong
+
+        ColumnLayout {
+            id: tagRenameLayout
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: Theme.metrics.spacingMd
+            spacing: Theme.metrics.spacingSm
+
+            Text {
+                Layout.fillWidth: true
+                text: "重命名标签「" + root.tagRenameFrom + "」"
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.metrics.fontSection
+                font.weight: Font.DemiBold
+                color: Theme.colors.textPrimary
+                elide: Text.ElideRight
+            }
+            Text {
+                Layout.fillWidth: true
+                // 说明影响面:这是**跨条目**操作,不是改当前这一条
+                text: "所有带此标签的条目会一起改名;留空保存 = 删除该标签"
+                wrapMode: Text.Wrap
+                font.pixelSize: Theme.metrics.fontCaption
+                color: Theme.colors.textSecondary
+            }
+            TextField {
+                id: tagRenameInput
+                Layout.fillWidth: true
+                placeholderText: "新标签名(留空 = 删除)"
+                placeholderTextColor: Theme.colors.textTertiary
+                color: Theme.colors.textPrimary
+                selectionColor: Theme.colors.accent
+                selectedTextColor: Theme.colors.accentText
+                font.pixelSize: Theme.metrics.fontSecondary
+                background: Rectangle {
+                    color: Theme.colors.surfaceSecondary
+                    radius: Theme.metrics.radiusInput
+                    border.width: Theme.metrics.borderWidth
+                    border.color: tagRenameInput.activeFocus ? Theme.colors.accent
+                                                             : Theme.colors.border
+                }
+                Keys.onReturnPressed: root.commitTagRename()
+                Keys.onEnterPressed: root.commitTagRename()
+                Keys.onEscapePressed: tagRenameCard.visible = false
+            }
+            Text {
+                id: tagRenameError
+                Layout.fillWidth: true
+                visible: text !== ""
+                text: ""
+                wrapMode: Text.Wrap
+                font.pixelSize: Theme.metrics.fontCaption
+                color: Theme.colors.error
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Theme.metrics.spacingSm
+                Item { Layout.fillWidth: true }
+                ThemedButton {
+                    variant: "secondary"
+                    size: "sm"
+                    text: "取消"
+                    onClicked: tagRenameCard.visible = false
+                }
+                ThemedButton {
+                    objectName: "tagRenameSave"
+                    variant: "primary"
+                    size: "sm"
+                    text: "保存"
+                    onClicked: root.commitTagRename()
                 }
             }
         }

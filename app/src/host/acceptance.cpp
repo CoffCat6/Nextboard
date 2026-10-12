@@ -104,9 +104,33 @@ void runTodoAcceptanceFlow(PanelWindow& panel) {
                                 << "remindAt:" << static_cast<qint64>(
                                        row.value("remindAt").toDouble());
                     }
-                    QApplication::quit();
+
+                    // ⑤ 待办视图智能分组自检(§6.3):切到待办视图读回各行分组键 ——
+                    //    组标题的显示边界 = "本行键 != 上一行键",键序本身正确即边界正确。
+                    //    (真实渲染无法在此断言,故只验证键序列;渲染由真机目视。)
+                    panel.invokeAcceptance("acceptanceShowTodoGroups");
+                    QTimer::singleShot(600, &panel, [&panel] {
+                        const QVariantMap st4 = panel.rootProperty("acceptanceState").toMap();
+                        qInfo() << "STEP5 viewId:" << st4.value("viewId").toString()
+                                << "rowGroups:" << st4.value("rowGroups").toString();
+                        QApplication::quit();
+                    });
                 });
             });
+        });
+    });
+}
+
+void reportTodoGroups(PanelWindow& panel) {
+    // 只读自检:切待办视图 → 读回各行分组键。配合"脚本先播种各分组待办"使用,
+    // 断言组标题的分界点(键序变化处即标题出现处)。
+    QTimer::singleShot(3000, &panel, [&panel] {
+        panel.invokeAcceptance("acceptanceShowTodoGroups");
+        QTimer::singleShot(800, &panel, [&panel] {
+            const QVariantMap st = panel.rootProperty("acceptanceState").toMap();
+            qInfo() << "GROUPS viewId:" << st.value("viewId").toString()
+                    << "keys:" << st.value("rowGroups").toString();
+            QApplication::quit();
         });
     });
 }
