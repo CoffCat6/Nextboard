@@ -76,6 +76,17 @@ public:
     /// 测试代理链路(网络,异步:线程池执行,完成发 proxyProbeFinished)。
     Q_INVOKABLE void probeProxy();
 
+    // ---- 数据备份与导出(慢 I/O:线程池执行,完成发 backupFinished/exportFinished) ----
+    /// 创建备份 zip:path 由 QFileDialog 提供,nbcore 内 checkpoint 后打包。
+    Q_INVOKABLE void backupCreate(const QString& path);
+    /// 导出全部条目为 Markdown 单文件(图片 base64 内嵌)。
+    Q_INVOKABLE void exportEntries(const QString& path);
+    /// 保存文件对话框(原生;caption/filter/defaultName)。返回选中路径,取消为空串。
+    /// QML 不引 QtQuick.Dialogs(windeployqt 不部署该模块,见 SettingsDrawer 内注释),
+    /// 故由 C++ 提供该入口。
+    Q_INVOKABLE QString saveFileDialog(const QString& caption, const QString& filter,
+                                       const QString& defaultName);
+
     /// 开机自启当前状态(注册表 Run 键)。
     Q_INVOKABLE bool autoStartEnabled();
     /// 启用/停用开机自启。返回是否成功;失败时 toast 提示。
@@ -137,6 +148,9 @@ signals:
     /// 翻译服务探测结果(provider/available/message)。
     void translateProbeFinished(QVariantMap resp);
     void proxyProbeFinished(QVariantMap resp);
+    /// 备份/导出完成(ok 与错误体都走这里,QML 侧统一提示)。
+    void backupFinished(QVariantMap resp);
+    void exportFinished(QVariantMap resp);
     void ocrFinished(QVariantMap resp);
     void toastMessage(const QString& message);
     void countsChanged();

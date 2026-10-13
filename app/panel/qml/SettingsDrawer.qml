@@ -31,6 +31,10 @@ AppDrawer {
     /// 渲染后端是否被改过(同样重启生效;与数据目录分开提示,便于合并文案)。
     property bool renderDirty: false
 
+    /// 备份/导出进行中标志:按钮置灰 + 文案切换(结果经 backupFinished/exportFinished 回投)。
+    property bool backupRunning: false
+    property bool exportRunning: false
+
     /// 改动去抖后自动落盘(不再有底部「保存」按钮)。
     /// 各控件只接**用户操作**信号(valueModified / clicked / textEdited / activated),
     /// 因此加载时回填值不会误触发保存,也就不需要 loading 守卫。
@@ -664,6 +668,63 @@ AppDrawer {
                 }
             }
 
+            // ---- 备份与导出(手动入口;zip/Markdown 全量 I/O 秒级,走 Core 异步) ----
+            FieldLabel { text: "备份" }
+            HintLabel {
+                text: "打包全部数据(数据库 + 图片)为单个 zip 快照,用于换机或留存。"
+            }
+            ThemedButton {
+                Layout.fillWidth: true
+                variant: "secondary"
+                text: backupRunning ? "备份中…" : "创建备份…"
+                enabled: !backupRunning
+                onClicked: {
+                    const path = Core.saveFileDialog(
+                        "选择备份保存位置",
+                        "备份文件 (*.zip)",
+                        "nextboard-backup-" + new Date().toISOString().slice(0, 10) + ".zip")
+                    if (path === "") return
+                    backupRunning = true
+                    backupHint.text = "正在创建备份…"
+                    backupHint.isError = false
+                    Core.backupCreate(path)
+                }
+            }
+            HintLabel {
+                id: backupHint
+                property bool isError: false
+                color: isError ? Theme.colors.error : Theme.colors.textSecondary
+                wrapMode: Text.WrapAnywhere
+            }
+
+            FieldLabel { text: "导出" }
+            HintLabel {
+                text: "把全部剪贴板历史导出为 Markdown 单文件;图片以 base64 内嵌,可直接在 Typora/Obsidian 等编辑器查看。"
+            }
+            ThemedButton {
+                Layout.fillWidth: true
+                variant: "secondary"
+                text: exportRunning ? "导出中…" : "导出为 Markdown…"
+                enabled: !exportRunning
+                onClicked: {
+                    const path = Core.saveFileDialog(
+                        "选择导出保存位置",
+                        "Markdown (*.md)",
+                        "nextboard-export-" + new Date().toISOString().slice(0, 10) + ".md")
+                    if (path === "") return
+                    exportRunning = true
+                    exportHint.text = "正在导出…"
+                    exportHint.isError = false
+                    Core.exportEntries(path)
+                }
+            }
+            HintLabel {
+                id: exportHint
+                property bool isError: false
+                color: isError ? Theme.colors.error : Theme.colors.textSecondary
+                wrapMode: Text.WrapAnywhere
+            }
+
             // ---- 贴图 ----
             SectionDivider {}
             SectionTitle { text: "贴图" }
@@ -1274,6 +1335,30 @@ AppDrawer {
             proxyProbeLabel.text = (d.ok ? "✓ " : "✗ ") + head
                     + (d.ok ? d.elapsedMs + " ms" : (d.error || "链路不可用"))
             proxyProbeLabel.isError = !d.ok
+        }
+        function onBackupFinished(resp) {
+            root.backupRunning = false
+            if (!resp.ok) {
+                backupHint.text = "备份失败:" + root.errText(resp)
+                backupHint.isError = true
+                return
+            }
+            const d = resp.data || {}
+            backupHint.text = "✓ 备份完成:" + d.entryCount + " 条条目、"
+                    + d.blobCount + " 个图片文件(" + (d.zipBytes / 1048576).toFixed(1) + " MB)"
+            backupHint.isError = false
+        }
+        function onExportFinished(resp) {
+            root.exportRunning = false
+            if (!resp.ok) {
+                exportHint.text = "导出失败:" + root.errText(resp)
+                exportHint.isError = true
+                return
+            }
+            const d = resp.data || {}
+            exportHint.text = "✓ 导出完成:" + d.entryCount + " 条条目("
+                    + (d.fileBytes / 1048576).toFixed(1) + " MB)"
+            exportHint.isError = false
         }
     }
 }

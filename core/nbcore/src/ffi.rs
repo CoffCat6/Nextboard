@@ -581,6 +581,21 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
             Ok(serde_json::Value::Null)
         }
 
+        // ---- 备份与导出(S5.3 配套;规划见 backup_export 模块注释) ----
+        // 备份:zip 快照(需持 db 锁 checkpoint,慢操作由宿主工作线程调用)
+        "backup_create" => {
+            let core = crate::core::Core::get()?;
+            let path = str_req(req, "path")?;
+            Ok(crate::backup_export::backup_create(core, &path)?)
+        }
+        // 导出:全部条目 -> Markdown 单文件(图片 base64 内嵌;html 显式报错)
+        "export_entries" => {
+            let core = crate::core::Core::get()?;
+            let path = str_req(req, "path")?;
+            let format = str_opt(req, "format").unwrap_or_else(|| "markdown".to_owned());
+            Ok(crate::backup_export::export_entries(core, &path, &format)?)
+        }
+
         // ---- 剪贴板读写 ----
         "copy_text_to_clipboard" => {
             crate::clip::write_text_to_clipboard(&str_req(req, "text")?)?;

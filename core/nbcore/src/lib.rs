@@ -11,6 +11,7 @@
 // (每个版本 2 行),真实链接错误仍会以 error 报告,不受本 allow 影响。
 #![allow(linker_messages)]
 
+pub mod backup_export;
 pub mod capture;
 pub mod clip;
 pub mod core;

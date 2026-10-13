@@ -25,6 +25,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 clipboard-win = { version = "5.4", features = ["std"] }
 xcap = "0.9"
 base64 = "0.22"
+zip = { version = "=8.0.0", default-features = false, features = ["deflate-flate2"] }
 ureq = { version = "3", default-features = false, features = ["socks-proxy", "native-tls"] }
 
 [target.'cfg(windows)'.dependencies]

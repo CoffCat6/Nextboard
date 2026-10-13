@@ -18,6 +18,8 @@
 #include <QUrl>
 #include <QProcess>
 #include <QGuiApplication>
+#include <QFileDialog>
+#include <QStandardPaths>
 #include <QPalette>
 #include <QStyleHints>
 #include <QThreadPool>
@@ -234,6 +236,40 @@ void CoreFacade::probeProxy() {
         emit proxyProbeFinished(jsonToVariant(resp).toMap());
     };
     QThreadPool::globalInstance()->start(job);
+}
+
+// ---- 数据备份与导出(zip/Markdown 全量 I/O,秒级;必须离 UI 线程) ----
+
+void CoreFacade::backupCreate(const QString& path) {
+    auto* job = new AsyncCall;
+    job->method = "backup_create";
+    job->req = QJsonObject{{"path", path}};
+    job->setAutoDelete(true);
+    job->onDone = [this](const QJsonObject& resp) {
+        emit backupFinished(jsonToVariant(resp).toMap());
+    };
+    QThreadPool::globalInstance()->start(job);
+}
+
+void CoreFacade::exportEntries(const QString& path) {
+    auto* job = new AsyncCall;
+    job->method = "export_entries";
+    job->req = QJsonObject{{"path", path}, {"format", "markdown"}};
+    job->setAutoDelete(true);
+    job->onDone = [this](const QJsonObject& resp) {
+        emit exportFinished(jsonToVariant(resp).toMap());
+    };
+    QThreadPool::globalInstance()->start(job);
+}
+
+QString CoreFacade::saveFileDialog(const QString& caption, const QString& filter,
+                                   const QString& defaultName) {
+    // QFileDialog 放 UI 线程:它本身是原生对话框,不涉及 nbcore
+    const QString selected = QFileDialog::getSaveFileName(
+        nullptr, caption,
+        defaultName.isEmpty() ? QString() : QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation) + QStringLiteral("/") + defaultName,
+        filter);
+    return selected;
 }
 
 bool CoreFacade::autoStartEnabled() {
