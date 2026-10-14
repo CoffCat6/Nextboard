@@ -137,6 +137,25 @@ private:
 
 } // namespace
 
+/// 底图背景项:直接持 QImage 自绘,免去 QPixmap::fromImage 的**整图拷贝**。
+///
+/// QPixmap 是光栅绘制设备,fromImage 时必然复制一份(4K 图即 33MB);
+/// 而 QImage 与 m_base 隐式共享,这里存一份引用不产生拷贝。
+/// 代价是 repaint 时从 QImage 光栅化(编辑器只在拖标注时重绘,可接受)。
+class ImageBackgroundItem : public QGraphicsItem {
+public:
+    explicit ImageBackgroundItem(const QImage& image) : m_image(image) {}
+    QRectF boundingRect() const override {
+        return QRectF(QPointF(0, 0), QSizeF(m_image.size()));
+    }
+    void paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget*) override {
+        painter->drawImage(QPointF(0, 0), m_image);
+    }
+
+private:
+    QImage m_image;   // 与 EditorWindow::m_base 隐式共享,不复制像素
+};
+
 /// 画布视图:把鼠标位置换算成**场景坐标**(= 底图物理像素)后转给窗口处理。
 /// 文字编辑期间打开 passthrough,让事件回到 QGraphicsView,光标才能正常交互。
 /// (带 Q_OBJECT,故不能放进匿名命名空间——AUTOMOC 需要外部链接。)
@@ -226,24 +245,12 @@ EditorWindow::EditorWindow(QImage base, QWidget* parent) : QWidget(parent), m_ba
     // 场景坐标 = 底图物理像素(第一代 §3.4:画布按底图自然分辨率渲染)
     m_scene->setSceneRect(0, 0, m_base.width(), m_base.height());
 
-    auto* background = new QGraphicsPixmapItem(QPixmap::fromImage(m_base));
+    auto* background = new ImageBackgroundItem(m_base);
     background->setPos(0, 0);
     m_scene->addItem(background);
-    // 编辑器是本应用单点内存峰值(底图 + 背景位图 + 马赛克/模糊纹理 + 合成输出,
-    // 每份都是整图尺寸),开关各记一条读数以便评估瘦身效果。
+    // 编辑器内存构成(每份都是整图尺寸):底图 + 背景自绘项(隐式共享,零拷贝)+
+    // 马赛克/模糊纹理(各自首次用到才建)+ 合成输出。开关各记一条读数便于评估瘦身。
     logMemory("editor-open");
-
-    // 马赛克底图:先缩到 1/kMosaicBlock 再放大回来 = 像素化(FastTransformation
-    // 保证取整不插值),作为马赛克图元的纹理刷子按路径"揭示"。
-    {
-        const int smallW = qMax(1, m_base.width() / kMosaicBlock);
-        const int smallH = qMax(1, m_base.height() / kMosaicBlock);
-        const QImage pixelated = m_base.scaled(smallW, smallH, Qt::IgnoreAspectRatio,
-                                               Qt::FastTransformation)
-                                     .scaled(m_base.size(), Qt::IgnoreAspectRatio,
-                                             Qt::FastTransformation);
-        m_mosaicSource = QPixmap::fromImage(pixelated);
-    }
 
     m_undo = new QUndoStack(this);
 
@@ -389,6 +396,20 @@ void EditorWindow::setTool(EditorTool tool) {
     m_tool = tool;
     // 记住"上一个绘图工具",供取色器采样后回退(取色器自身不作回退目标)
     if (previous != EditorTool::Picker) m_prevTool = previous;
+    // 马赛克纹理惰性生成:不用马赛克工具的图不必付这份全尺寸拷贝
+    // (构造时就建 = 每个编辑器会话都白付,且带一次 2× 整图的构造期临时峰值)。
+    // 与下方模糊纹理同一模式。
+    if (tool == EditorTool::Mosaic && m_mosaicSource.isNull()) {
+        // 先缩到 1/kMosaicBlock 再放大回来 = 像素化(FastTransformation 保证
+        // 取整不插值),作为马赛克图元的纹理刷子按路径"揭示"。
+        const int smallW = qMax(1, m_base.width() / kMosaicBlock);
+        const int smallH = qMax(1, m_base.height() / kMosaicBlock);
+        const QImage pixelated = m_base.scaled(smallW, smallH, Qt::IgnoreAspectRatio,
+                                               Qt::FastTransformation)
+                                     .scaled(m_base.size(), Qt::IgnoreAspectRatio,
+                                             Qt::FastTransformation);
+        m_mosaicSource = QPixmap::fromImage(pixelated);
+    }
     // 模糊纹理惰性生成:不用模糊工具的图不必付这份全尺寸拷贝
     if (tool == EditorTool::Blur && m_blurSource.isNull()) {
         const int smallW = qMax(1, m_base.width() / kBlurBlock);

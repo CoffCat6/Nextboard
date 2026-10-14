@@ -57,8 +57,14 @@ public:
     /// 主面板隐藏时应用级 toast 不可见,故贴图相关反馈走这里。
     void showNotice(const QString& text);
 
-    /// 当前显示位图占用的字节数(贴图淘汰的字节预算据此计算)。
+    /// 当前显示位图占用的字节数。
+    /// ⚠️ 这是**图片本身**的字节数,不含窗口开销 —— 淘汰预算请用 memoryBytes()。
     qint64 imageBytes() const { return m_image.sizeInBytes(); }
+
+    /// 这张贴图的**真实内存占用**:图片 + 软件渲染下置顶窗口的 backing store
+    /// (≈ 窗口物理尺寸 ×4)。淘汰预算据此计算 —— 只算图片会低估近一半
+    /// (实测 1755×1097 图 7.7MB/张,进程私有增量 +18.3MB/张)。
+    qint64 memoryBytes() const;
 
     /// 用新的位图替换贴图内容(编辑结果回写):保持当前缩放,并让画面中心不动。
     void setImage(const QImage& image);

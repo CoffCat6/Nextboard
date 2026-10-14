@@ -370,6 +370,16 @@ qreal PinWindow::currentDpr() const {
     return devicePixelRatioF();
 }
 
+qint64 PinWindow::memoryBytes() const {
+    // 图片 + 窗口 backing store。软件渲染下每个置顶窗口都要一份与窗口物理尺寸
+    // 等大的后备缓冲(DPR 生效,故乘 dpr²);实测这部分与图片本身差不多大
+    // (1755×1097:图 7.7MB + 后备 ~7.7MB ≈ 进程增量 18.3MB)。
+    const qreal dpr = currentDpr();
+    const qint64 backing =
+        static_cast<qint64>(qMax(1, width())) * qMax(1, height()) * dpr * dpr * 4;
+    return m_image.sizeInBytes() + backing;
+}
+
 QSize PinWindow::logicalSizeFor(qreal dpr) const {
     if (dpr <= 0.0) dpr = 1.0;
     // 原图是**物理像素**,窗口坐标是**逻辑像素**:除以 DPR 后,窗口的物理尺寸

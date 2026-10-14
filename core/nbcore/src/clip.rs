@@ -387,14 +387,14 @@ fn process(core: &Core, item: ClipItem, hash: &str, settings: &Settings) -> AppR
 /// 让监听同 hash 命中去重,避免重复条目(第一代 docs/phase5.md §3.6)。
 pub fn ingest_image(
     core: &Core,
-    rgba: &[u8],
+    rgba: Vec<u8>,
     width: u32,
     height: u32,
     source: &str,
 ) -> AppResult<Option<ClipEntry>> {
     let settings = core.settings()?;
     let item = ClipItem::Image {
-        rgba: rgba.to_vec(),
+        rgba,
         width,
         height,
     };

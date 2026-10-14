@@ -106,6 +106,14 @@ bool CoreBridge::init(bool /*startHidden*/, QString* error) {
         m_effectiveDataDir = path;
         qInfo() << "bridge: effective data dir =" << m_effectiveDataDir;
     }
+    // 配置加载警告:核心侧的回退会把**所有设置**打回默认(实测最坏是渲染后端从
+    // 软件切回硬件 D3D11,稳态 +100MB),而 Rust 的日志出口是 nbcore.log ——
+    // 排障第一现场是这份日志,所以在这里取走并落一条。
+    const QJsonObject warnResp = call("settings_warnings");
+    if (warnResp.value("ok").toBool()) {
+        for (const QJsonValue& v : warnResp.value("data").toArray())
+            qWarning().noquote() << "配置警告:" << v.toString();
+    }
     }
     return true;
 }

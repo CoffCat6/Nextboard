@@ -80,16 +80,19 @@ void onTerminate() {
 
 int main(int argc, char* argv[]) {
     // 隐藏自启参数(与第一代 --hidden 语义一致);
-    // --software:强制 Qt Quick 用软件(CPU 光栅)后端,用于对比 GPU/RHI 相关内存。
+    // --software / --hardware:强制 Qt Quick 用软件(CPU 光栅)/ 硬件(D3D11)后端,
+    //   用于对比渲染后端的内存与手感(软件是默认,硬件用于 A/B 与显卡充足场景)。
     // --data-dir <path>:覆盖数据目录,验收/多实例调试用 —— **必须在任何
     //   appDataDir() 调用之前解析并生效**,否则会先落到真实数据目录。
     bool startHidden = false;
     bool softwareBackend = false;
+    bool hardwareBackend = false;
     bool ownDataDir = false;   // 显式 --data-dir:验收/调试,不参与单实例门禁
     for (int i = 1; i < argc; ++i) {
         const QString arg = QString::fromLocal8Bit(argv[i]);
         if (arg == QLatin1String("--hidden")) startHidden = true;
         else if (arg == QLatin1String("--software")) softwareBackend = true;
+        else if (arg == QLatin1String("--hardware")) hardwareBackend = true;
         else if (arg == QLatin1String("--data-dir") && i + 1 < argc) {
             nb::setAppDataDirOverride(QString::fromLocal8Bit(argv[++i]));
             ownDataDir = true;
@@ -165,20 +168,23 @@ int main(int argc, char* argv[]) {
     nb::logMemory("core-ready");   // + nbcore.dll(Rust 运行时 + SQLite)
 
     // 渲染后端:必须在**构造第一个 QQuickWindow 之前**设定(官方文档),运行期不可切换,
-    // 故为"重启生效"设置。默认硬件(D3D11);设置项或 --software 可切软件(CPU 光栅),
-    // 后者省掉场景图 + RHI 设备/交换链/着色器(实测约 70MB 工作集,见 docs/progress.md)。
-    // 命令行 --software 作为临时覆盖(优先级高于设置)。
+    // 故为"重启生效"设置。**默认软件(CPU 光栅)**:实测比硬件(D3D11)后端省
+    // ~55MB 首帧 / ~101MB 稳态(隐藏态 231MB → 130MB),是唯一"开箱即超预算"的来源
+    // (docs/06-memory-optimization.md §1)。设置项或 --hardware 可切回硬件后端。
+    // 命令行开关优先级高于设置,便于 A/B 与排障。
     bool softwareFromSettings = false;
     {
         const QJsonObject s = core.call("get_settings").value("data").toObject();
-        softwareFromSettings = s.value("softwareRender").toBool(false);
+        softwareFromSettings = s.value("softwareRender").toBool(true);
     }
-    if (softwareBackend || softwareFromSettings) {
+    const bool useSoftware = hardwareBackend ? false : (softwareBackend || softwareFromSettings);
+    if (useSoftware) {
         QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
         qInfo() << "Qt Quick graphics API = Software"
-                << (softwareBackend ? "(--software 覆盖)" : "(设置项)");
+                << (softwareBackend ? "(--software 覆盖)" : "(设置项/默认)");
     } else {
-        qInfo() << "Qt Quick graphics API = Hardware (default/D3D11)";
+        qInfo() << "Qt Quick graphics API = Hardware (D3D11)"
+                << (hardwareBackend ? "(--hardware 覆盖)" : "(设置项)");
     }
 
     // 2. QML 装配(类型/单例注册)→ 主面板

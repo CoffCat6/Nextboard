@@ -322,6 +322,27 @@ pub unsafe extern "C" fn nb_capture_crop(
 
 // ---------- 内部工具 ----------
 
+/// PNG 字节 → (RGBA 像素, 宽, 高)。
+///
+/// `load_from_memory` 对带 alpha 的 PNG 本就解出 RGBA8,此时直接取走底层缓冲;
+/// 只有灰度/RGB 等才需要一次格式转换。省掉的那一份是**整图尺寸**的临时拷贝
+/// (4K 图 33MB)——截图入库/OCR 都是整图必经路径,实测对工作集峰值影响明显
+/// (docs/06-memory-optimization.md §5)。
+fn decode_png_to_rgba(png: &[u8]) -> Result<(Vec<u8>, u32, u32), AppError> {
+    let decoded = image::load_from_memory(png).map_err(AppError::Image)?;
+    Ok(match decoded {
+        image::DynamicImage::ImageRgba8(img) => {
+            let (w, h) = img.dimensions();
+            (img.into_raw(), w, h)
+        }
+        other => {
+            let converted = other.to_rgba8();
+            let (w, h) = converted.dimensions();
+            (converted.into_raw(), w, h)
+        }
+    })
+}
+
 fn cstr_to_string(ptr: *const c_char) -> Result<String, AppError> {
     if ptr.is_null() {
         return Err(AppError::InvalidInput("C 字符串为空".into()));
@@ -646,6 +667,11 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
             let core = crate::core::Core::get()?;
             Ok(serde_json::to_value(core.settings()?)?)
         }
+        // 配置加载警告(数组,空 = 干净)。宿主启动时拉一次写进自己的日志:
+        // Rust 的 log 出口是 nbcore.log,而排障第一现场通常是宿主的 nextboard.log,
+        // 且配置回退会把**所有设置**打回默认(实测渲染后端切换 = 稳态 +100MB 量级),
+        // 必须让它在用户可见的那份日志里留痕。
+        "settings_warnings" => Ok(serde_json::json!(crate::settings::take_warnings())),
         // 当前生效的数据目录(默认目录或设置的自定义目录)。宿主启动时取一次,
         // 用于定位 blobs 目录与面板的 file:// 图片 URL。
         "data_dir" => {
@@ -715,13 +741,10 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
             };
             let full = crate::clip::resolve_blob_path(&core.blobs_dir, &path);
             let bytes = std::fs::read(full).map_err(AppError::Io)?;
-            let img = image::load_from_memory(&bytes)
-                .map_err(AppError::Image)?
-                .to_rgba8();
-            let (width, height) = img.dimensions();
+            let (rgba, width, height) = decode_png_to_rgba(&bytes)?;
             let settings = core.settings()?;
             let text = crate::ocr::recognize_configured(
-                img.into_raw(),
+                rgba,
                 width,
                 height,
                 &crate::ocr::OcrOptions::from_settings(&settings),
@@ -737,11 +760,8 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
             let png = base64::engine::general_purpose::STANDARD
                 .decode(png_b64.as_bytes())
                 .map_err(|err| AppError::InvalidInput(format!("PNG base64 非法: {err}")))?;
-            let img = image::load_from_memory(&png)
-                .map_err(AppError::Image)?
-                .to_rgba8();
-            let (width, height) = img.dimensions();
-            let stored = crate::clip::ingest_image(core, img.as_raw(), width, height, &source)?;
+            let (rgba, width, height) = decode_png_to_rgba(&png)?;
+            let stored = crate::clip::ingest_image(core, rgba, width, height, &source)?;
             notify_host(WM_APP_CLIP_CHANGED);
             Ok(serde_json::json!({ "entry": stored }))
         }

@@ -121,13 +121,20 @@ void ClipEntryModel::setQuery(const QString& query) {
 }
 
 void ClipEntryModel::refresh() {
-    if (m_released) return;              // 隐藏期间不填列表(否则释放白做)
+    // 隐藏期间不填列表(否则释放/冻结白做);冻结期要**记账**,
+    // 解冻时补一次重载,否则会漏掉隐藏期间的最新剪贴板内容。
+    if (m_released || m_frozen) {
+        m_dirtyWhileFrozen = true;
+        return;
+    }
     if (m_debounce.isActive()) return;   // 已有待执行的刷新/查询
     m_debounce.start();
 }
 
 void ClipEntryModel::refreshNow() {
-    if (m_released) return;               // 同上:acquire() 会先解除再调用
+    // 冻结/释放期间调用(常见于 acquire 之前的竞态):记账,解冻时补一次重载。
+    if (m_frozen) { m_dirtyWhileFrozen = true; return; }
+    if (m_released) return;
     m_debounce.stop();                    // 打断待执行的合并刷新,立即重拉
     m_query = m_pendingQuery;
     reload(m_limit);
@@ -136,6 +143,9 @@ void ClipEntryModel::refreshNow() {
 void ClipEntryModel::release() {
     if (m_released) return;
     m_released = true;
+    m_frozen = false;            // 两种"离线"状态互斥,避免状态残留
+    m_dirtyWhileFrozen = false;
+    m_loadedOnce = false;        // 行已清空 → 不再"有效",acquire() 必须重载
     m_debounce.stop();   // 打断待执行的防抖刷新,否则释放后又被补一次
     if (m_rows.isEmpty()) return;
     // 整表重置:QML 委托被销毁 → 图片纹理随之下线
@@ -149,8 +159,23 @@ void ClipEntryModel::release() {
 }
 
 void ClipEntryModel::acquire() {
+    // 冻结期数据未变 → 行仍然有效:**只解冻、不重载**。
+    // 重载会 beginResetModel + 清空 + 重填,即把全部 QML 委托销毁重建 ——
+    // 实测那正是"首个显隐循环 +42MB 不可回落"的成因(堆 churn)。
+    // ⚠️ 首次显示必须装载:此时 m_rows 空且两个标志都没置位,
+    //    只看 released/frozen 会跳过装载 → 面板空白。
+    const bool needReload = m_released || m_dirtyWhileFrozen || !m_loadedOnce;
     m_released = false;
-    refreshNow();
+    m_frozen = false;
+    m_dirtyWhileFrozen = false;
+    if (needReload) refreshNow();
+}
+
+void ClipEntryModel::freeze() {
+    if (m_frozen || m_released) return;
+    // 还没装载过就没什么可保留的:直接按"未装载"处理,acquire() 时自然会拉。
+    m_frozen = true;
+    m_debounce.stop();   // 同 release:打断待执行的防抖刷新
 }
 
 void ClipEntryModel::fetchMoreRequest() {
@@ -476,7 +501,13 @@ QString ClipEntryModel::formatSize(qint64 n) {
 
 void ClipEntryModel::reload(int limit) {
     m_limit = limit;
-    if (m_released) return;                          // 已释放:等 acquire() 再拉
+    if (m_released) return;                          // 已释放:等 acquire() 再拉(它会重载)
+    if (m_frozen) {                                  // 已冻结:记账,解冻时补一次重载
+        // 冻结期可能发生:剪贴板通知、切视图/筛选、搜索词生效 —— 这些都会走到这里。
+        // 不记账的话,解冻时会被误判为"数据未变"而跳过重载 → 列表停留在旧数据。
+        m_dirtyWhileFrozen = true;
+        return;
+    }
     if (m_loading) { m_debounce.start(); return; }  // 进行中:稍后重试
     m_loading = true;
     emit loadingChanged();
@@ -511,6 +542,7 @@ void ClipEntryModel::applyPage(const QVariantMap& resp, bool append) {
         m_errorText.clear();
         emit errorTextChanged();
     }
+    m_loadedOnce = true;   // 成功装载过一次 → acquire() 才敢跳过重载(见 acquire 注释)
     const QVariantMap data = resp.value("data").toMap();
     const QVariantList items = data.value("items").toList();
     QVector<Row> rows;

@@ -136,7 +136,14 @@ public:
     /// 期间拒绝一切刷新,避免隐藏时又被剪贴板通知填满(内存收口 S6.1/S6.3)。
     Q_INVOKABLE void release();
     /// 面板**显示**时调用:解除拒绝并立即重拉(列表在显示前填好,首帧不留空白)。
+    /// 若此前处于 freeze() 且冻结期无变化,则**只解冻、不重拉**(避免销毁重建委托)。
     Q_INVOKABLE void acquire();
+    /// 冻结:保留已加载的行(隐藏态不再销毁 QML 委托),仅拦刷新。
+    /// 与 release() 的区别:不动 m_rows —— 隐藏→显示无委托重建 churn。
+    /// 实测依据:显示态 122MB < 隐藏态 137MB,且首个"隐藏→显示"循环留下 +42MB
+    /// 不可回落的堆增长(销毁 38 张复杂 Card 的 churn 撑大私有堆)。
+    /// ⚠️ 冻结期收到刷新请求会置脏,acquire() 时补一次重载(保证"呼出即最新")。
+    Q_INVOKABLE void freeze();
 
 signals:
     void totalChanged();
@@ -198,6 +205,14 @@ private:
     bool m_loading = false;
     /// 已释放(面板隐藏):行已清空且拒绝刷新,直到 acquire()。
     bool m_released = false;
+    /// 已冻结(面板隐藏但保留行):拒绝刷新但**不清行**,直到 acquire()。
+    bool m_frozen = false;
+    /// 冻结期间收到过刷新请求(剪贴板/设置变化)→ acquire() 必须重载一次。
+    bool m_dirtyWhileFrozen = false;
+    /// 是否成功装载过一次列表。⚠️ acquire() 判"行是否仍然有效"时必须带上它:
+    /// 首次显示时 m_rows 本就是空的(从未装载),只看 released/frozen 会误判为
+    /// "冻结期无变化"而跳过装载 → 面板空白。
+    bool m_loadedOnce = false;
     QTimer m_debounce;   // 刷新/搜索共用:200ms 去抖
 };
 

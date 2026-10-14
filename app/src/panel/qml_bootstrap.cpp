@@ -103,13 +103,26 @@ bool handleQmlLoadFailure(QQuickWidget* quick, QBoxLayout* layout) {
 
 namespace {
 /// 列表的"在线/离线"由两件事共同决定:**面板是否可见** 与 **当前停在哪一页**;
-/// 只有"可见 且 停在列表页"才需要持有列表行,其余一律释放。
+/// 只有"可见 且 停在列表页"才需要持有列表行,其余一律释放或冻结。
 ///
-/// 动机(内存收口 S6.1/S6.3):列表行对应的 QML 委托与图片纹理是本应用最大的一块
-/// 常驻开销 —— 而面板大多数时间是隐藏的(托盘常驻 + 失焦即隐),进翻译页时列表
-/// 更是完全用不到。隐藏期间剪贴板通知仍会刷新模型,若不拦住,释放就白做了。
+/// 动机(内存收口 S6.1/S6.3):列表行的图片纹理是本应用最大的一块常驻开销 ——
+/// 面板大多数时间隐藏(托盘常驻 + 失焦即隐),进翻译页时列表更是用不到。
+/// 隐藏期间剪贴板通知仍会刷新模型,若不拦住,释放/冻结就白做了。
+///
+/// 两种离线策略(实测对比,docs/06-memory-optimization.md §6):
+///   release():清空行 → QML 委托整批销毁。**首个循环留下 +42MB 不可回落的堆增长**
+///             (销毁 38 张复杂 Card 的 churn 撑大私有堆),且隐藏态 137MB 反而
+///             高于显示态 122MB;纹理释放其实已由 setPersistentSceneGraph(false) 负责。
+///   freeze() :保留行、只拦刷新。隐藏→显示若期间无变化则**不重载**(不销毁重建委托),
+///             故无 churn。
 class PanelListLifecycle : public QObject {
 public:
+    /// 列表页隐藏时保留行(冻结)而非清空(释放)。
+    /// 实测:freeze 让隐藏态读数对齐显示态、并消除首个循环的 +42MB 台阶;
+    /// 若将来在"图片条目极多"的压力场景下发现保留行更贵,把这里改回 false 即可 ——
+    /// 两种策略都已实测过,回退零成本。
+    static constexpr bool kFreezeWhenHidden = true;
+
     PanelListLifecycle(PanelWindow* panel, ClipEntryModel* model)
         : QObject(panel), m_panel(panel), m_model(model) {}
 
@@ -128,10 +141,16 @@ public:
 
     /// 形态切换后重新判定(进翻译页 → 释放;回列表页 → 重拉)。
     void sync() {
-        if (m_visible && m_panel->mode() == PanelWindow::Mode::List)
+        const bool listMode = m_panel->mode() == PanelWindow::Mode::List;
+        if (m_visible && listMode) {
             m_model->acquire();
-        else
+        } else if (kFreezeWhenHidden && listMode) {
+            // 只有"列表页 + 隐藏"才冻结;进翻译页仍 release(整页用不到列表,
+            // 没有保留行的理由)。
+            m_model->freeze();
+        } else {
             m_model->release();
+        }
     }
 
 private:
@@ -167,3 +186,5 @@ void qmlAttachPanel(PanelWindow* panel) {    if (!panel) return;
 }
 
 } // namespace nb
+
+

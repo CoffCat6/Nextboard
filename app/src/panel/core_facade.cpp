@@ -400,6 +400,10 @@ constexpr int kPinSoftLimit = 10;
 /// 为什么数量上限不够:贴图持有的是**全分辨率原图**,而预算按小图估的 ——
 /// 一张 4K 截图 RGBA 就是 33MB,10 张 = 332MB,单这一项就能吃掉整个内存预算。
 /// 故在数量之外再加字节上限,两者取先触发者。
+///
+/// 口径:**按"真实占用"计**(图片 + 窗口 backing store,见 PinWindow::memoryBytes),
+/// 而不是只算图片 —— 软件渲染下后者只占约一半(实测 1755×1097 图:图片 7.7MB,
+/// 进程增量 18.3MB/张),只算图片会让 10 张全分辨率贴图实际吃掉 ~189MB。
 constexpr qint64 kPinByteBudget = 96LL * 1024 * 1024;
 
 /// 按创建顺序记录存活的贴图窗口 —— 超限时据此淘汰"最旧"的一张。
@@ -422,19 +426,23 @@ void showPinWindow(const PinContent& content) {
         options.doubleClickClose = data.value("pinDoubleclickClose").toBool();
     }
 
-    // 先剔除已销毁/已关闭的窗口,再按"最旧"淘汰到上限之内
+    // 先剔除已销毁/已关闭的窗口,再按"最旧"淘汰到上限之内。
+    // 字节口径用 memoryBytes()(图片 + 窗口 backing store),只算图片会低估近一半。
     QList<QPointer<PinWindow>>& pins = pinRegistry();
     pins.removeIf([](const QPointer<PinWindow>& p) { return p.isNull() || !p->isVisible(); });
     qint64 totalBytes = 0;
-    for (const QPointer<PinWindow>& pin : pins) totalBytes += pin->imageBytes();
-    const qint64 incoming = content.image.sizeInBytes();
+    for (const QPointer<PinWindow>& pin : pins) totalBytes += pin->memoryBytes();
+    // 待贴的窗口还没创建、拿不到真实窗口尺寸;贴图窗口尺寸 ≈ 图片尺寸 + 阴影留白
+    // (见 PinWindow::logicalSizeFor),故按图片字节 ×2 估算"图片 + 后备"(与实测
+    // 的 2× 关系一致)。淘汰是"最旧优先",估多估少只影响时机一张,不会误淘汰新图。
+    const qint64 incoming = content.image.sizeInBytes() * 2;
     bool evicted = false;
     // 张数或字节任一超限就继续淘汰最旧的一张;至少保留 1 张(否则永远贴不出来)
     while (!pins.isEmpty() &&
            (pins.size() >= kPinSoftLimit || totalBytes + incoming > kPinByteBudget)) {
         QPointer<PinWindow> victim = pins.takeFirst();
         if (!victim) continue;
-        totalBytes -= victim->imageBytes();
+        totalBytes -= victim->memoryBytes();
         victim->close();
         evicted = true;
     }

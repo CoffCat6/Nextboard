@@ -101,7 +101,7 @@ private:
     QGraphicsItem* m_preview = nullptr;      // 拖拽中的临时图元(不入撤销栈)
     QGraphicsTextItem* m_textItem = nullptr; // 正在编辑的文字图元
 
-    QPixmap m_mosaicSource;                  // 预生成的像素化底图(马赛克纹理)
+    QPixmap m_mosaicSource;                  // 像素化底图(马赛克纹理,首次用马赛克工具时惰性生成)
     QPixmap m_blurSource;                    // 模糊纹理(首次用模糊工具时惰性生成)
     QActionGroup* m_colorGroup = nullptr;    // 色块动作组(取色器需同步选中态)
 

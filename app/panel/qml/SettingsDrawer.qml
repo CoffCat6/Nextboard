@@ -628,8 +628,9 @@ AppDrawer {
 
             SectionDivider {}
             SectionTitle { text: "数据" }
-            // 渲染后端(重启生效):软件(CPU 光栅)可省掉 GPU 场景图/RHI 设备约 70MB,
-            // 代价是渲染改由 CPU 承担 —— 供显卡受限/内存紧张的用户选用。
+            // 渲染后端(重启生效):软件(CPU 光栅)是**默认**——实测比硬件(D3D11)
+            // 省 ~55MB 首帧 / ~101MB 稳态(隐藏态 231MB → 130MB),代价是渲染改由
+            // CPU 承担(滚动/动画)。显卡充足且更在意跟手感的用户可关掉它。
             ReadableCheckBox {
                 id: softwareRenderCheck
                 text: "软件渲染(省内存,重启生效)"
@@ -639,7 +640,7 @@ AppDrawer {
                 }
             }
             HintLabel {
-                text: "用 CPU 光栅替代 GPU(D3D11)渲染,约省 70MB 内存;滚动/动画更吃 CPU。重启后生效。"
+                text: "默认开启:用 CPU 光栅替代 GPU(D3D11)渲染,约省 100MB 内存;滚动/动画更吃 CPU。关闭后重启生效(也可用 --hardware 启动参数临时切换)。"
             }
             ReadableCheckBox {
                 id: autoStartCheck

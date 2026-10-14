@@ -3,6 +3,7 @@
 //! 自定义数据目录的迁移流程沿用第一代 docs/phase4.md(标记文件 + 重启生效)。
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
@@ -12,6 +13,30 @@ use crate::error::{AppError, AppResult};
 const CONFIG_FILE: &str = "app_config.json";
 /// 待迁移标记：位于默认数据目录，内容为迁移源目录（Phase 4）。
 const DATA_MOVE_MARKER: &str = "data-move-pending.txt";
+
+/// 配置加载警告(进程级,只增不减直到被取走)。
+///
+/// 动机:配置损坏/缺键时 `load()` 会整体回退默认值——**所有设置一起丢**
+/// (实测最坏是渲染后端从软件切回硬件 D3D11,稳态 +100MB 量级)。
+/// 但 Rust 侧的 `log` 出口是 nbcore.log,而排障第一现场通常是宿主的
+/// nextboard.log,所以警告要有一条能被宿主取走的通道(ffi 的 settings_warnings)。
+static LOAD_WARNINGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// 记录一条加载警告:同时写 nbcore.log 与进程级列表(供宿主取走)。
+fn push_load_warning(msg: String) {
+    warn!("{msg}");
+    if let Ok(mut guard) = LOAD_WARNINGS.lock() {
+        guard.push(msg);
+    }
+}
+
+/// 取走并清空加载警告(宿主启动时拉一次;重复调用返回空表)。
+pub fn take_warnings() -> Vec<String> {
+    LOAD_WARNINGS
+        .lock()
+        .map(|mut guard| std::mem::take(&mut *guard))
+        .unwrap_or_default()
+}
 
 /// 应用设置，与 `src/api/types.ts` 的 `Settings` 镜像（camelCase）。
 /// 反序列化时缺失字段回退默认值（容器级 `default`），配置损坏不阻塞启动。
@@ -372,9 +397,15 @@ impl Default for Settings {
             // 默认"松手即复制"：截图后立刻可粘贴，不经过编辑器
             region_skip_editor: true,
             capture_delay_secs: 3,
-            overlay_idle_secs: 600,
-            // 默认硬件渲染（D3D11）：观感/CPU 占用同既有行为，软件后端为可选项
-            software_render: false,
+            // 实测遮罩会话常驻 +77.5MB(3 屏:冻结底图 + 全屏窗口 backing store + 合成缓冲),
+            // 而"误触截图热键后走开"是常见场景。10 分钟太长 —— 60s 足够完成框选,
+            // 超时自动取消(与手动 Esc 同语义)即回收。0 = 不自动取消仍受支持。
+            overlay_idle_secs: 60,
+            // 默认软件渲染(CPU 光栅):实测比硬件(D3D11)后端省 ~55MB 首帧 / ~101MB 稳态
+            // (隐藏态 231MB → 130MB),是唯一"开箱即超预算"的来源。代价是滚动/动画吃 CPU,
+            // 需过手感验收(文档 docs/06-memory-optimization.md §1.5);可用设置项或
+            // --hardware 切回硬件后端。
+            software_render: true,
             ocr_language: "auto".into(),
             ocr_backend: "system".into(),
             // 放大 2 倍：实测对 12px 代码截图明显改善且耗时可控（docs/phase6.md §3.6）
@@ -806,19 +837,28 @@ pub fn load(data_dir: &Path) -> AppResult<Settings> {
     let Ok(text) = std::fs::read_to_string(&path) else {
         return Ok(Settings::default());
     };
-    let Ok(mut root) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&text)
+    // 外部工具(记事本另存、PowerShell `Set-Content -Encoding UTF8` 等)可能写入 BOM,
+    // serde_json 会因此把**整份配置**判为非法并全部回退默认值(实测渲染后端被切回
+    // 硬件 D3D11,稳态 +100MB 量级)。BOM 只是前缀噪声,剥掉再解析即可避免无谓回退。
+    let text = text.trim_start_matches('\u{feff}');
+    let Ok(mut root) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(text)
     else {
-        warn!("配置文件解析失败,使用默认设置: {path:?}");
+        push_load_warning(format!(
+            "配置文件解析失败,已回退默认设置(渲染后端/热键/翻译配置等会一并重置): {path:?}"
+        ));
         return Ok(Settings::default());
     };
     let Some(mut value) = root.remove("settings") else {
+        push_load_warning(format!(
+            "配置文件缺少 settings 键,已回退默认设置(后果同上): {path:?}"
+        ));
         return Ok(Settings::default());
     };
     migrate_legacy_hotkeys(&mut value);
     migrate_legacy_proxy(&mut value);
     repair_blank_microsoft_endpoint(&mut value);
     Ok(serde_json::from_value(value).unwrap_or_else(|err| {
-        warn!("配置字段解析失败,使用默认设置: {err}");
+        push_load_warning(format!("配置字段解析失败,已回退默认设置: {err}"));
         Settings::default()
     }))
 }
@@ -991,6 +1031,17 @@ pub fn save(data_dir: &Path, settings: &Settings) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 测试临时目录:放 `<manifest>/target/tmp` 而非 `std::env::temp_dir()` ——
+    /// 受限执行环境(沙箱/CI)下测试 exe 对 `%TEMP%` 的写入会被拒绝
+    /// (`PermissionDenied`),放到工作区内两种环境都能跑(同 backup_export 的做法)。
+    pub(super) fn tmp_dir(tag: &str) -> PathBuf {
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("tmp");
+        let _ = std::fs::create_dir_all(&base);
+        base.join(format!("nb_settings_{tag}_{}_{}", std::process::id(), crate::now_ms()))
+    }
 
     #[test]
     fn migrate_legacy_hotkey_toggle_to_hotkeys() {
@@ -1311,12 +1362,12 @@ mod tests {
         assert!(settings.region_skip_editor, "默认直通剪贴板、不进编辑器");
         assert_eq!(settings.capture_delay_secs, 3, "延时截图默认等待 3 秒");
         assert_eq!(
-            settings.overlay_idle_secs, 600,
-            "遮罩空闲超时默认 10 分钟（0 = 不自动取消）"
+            settings.overlay_idle_secs, 60,
+            "遮罩空闲超时默认 1 分钟（0 = 不自动取消）"
         );
         assert!(
-            !settings.software_render,
-            "默认硬件渲染（D3D11）；软件后端为可选项"
+            settings.software_render,
+            "默认软件渲染（省 ~100MB 稳态）；硬件后端由设置项/--hardware 反向选择"
         );
         assert_eq!(settings.ocr_language, "auto", "OCR 默认自动选语言");
         assert_eq!(settings.ocr_backend, "system", "OCR 默认用系统内置引擎");
@@ -1582,11 +1633,7 @@ mod tests {
 
     #[test]
     fn load_repairs_blank_microsoft_endpoint() {
-        let root = std::env::temp_dir().join(format!(
-            "nb_settings_ms_{}_{}",
-            std::process::id(),
-            crate::now_ms()
-        ));
+        let root = crate::settings::tests::tmp_dir("ms");
         std::fs::create_dir_all(&root).unwrap();
 
         // 旧配置里端点是空串（早期 UI 只把它当 placeholder）→ 加载时补默认值
@@ -1616,11 +1663,7 @@ mod tests {
 
     #[test]
     fn pending_move_copies_db_and_blobs_to_target_then_clears_marker() {
-        let root = std::env::temp_dir().join(format!(
-            "nb_settings_test_{}_{}",
-            std::process::id(),
-            crate::now_ms()
-        ));
+        let root = crate::settings::tests::tmp_dir("move");
         let default_dir = root.join("default");
         let source = root.join("source");
         let target = root.join("target");
