@@ -216,7 +216,7 @@ pub unsafe extern "C" fn nb_capture_monitor(
 ) -> i32 {
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let image = crate::capture::capture_monitor(index)?;
-        write_rgba_out(&image, out_rgba, out_w, out_h)
+        write_rgba_out(image, out_rgba, out_w, out_h)
     }))
     .unwrap_or_else(|_| Err(AppError::Panicked("nb_capture_monitor panic".into())));
     report(result)
@@ -240,7 +240,7 @@ pub unsafe extern "C" fn nb_capture_monitor_by_name(
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let name = cstr_to_string(name)?;
         let image = crate::capture::capture_monitor_by_name(&name)?;
-        write_rgba_out(&image, out_rgba, out_w, out_h)
+        write_rgba_out(image, out_rgba, out_w, out_h)
     }))
     .unwrap_or_else(|_| Err(AppError::Panicked("nb_capture_monitor_by_name panic".into())));
     report(result)
@@ -283,7 +283,7 @@ pub unsafe extern "C" fn nb_capture_monitor_matched(
             dpr,
         };
         let image = crate::capture::capture_monitor_matched(&hint)?;
-        write_rgba_out(&image, out_rgba, out_w, out_h)
+        write_rgba_out(image, out_rgba, out_w, out_h)
     }))
     .unwrap_or_else(|_| Err(AppError::Panicked("nb_capture_monitor_matched panic".into())));
     report(result)
@@ -314,7 +314,7 @@ pub unsafe extern "C" fn nb_capture_crop(
         }
         let bytes = std::slice::from_raw_parts(src, src_len);
         let image = crate::capture::crop_rgba(bytes, screen_w, screen_h, x, y, width, height)?;
-        write_rgba_out(&image, out_rgba, out_w, out_h)
+        write_rgba_out(image, out_rgba, out_w, out_h)
     }))
     .unwrap_or_else(|_| Err(AppError::Panicked("nb_capture_crop panic".into())));
     report(result)
@@ -362,12 +362,19 @@ fn report(result: Result<(), AppError>) -> i32 {
     }
 }
 
-/// RGBA 图像写入宿主出参(分配缓冲拷贝,宿主 nb_free_buffer 释放)。
+/// RGBA 图像写入宿主出参(宿主用 `nb_free_buffer` 归还)。
+///
+/// **优先直接交出 Vec 自己的缓冲**,省掉一次整帧分配 + memcpy(三屏会话即 3×8.3MB
+/// 的瞬态峰值,4K 是 3×33MB;顺带每次抓取少几十毫秒的拷贝耗时)。
+///
+/// 交出后由宿主 `nb_free_buffer(ptr, len)` 释放,其内部按 `Layout::from_size_align(len, 1)`
+/// dealloc —— 只有 Vec 的 capacity 恰好等于 len 时该 layout 才与分配时一致,否则是 UB。
+/// 故先 `shrink_to_fit` 校正并**复核**,对不上就退回拷贝路径(语义完全等价)。
 ///
 /// # Safety
 /// 出参指针契约同各导出函数。
 unsafe fn write_rgba_out(
-    image: &crate::capture::CapturedImage,
+    image: crate::capture::CapturedImage,
     out_rgba: *mut *mut u8,
     out_w: *mut u32,
     out_h: *mut u32,
@@ -375,7 +382,26 @@ unsafe fn write_rgba_out(
     if out_rgba.is_null() || out_w.is_null() || out_h.is_null() {
         return Err(AppError::InvalidInput("出参指针为空".into()));
     }
-    let layout = std::alloc::Layout::from_size_align(image.rgba.len(), 1)
+    let crate::capture::CapturedImage { width, height, .. } = image;
+    let mut rgba = image.rgba;
+    let len = rgba.len();
+    if rgba.capacity() != len {
+        rgba.shrink_to_fit();
+    }
+    if len > 0 && rgba.capacity() == len {
+        let ptr = rgba.as_mut_ptr();
+        // 所有权移交宿主:配套的 nb_free_buffer 会按 (len, 1) 归还,与此处 Vec 的
+        // 分配布局一致(u8 的对齐恒为 1)。
+        std::mem::forget(rgba);
+        // SAFETY: ptr 指向 capacity == len 的 u8 缓冲,长度已随出参一并交给宿主
+        unsafe {
+            *out_rgba = ptr;
+            *out_w = width;
+            *out_h = height;
+        }
+        return Ok(());
+    }
+    let layout = std::alloc::Layout::from_size_align(len, 1)
         .map_err(|_| AppError::Internal("RGBA 分配布局非法".into()))?;
     // SAFETY: layout 大小 >0(图像非空)
     let ptr = unsafe { std::alloc::alloc(layout) };
@@ -384,10 +410,10 @@ unsafe fn write_rgba_out(
     }
     // SAFETY: ptr 刚按 layout 分配,长度与 rgba 一致
     unsafe {
-        std::ptr::copy_nonoverlapping(image.rgba.as_ptr(), ptr, image.rgba.len());
+        std::ptr::copy_nonoverlapping(rgba.as_ptr(), ptr, len);
         *out_rgba = ptr;
-        *out_w = image.width;
-        *out_h = image.height;
+        *out_w = width;
+        *out_h = height;
     }
     Ok(())
 }

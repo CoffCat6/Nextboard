@@ -255,10 +255,13 @@ QImage CoreBridge::captureCrop(const QImage& screen, const QRect& rect) {
         if (rgba) m_freeBuffer(rgba, 0);
         return {};
     }
-    QImage out(rgba, static_cast<int>(w), static_cast<int>(h), QImage::Format_RGBA8888);
-    QImage copy = out.copy();
-    m_freeBuffer(rgba, static_cast<unsigned long long>(w) * h * 4);
-    return copy;
+    // 零拷贝:与 captureMonitor 同一套 CoreBuffer + releaseCoreBuffer 托管。
+    // 原先这里 `out.copy()` 深拷一份裁剪图再归还核心缓冲 —— 峰值白翻一倍
+    // (1500×850 裁剪多 5MB,4K 全屏裁剪多 33MB),而拷贝毫无必要:QImage 自己
+    // 就能管住核心缓冲,最后一份引用析构时交还 nb_free_buffer。
+    auto* buffer = new CoreBuffer{rgba, static_cast<unsigned long long>(w) * h * 4, m_freeBuffer};
+    return QImage(rgba, static_cast<int>(w), static_cast<int>(h), QImage::Format_RGBA8888,
+                  &releaseCoreBuffer, buffer);
 }
 
 QImage CoreBridge::loadEntryImage(const QString& blobPath) {

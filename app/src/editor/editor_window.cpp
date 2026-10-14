@@ -250,8 +250,6 @@ EditorWindow::EditorWindow(QImage base, QWidget* parent) : QWidget(parent), m_ba
     m_scene->addItem(background);
     // 编辑器内存构成(每份都是整图尺寸):底图 + 背景自绘项(隐式共享,零拷贝)+
     // 马赛克/模糊纹理(各自首次用到才建)+ 合成输出。开关各记一条读数便于评估瘦身。
-    logMemory("editor-open");
-
     m_undo = new QUndoStack(this);
 
     auto* canvas = new EditorCanvas(m_scene, this);
@@ -286,6 +284,13 @@ EditorWindow::EditorWindow(QImage base, QWidget* parent) : QWidget(parent), m_ba
         const QRect avail = screen->availableGeometry();
         move(avail.center() - rect().center());
     }
+
+    // ⚠️ 本条读数**仍然含上一环的遮罩**,不能当作编辑器成本判读:构造编辑器的那段
+    // 代码正处在遮罩 regionConfirmed 的信号发射栈上,deleteLater 的遮罩要到事件循环
+    // 转一圈才析构,所以在这里移到构造末尾也一样读到混合值(2026-10-14 实测:
+    // 本条 170.6MB,而编辑器真实持有只有 98.2MB —— 见 docs/06 §0 坑 3)。
+    // 判读编辑器持有量用:采样峰值,或 `capture-end − editor-closed`。
+    logMemory("editor-open");
 }
 
 EditorWindow::~EditorWindow() {

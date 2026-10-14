@@ -117,11 +117,16 @@ namespace {
 ///             故无 churn。
 class PanelListLifecycle : public QObject {
 public:
-    /// 列表页隐藏时保留行(冻结)而非清空(释放)。
-    /// 实测:freeze 让隐藏态读数对齐显示态、并消除首个循环的 +42MB 台阶;
-    /// 若将来在"图片条目极多"的压力场景下发现保留行更贵,把这里改回 false 即可 ——
+    /// 列表"离线"(面板隐藏 **或** 停在翻译页)时保留行(冻结)而非清空(释放)。
+    /// 两轮实测:
+    ///   - 隐藏态 freeze 让读数对齐显示态,并消除首个循环的 +42MB 台阶;
+    ///   - 原先"进翻译页仍 release"的分支是**唯一还在整批销毁委托**的路径 ——
+    ///     列表⇄翻译每来回一轮私有字节 +3~4MB 且单调不回落(4 轮实测 100.8 →
+    ///     107.3 → 109.3 → 111.1),正是 release 的堆 churn。翻译页并不需要一个
+    ///     空列表来换取这份驻留(实测保留行只多 ~5MB)。
+    /// 若将来在"图片条目极多"的压力场景下发现保留行更贵,改回 false 即可,
     /// 两种策略都已实测过,回退零成本。
-    static constexpr bool kFreezeWhenHidden = true;
+    static constexpr bool kFreezeWhenOffline = true;
 
     PanelListLifecycle(PanelWindow* panel, ClipEntryModel* model)
         : QObject(panel), m_panel(panel), m_model(model) {}
@@ -139,16 +144,15 @@ public:
         return QObject::eventFilter(obj, e);
     }
 
-    /// 形态切换后重新判定(进翻译页 → 释放;回列表页 → 重拉)。
+    /// 形态切换后重新判定:回到"可见 + 列表页"才解冻重载,其余离线态一律冻结。
     void sync() {
-        const bool listMode = m_panel->mode() == PanelWindow::Mode::List;
-        if (m_visible && listMode) {
+        if (m_visible && m_panel->mode() == PanelWindow::Mode::List) {
             m_model->acquire();
-        } else if (kFreezeWhenHidden && listMode) {
-            // 只有"列表页 + 隐藏"才冻结;进翻译页仍 release(整页用不到列表,
-            // 没有保留行的理由)。
+        } else if (kFreezeWhenOffline) {
             m_model->freeze();
         } else {
+            // 旧策略(实验开关关闭时):隐藏与进翻译页都清空行 —— 委托整批销毁,
+            // 实测每来回一轮 +3~4MB 且单调不回落。
             m_model->release();
         }
     }

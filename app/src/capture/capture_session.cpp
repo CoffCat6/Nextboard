@@ -39,28 +39,50 @@ bool pruneOverlays() {
 /// 任一遮罩上报 activity 就重置;超时则自动取消会话。
 QTimer* g_idleTimer = nullptr;
 
+/// 在 `obj` 真正析构之后再执行 `fn`。
+///
+/// 不能用"下一轮事件循环"来等:deleteLater 与零定时器谁先跑并不确定,而窗口占的那份
+/// 内存(软件渲染下的后备缓冲 ≈ 窗口尺寸×4)必须等对象真的析构才归还。`destroyed`
+/// 是唯一可靠的时点。`fn` 再经一次 singleShot(0) 转出去,避免在半死对象的析构链上
+/// 跑编码/写库这类重活。
+void runAfterDestroyed(QObject* obj, std::function<void()> fn) {
+    QObject::connect(obj, &QObject::destroyed, obj,
+                     [fn](QObject*) { QTimer::singleShot(0, qApp, fn); },
+                     Qt::DirectConnection);
+}
+
 /// 收起本次会话的全部遮罩。
 ///
 /// 先把列表清空再逐个 close():close() 触发 WA_DeleteOnClose → deleteLater(),
 /// 因此关闭**当前发信的那块遮罩**也是安全的(延迟删除,不在信号发射栈上析构),
 /// 且重入调用会看到空列表而直接返回。
-void closeAllOverlays() {
+///
+/// `after` 非空时在**全部遮罩真正析构之后**执行。要它是因为:close() 返回时三块整屏
+/// 底图与各窗口的后备缓冲仍在场(实测会话 +77.5MB),而"确认后入库"原先就挂在同一个
+/// 信号栈上同步跑完(PNG 编码 + 入库 + 写剪贴板),于是入库全程都在为已经用不到的遮罩
+/// 买内存(实测框选链路工作集峰值 274MB)。
+void closeAllOverlays(std::function<void()> after = {}) {
     const QList<QPointer<OverlayWidget>> overlays = g_overlays;
     g_overlays.clear();
     g_onCaptured = {};
     // 会话结束即停表:遮罩已释放,不再需要空闲保护
     if (g_idleTimer) g_idleTimer->stop();
-    if (overlays.isEmpty()) return;
+    if (overlays.isEmpty()) {
+        if (after) QTimer::singleShot(0, qApp, std::move(after));
+        return;
+    }
 
     // 内存读数必须等**最后一块遮罩真正销毁**之后再取:close() 只是 deleteLater,
     // 此刻整屏底图还没回收(实测会读成"没释放",与下一次 start 的读数自相矛盾)。
     // 又因为本函数可能正处在某块遮罩的信号栈上(regionConfirmed),不能强制跑
     // deleteLater —— 那会在其事件处理中途析构它。故用 destroyed 信号计数。
     auto* pending = new int(overlays.size());
-    const auto countdown = [pending] {
+    const auto countdown = [pending, after] {
         if (--*pending == 0) {
             delete pending;
             logMemory("capture-end");
+            // 到这一刻遮罩已全部析构、缓冲已归还;转一次事件循环只为离开析构栈。
+            if (after) QTimer::singleShot(0, qApp, after);
         }
     };
     for (const QPointer<OverlayWidget>& overlay : overlays) {
@@ -258,7 +280,10 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured, bool allo
     const bool rightClickCancel = data.value("regionRightClickCancel").toBool(true);
     // 空闲超时(S6.1):遮罩持有整屏冻结底图(4K 约 33MB),用户触发后离开会无限期占着。
     // 0 = 不自动取消;会话内任何鼠标/键盘动作都会重置计时。
-    const int idleSecs = qBound(0, data.value("overlayIdleSecs").toInt(600), 3600);
+    // 兜底值必须与 core 默认值一致(settings.rs 的 overlay_idle_secs = 60):
+    // 这里原先写 600,一旦 get_settings 失败(核心未就绪/新旧 dll 错配)就会让遮罩
+    // 白占整屏冻结底图十分钟 —— 实测遮罩会话常驻 +77.5MB。
+    const int idleSecs = qBound(0, data.value("overlayIdleSecs").toInt(60), 3600);
     if (idleSecs > 0 && !g_idleTimer) {
         g_idleTimer = new QTimer(qApp);
         g_idleTimer->setSingleShot(true);
@@ -292,25 +317,35 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured, bool allo
         QObject::connect(overlay, &OverlayWidget::regionConfirmed, overlay,
                 [frozen, allowEditor](const QRect& physicalRect) {
             const CaptureDone done = g_onCaptured;   // closeAllOverlays 会清空,先取出
-            closeAllOverlays();                      // 任一屏确认即收起全部遮罩
-            const QImage cropped = CoreBridge::instance().captureCrop(frozen, physicalRect);
-            if (cropped.isNull()) {
-                qWarning() << "选区裁剪失败(空选区或越界)";
-                return;
-            }
-            if (!allowEditor || skipEditor()) {
-                finishCapture(cropped, done);
-                return;
-            }
-            // regionSkipEditor=false:先进编辑器标注,「完成」时才入库 + 写剪贴板
-            auto* editor = new EditorWindow(cropped);
-            QObject::connect(editor, &EditorWindow::committed, editor,
-                             [done](const QImage& composed) { finishCapture(composed, done); });
-            QObject::connect(editor, &EditorWindow::cancelled, editor,
-                             [] { qInfo() << "截图编辑已取消"; });
-            editor->show();
-            editor->raise();
-            editor->activateWindow();
+            // 任一屏确认即收起全部遮罩,并**等它们真正析构后**再裁剪/入库/建编辑器
+            // (原因见 closeAllOverlays 的注释:否则整屏底图 + 后备缓冲会陪跑整条链)。
+            closeAllOverlays([frozen, physicalRect, done, allowEditor] {
+                const QImage cropped =
+                    CoreBridge::instance().captureCrop(frozen, physicalRect);
+                if (cropped.isNull()) {
+                    qWarning() << "选区裁剪失败(空选区或越界)";
+                    return;
+                }
+                if (!allowEditor || skipEditor()) {
+                    finishCapture(cropped, done);
+                    return;
+                }
+                // regionSkipEditor=false:先进编辑器标注,「完成」时才入库 + 写剪贴板
+                auto* editor = new EditorWindow(cropped);
+                QObject::connect(editor, &EditorWindow::committed, editor,
+                        [editor, done](const QImage& composed) {
+                    // finish() 里 close() 只是 deleteLater:此刻编辑器仍持底图 +
+                    // 合成输出 + 窗口后备缓冲。等它真析构完再入库,峰值里就不含这一份。
+                    runAfterDestroyed(editor, [done, composed] {
+                        finishCapture(composed, done);
+                    });
+                });
+                QObject::connect(editor, &EditorWindow::cancelled, editor,
+                                 [] { qInfo() << "截图编辑已取消"; });
+                editor->show();
+                editor->raise();
+                editor->activateWindow();
+            });
         });
         QObject::connect(overlay, &OverlayWidget::cancelled, overlay, [] {
             closeAllOverlays();
