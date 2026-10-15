@@ -288,9 +288,12 @@ AppDrawer {
         autoConfirmCheck.checked = s.regionAutoConfirm === true
         rightClickCancelCheck.checked = s.regionRightClickCancel === true
         captureDelay.value = s.captureDelaySecs > 0 ? s.captureDelaySecs : 3
-        // 0 = 不自动取消,必须原样保留;缺失时按默认 10 分钟
+        // 0 = 不自动取消,必须原样保留;缺失时按 core 默认 60 秒
+        // ⚠️ 兜底值必须与 settings.rs / capture_session.cpp 一致(都取 60):
+        //    这里原先写 600,get_settings 失败时显示"10 分钟"而实际行为是 60s ——
+        //    显示与行为分叉,用户改不动也看不出来。
         const idleSecs = (s.overlayIdleSecs === undefined || s.overlayIdleSecs === null)
-                         ? 600 : s.overlayIdleSecs
+                         ? 60 : s.overlayIdleSecs
         overlayIdle.value = Math.round(idleSecs / 60)
         themeCombo.currentIndex = s.theme === "light" ? 1 : s.theme === "dark" ? 2 : 0
         softwareRenderCheck.checked = s.softwareRender === true

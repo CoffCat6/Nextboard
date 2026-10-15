@@ -102,9 +102,9 @@ int main(int argc, char* argv[]) {
     // 单实例门禁:同一数据目录只允许一个实例。
     // ⚠️ 指定了 --data-dir 时**跳过**(验收/调试常与用户实例并存,且用的是
     //    独立数据目录,不存在竞争;否则第二次验收启动会被门禁静默挡掉)。
-    // ⚠️ 验收模式(--todo-flow / --todo-groups)会**写库或改状态**,若调用方忘了配
-    //    --data-dir,默认落到真实数据目录里 —— 这里兜底切到独立目录,保证验收
-    //    不污染用户数据。目录固定在 **exe 同级**的 `acceptance-data`(不用临时
+    // ⚠️ 验收模式(--todo-flow / --todo-groups / --clear-done-flow)会**写库或改状态**,
+    //    若调用方忘了配 --data-dir,默认落到真实数据目录里 —— 这里兜底切到独立目录,
+    //    保证验收不污染用户数据。目录固定在 **exe 同级**的 `acceptance-data`(不用临时
     //    目录:临时目录受 TMP 环境变量影响,位置不确定,排查时反而找不到数据)。
     //    --todo-groups 只是读回,但同样要隔离:它靠脚本**先播种**数据才有效,
     //    而播种会写库。
@@ -113,6 +113,7 @@ int main(int argc, char* argv[]) {
             const QString arg = QString::fromLocal8Bit(argv[i]);
             if (arg == QLatin1String("--todo-flow")
                 || arg == QLatin1String("--todo-groups")
+                || arg == QLatin1String("--clear-done-flow")
                 || arg == QLatin1String("--dump-monitors")) {
                 const QString dir = QDir(QCoreApplication::applicationDirPath())
                                         .filePath(QStringLiteral("acceptance-data"));
@@ -219,6 +220,7 @@ int main(int argc, char* argv[]) {
     QString shotPath, queryText, translateText;
     bool openSettings = false;
     bool todoFlow = false;
+    bool clearDoneFlow = false;
     bool todoGroups = false;
     bool dumpMonitors = false;
     for (int i = 1; i < argc; ++i) {
@@ -235,6 +237,10 @@ int main(int argc, char* argv[]) {
         // 结果(浮层几何/字段值/是否关闭)打日志供脚本断言。
         else if (arg == QLatin1String("--todo-flow"))
             todoFlow = true;
+        // 清空已完成待办验收:播种归档 → 切待办视图 → 真实点击「清空已完成」
+        // → 点确认 → 读库断言(见 acceptance.cpp 的 runClearDoneFlow)。
+        else if (arg == QLatin1String("--clear-done-flow"))
+            clearDoneFlow = true;
         // 待办分组自检:只读回各行分组键(配合脚本播种数据验证组标题分界点)。
         else if (arg == QLatin1String("--todo-groups"))
             todoGroups = true;
@@ -244,6 +250,7 @@ int main(int argc, char* argv[]) {
     }
     // 待办交互验收(--todo-flow):真实点击驱动整条链路,逻辑见 host/acceptance.cpp
     if (todoFlow) nb::runTodoAcceptanceFlow(panel);
+    if (clearDoneFlow) nb::runClearDoneFlow(panel);
     if (todoGroups) nb::reportTodoGroups(panel);
     if (dumpMonitors) nb::reportMonitors();
     if (!shotPath.isEmpty()) {

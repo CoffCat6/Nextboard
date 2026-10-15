@@ -107,6 +107,7 @@ Rectangle {
     /// 验收只读状态:浮层几何 + 字段值 + 卡片可见性 + 错误行 + 按钮几何。
     readonly property var acceptanceState: ({
         cardVisible: todoComposerCard.visible,
+        clearDoneVisible: clearDoneCard.visible,   // --clear-done-flow:确认卡片开合
         pickerVisible: timePickerPopup.visible,
         pickerOpen: timePickerPopup.visible,
         pickerX: timePickerPopup.x,
@@ -252,6 +253,23 @@ Rectangle {
         const r = Entries.addTagsBulk(selectedIds, tags)
         if (!r.ok) { Core.showToast(r.message); return }
         Core.showToast("已为 " + r.changed + " 条添加标签")
+    }
+
+    // ---- 清空已完成待办(待办视图「已完成」组头入口) ----
+    /// 将清空的条数(确认文案用):打开时从计数快照,避免清空后列表刷新导致数字漂移。
+    property int clearDoneCount: 0
+    /// 打开确认卡片(入口 = 「已完成」组头右侧文字链)。
+    function openClearDoneConfirm() {
+        clearDoneCount = Core.counts.todoDone || 0
+        clearDoneCard.visible = true
+    }
+    /// 执行清空:归档条目连同数据一起删除,不可恢复 —— 必须点确认;
+    /// 成功 toast 里带上条数快照,失败提示由模型侧 toast() 统一发出。
+    function commitClearDone() {
+        clearDoneCard.visible = false
+        const n = clearDoneCount
+        if (Entries.todoClearDone())
+            Core.showToast("已清空 " + n + " 条已完成待办")
     }
 
     // ---- 条目多选(选择模式) ----
@@ -1706,6 +1724,35 @@ Rectangle {
                                                           : Theme.colors.textSecondary
                 }
 
+                // 「已完成」组头的清空入口:只在归档组首行出现(needsHeader 与组标题同一条件)。
+                // 用行内文字链而非按钮:与组标题同字号,不改变行高公式
+                // (implicitHeight 只按 groupLabel 计算,按钮会顶开卡片)。
+                Text {
+                    id: clearDoneLink
+                    // ⚠️ objectName 必须与 visible 同条件:委托每个实例都挂名的话,
+                    //    验收的 DFS 会命中首行(通常是隐藏实例),点击落到空气上。
+                    objectName: visible ? "clearDoneLink" : ""
+                    visible: rowWrap.needsHeader && rowWrap.groupKey === "done"
+                             && !root.selectMode   // 选择模式内隐藏:清空会让选中集出现失效 id
+                    anchors.top: parent.top
+                    anchors.right: parent.right
+                    anchors.rightMargin: 2
+                    text: "清空已完成"
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.metrics.fontCaption
+                    color: clearDoneArea.containsMouse ? Theme.colors.error
+                                                       : Theme.colors.textSecondary
+                    MouseArea {
+                        id: clearDoneArea
+                        // 负边距扩大热区:文字链本体只有一行高,点不中会像"没反应"
+                        anchors.fill: parent
+                        anchors.margins: -6
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.openClearDoneConfirm()
+                    }
+                }
+
                 EntryCard {
                     id: card
                     anchors.top: groupLabel.visible ? groupLabel.bottom : parent.top
@@ -1947,6 +1994,15 @@ Rectangle {
     Connections {
         target: Core
         function onToastMessage(message) { toast.showMsg(message) }
+    }
+
+    // ---- 模型信号订阅 ----
+    // ⚠️ Entries.toast 与 Core.toastMessage 是两条独立信号:模型内的失败路径
+    //    (固定/保存标签/更新待办/推迟/保存待办/清空已完成)不经 Core 中转,
+    //    此前 6 处 emit 全无接收者 —— 失败提示静默消失,补上这条接线。
+    Connections {
+        target: Entries
+        function onToast(message) { toast.showMsg(message) }
     }
 
     // ---- Toast(§36:右下角通知卡,Surface+Border+柔和层级,非 accent 大色块) ----
@@ -2419,6 +2475,73 @@ Rectangle {
                     variant: "primary"; size: "sm"
                     text: "添加"
                     onClicked: root.commitBulkTag()
+                }
+            }
+        }
+    }
+
+    // ---- 清空已完成待办确认卡片 ----
+    // 与批量删除同一模式(屏障 + 居中卡片):清空归档是老条目的**删除**,
+    // 不可恢复,必须二次确认;文案显示将删除的条数(快照于打开时)。
+    MouseArea {
+        id: clearDoneBarrier
+        anchors.fill: parent
+        z: 950
+        visible: clearDoneCard.visible
+        enabled: visible
+        acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+        onClicked: clearDoneCard.visible = false
+    }
+
+    Rectangle {
+        id: clearDoneCard
+        z: 960
+        visible: false
+        anchors.centerIn: parent
+        width: Math.min(340, root.width - 48)
+        height: clearDoneLayout.implicitHeight + 2 * Theme.metrics.spacingMd
+        radius: Theme.metrics.radiusCard
+        color: Theme.colors.surface
+        border.width: Theme.metrics.borderWidth
+        border.color: Theme.colors.borderStrong
+
+        ColumnLayout {
+            id: clearDoneLayout
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: Theme.metrics.spacingMd
+            spacing: Theme.metrics.spacingSm
+
+            Text {
+                Layout.fillWidth: true
+                text: "清空 " + root.clearDoneCount + " 条已完成待办?"
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.metrics.fontSection
+                font.weight: Font.DemiBold
+                color: Theme.colors.error
+            }
+            Text {
+                Layout.fillWidth: true
+                text: "已完成的待办将连同其数据一起删除,不可恢复;未完成的待办不受影响。"
+                wrapMode: Text.Wrap
+                font.pixelSize: Theme.metrics.fontCaption
+                color: Theme.colors.textSecondary
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Theme.metrics.spacingSm
+                Item { Layout.fillWidth: true }
+                ThemedButton {
+                    variant: "secondary"; size: "sm"
+                    text: "取消"
+                    onClicked: clearDoneCard.visible = false
+                }
+                ThemedButton {
+                    objectName: "clearDoneConfirm"
+                    variant: "danger"; size: "sm"
+                    text: "清空"
+                    onClicked: root.commitClearDone()
                 }
             }
         }

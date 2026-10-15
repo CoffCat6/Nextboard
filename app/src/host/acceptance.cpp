@@ -125,6 +125,72 @@ void runTodoAcceptanceFlow(PanelWindow& panel) {
     });
 }
 
+void runClearDoneFlow(PanelWindow& panel) {
+    // 清空已完成待办验收(破坏性操作,值得一条常驻回归钩子):
+    //   播种 2 条已完成 + 1 条未完成 → 切待办视图 → 真实点击组头「清空已完成」
+    //   → 真实点击确认「清空」→ 读库断言:归档全部清除、未完成不受影响。
+    // ⚠️ 只断言"没有 done 残留 + 未完成条目仍在",不断言总行数 ——
+    //    验收数据目录可能残留其它待办,数量断言会误报。
+    QTimer::singleShot(3500, &panel, [&panel] {
+        CoreFacade& core = CoreFacade::instance();
+        // 清掉前次运行留下的验收条目(按前缀识别):保证数据量恒定,
+        // 目标行必在首屏可视区内 —— 委托没被创建时点击探针会找不到元素。
+        const QVariantMap pre = core.call("todo_list", QVariantMap{{"done", "all"}});
+        for (const QVariant& v : pre.value("data").toMap().value("items").toList()) {
+            const QVariantMap m = v.toMap();
+            if (m.value("textContent").toString().startsWith(QStringLiteral("验收-")))
+                core.call("delete_entry", QVariantMap{{"id", m.value("id").toString()}});
+        }
+        auto create = [&core](const QString& text, bool done) {
+            const QVariantMap r = core.call("todo_create", QVariantMap{{"text", text}});
+            if (!r.value("ok").toBool()) return false;
+            const QString id = r.value("data").toMap().value("id").toString();
+            if (!done || id.isEmpty()) return !done;
+            const QVariantMap d = core.call("todo_set_done", QVariantMap{{"id", id}, {"done", true}});
+            return d.value("ok").toBool();
+        };
+        const bool seeded = create(QStringLiteral("验收-已完成A"), true)
+                            && create(QStringLiteral("验收-已完成B"), true)
+                            && create(QStringLiteral("验收-未完成C"), false);
+        qInfo() << "CLEAR-DONE STEP1 seeded:" << seeded;
+
+        panel.invokeAcceptance("acceptanceShowTodoGroups");   // 切待办视图(入口只在待办视图出现)
+        QTimer::singleShot(900, &panel, [&panel] {
+            const QVariantMap st = panel.rootProperty("acceptanceState").toMap();
+            qInfo() << "CLEAR-DONE STEP2 viewId:" << st.value("viewId").toString()
+                    << "rowGroups:" << st.value("rowGroups").toString();
+            // 真实点击「已完成」组头的清空入口(委托内元素,靠 objectName 递归找)
+            const bool clickedLink = panel.clickByObjectName(QStringLiteral("clearDoneLink"));
+            qInfo() << "CLEAR-DONE STEP3 clickedLink:" << clickedLink;
+            QTimer::singleShot(500, &panel, [&panel] {
+                const QVariantMap st2 = panel.rootProperty("acceptanceState").toMap();
+                qInfo() << "CLEAR-DONE STEP4 confirmCardVisible:"
+                        << st2.value("clearDoneVisible").toBool();
+                const bool clickedConfirm =
+                    panel.clickByObjectName(QStringLiteral("clearDoneConfirm"));
+                qInfo() << "CLEAR-DONE STEP5 clickedConfirm:" << clickedConfirm;
+                QTimer::singleShot(900, &panel, [&panel] {
+                    const QVariantMap resp = CoreFacade::instance().call(
+                        "todo_list", QVariantMap{{"done", "all"}});
+                    const QVariantList items =
+                        resp.value("data").toMap().value("items").toList();
+                    int doneLeft = 0, openKept = 0;
+                    for (const QVariant& v : items) {
+                        const QVariantMap m = v.toMap();
+                        if (m.value("todo").toMap().value("done").toBool()) ++doneLeft;
+                        else if (m.value("textContent").toString()
+                                 == QStringLiteral("验收-未完成C")) ++openKept;
+                    }
+                    qInfo() << "CLEAR-DONE STEP6 doneLeft:" << doneLeft
+                            << "openKept:" << (openKept > 0)
+                            << "| 判据:doneLeft==0 且 openKept==true";
+                    QApplication::quit();
+                });
+            });
+        });
+    });
+}
+
 void reportTodoGroups(PanelWindow& panel) {
     // 只读自检:切待办视图 → 读回各行分组键。配合"脚本先播种各分组待办"使用,
     // 断言组标题的分界点(键序变化处即标题出现处)。

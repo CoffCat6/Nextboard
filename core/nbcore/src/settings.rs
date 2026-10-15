@@ -51,8 +51,6 @@ pub struct Settings {
     pub max_text_kb: i64,
     /// 全局快捷键表（Phase 5 F15）。
     pub hotkeys: HotkeyMap,
-    /// 开机自启（M3 生效）。
-    pub auto_start: bool,
     /// 暂停/恢复剪贴板监听。
     pub monitor_enabled: bool,
     /// 界面主题。
@@ -92,7 +90,7 @@ pub struct Settings {
     /// 延时截图等待秒数（托盘「延时截图」入口用；1~10，默认 3）。
     /// 用途：先按下入口，再去展开菜单/等悬浮提示出现，倒计时结束才开始框选。
     pub capture_delay_secs: i64,
-    /// 截图遮罩的**空闲超时**秒数（默认 600 = 10 分钟；0 = 不自动取消）。
+    /// 截图遮罩的**空闲超时**秒数（默认 60 秒；0 = 不自动取消）。
     ///
     /// 动机（内存）：框选遮罩持有该屏的整屏冻结底图（4K 约 33MB），会话期常驻。
     /// 若用户触发截图后离开，底图会无限期占着内存；超过本时长无任何鼠标/键盘
@@ -379,7 +377,6 @@ impl Default for Settings {
             max_image_mb: 20,
             max_text_kb: 1024,
             hotkeys: HotkeyMap::default(),
-            auto_start: false,
             monitor_enabled: true,
             theme: "system".into(),
             data_dir: String::new(),

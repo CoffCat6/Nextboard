@@ -143,7 +143,6 @@ public:
 signals:
     /// nbcore 通知(剪贴板/设置变化)→ QML Connections 订阅。
     void clipChanged();
-    void settingsChanged();
     void translateFinished(QVariantMap resp);
     /// 翻译服务探测结果(provider/available/message)。
     void translateProbeFinished(QVariantMap resp);
@@ -169,7 +168,6 @@ signals:
 public:
     /// PanelWindow::nativeEvent 转发 nbcore WM_APP 通知(刷新去抖由模型侧负责)。
     void notifyClipChanged() { emit clipChanged(); }
-    void notifySettingsChanged() { emit settingsChanged(); }
 
 private:
     CoreFacade() = default;

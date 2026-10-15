@@ -2,6 +2,7 @@
 #pragma once
 
 #include <QObject>
+#include <QStringList>
 
 #include <windows.h>
 
@@ -35,7 +36,8 @@ signals:
     void hotkeyFired(int id);
 
 public slots:
-    /// 从 nbcore 设置读取 hotkeys 表并注册;失败的动作记日志不阻塞。
+    /// 从 nbcore 设置读取 hotkeys 表并注册;失败的动作不影响其他动作,
+    /// 但会汇总成一条 toast 告知用户(否则"设置成功"的假象无人察觉)。
     void applyFromSettings();
 
 private:
@@ -51,6 +53,8 @@ private:
     // hotkey id 从 1 递增;key = 注册 id,value = action
     QMap<int, Action> m_registered;
     int m_nextId = 1;
+    /// 本轮 applyFromSettings 的失败项("组合键(原因)"),轮末汇总提示后清空。
+    QStringList m_failures;
 };
 
 } // namespace nb

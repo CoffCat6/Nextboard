@@ -421,14 +421,15 @@ QVariantMap ClipEntryModel::todoMeta(const QString& id) {
     return out;
 }
 
-void ClipEntryModel::todoClearDone() {
+bool ClipEntryModel::todoClearDone() {
     const QVariantMap resp = CoreFacade::instance().call("todo_clear_done", {});
     if (!resp.value("ok").toBool()) {
         emit toast(QStringLiteral("清空已完成失败:%1").arg(
             resp.value("error").toMap().value("message").toString()));
-        return;
+        return false;
     }
     reload(m_limit);
+    return true;
 }
 
 int ClipEntryModel::indexOfId(const QString& id) const {

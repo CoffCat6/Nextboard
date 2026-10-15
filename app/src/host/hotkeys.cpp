@@ -139,6 +139,7 @@ void Hotkeys::applyFromSettings() {
     // 新 id,不清理的话旧组合键会一直留在系统里(改了等于没改,还多占一个组合键)。
     for (int id : m_registered.keys()) ::UnregisterHotKey(nullptr, id);
     m_registered.clear();
+    m_failures.clear();
 
     const QJsonObject resp = m_core.call("get_settings");
     const QJsonObject hotkeys = resp.value("data").toObject().value("hotkeys").toObject();
@@ -156,16 +157,24 @@ void Hotkeys::applyFromSettings() {
         const QString combo = hotkeys.value(it.value()).toString();
         if (!combo.isEmpty()) registerAction(it.key(), combo);
     }
+    // 注册失败/格式非法不能只进日志:用户刚在设置里改完,不提示就会以为已生效
+    // (冲突回滚语义保持:失败项不影响其余动作,只是明确告诉用户哪几个没成)。
+    if (!m_failures.isEmpty()) {
+        CoreFacade::instance().showToast(
+            QStringLiteral("快捷键不可用:%1").arg(m_failures.join(QStringLiteral("、"))));
+    }
 }
 
 void Hotkeys::registerAction(Action action, const QString& combo) {
     UINT mods = 0, vk = 0;
     if (!parseCombo(combo, &mods, &vk)) {
+        m_failures.append(QStringLiteral("%1(格式非法)").arg(combo));
         qWarning() << "热键格式非法,跳过:" << combo;
         return;
     }
     const int id = kHotkeyIdBase + m_nextId++;
     if (!::RegisterHotKey(nullptr, id, mods, vk)) {
+        m_failures.append(QStringLiteral("%1(被其他程序占用)").arg(combo));
         qWarning() << "热键注册失败(可能被占用):" << combo << "GetLastError =" << ::GetLastError();
         return; // 冲突回滚语义:该动作不可用,不影响其他动作(第一代 hotkey.rs)
     }

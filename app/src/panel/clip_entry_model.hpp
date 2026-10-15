@@ -130,8 +130,8 @@ public:
     ///    QML 逐行算会与委托复用状态纠缠(复用会跨行串味),这里按行号现算,
     ///    与 core §5 的排序口径同源(逾期>今日>未来>无期限,归档垫底)。
     Q_INVOKABLE QString rowGroupKey(int row) const;
-    /// 清空已完成的待办(归档清理)。
-    Q_INVOKABLE void todoClearDone();
+    /// 清空已完成的待办(归档清理);成功返回 true(失败已发 toast)。
+    Q_INVOKABLE bool todoClearDone();
     /// 面板**隐藏**时调用:清空全部行 —— QML 侧委托随之销毁,图片纹理一并释放;
     /// 期间拒绝一切刷新,避免隐藏时又被剪贴板通知填满(内存收口 S6.1/S6.3)。
     Q_INVOKABLE void release();

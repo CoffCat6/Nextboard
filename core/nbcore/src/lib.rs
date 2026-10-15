@@ -18,7 +18,6 @@ pub mod core;
 pub mod error;
 pub mod ffi;
 pub mod ocr;
-pub mod screen;
 pub mod settings;
 pub mod store;
 pub mod todo;
