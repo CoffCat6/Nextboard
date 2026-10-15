@@ -105,7 +105,7 @@ pub struct Settings {
     pub software_render: bool,
     /// OCR 语言：`auto`（默认，按 zh-Hans-CN → en-US → 用户配置语言）/ 指定语言标签如 `en-US`。
     pub ocr_language: String,
-    /// OCR 后端：`system`（默认，Windows 内置离线引擎）/ `tesseract`（需自行安装并保证在 PATH）。
+    /// OCR 后端：仅 `system`（默认，Windows 内置离线引擎，别名 `windows`）。
     pub ocr_backend: String,
     /// OCR 放大倍数（1~4）：小字号截图放大后再识别可显著提升准确率，默认 2。
     pub ocr_scale: i64,
@@ -507,10 +507,10 @@ impl Settings {
         // OCR：后端枚举 + 语言标签格式 + 放大倍数范围
         if !matches!(
             self.ocr_backend.trim().to_ascii_lowercase().as_str(),
-            "" | "system" | "windows" | "tesseract"
+            "" | "system" | "windows"
         ) {
             return Err(AppError::InvalidInput(
-                "OCR 后端只支持 system（内置）或 tesseract".into(),
+                "OCR 后端只支持 system（内置离线引擎）".into(),
             ));
         }
         let language = self.ocr_language.trim();
@@ -854,6 +854,7 @@ pub fn load(data_dir: &Path) -> AppResult<Settings> {
     migrate_legacy_hotkeys(&mut value);
     migrate_legacy_proxy(&mut value);
     repair_blank_microsoft_endpoint(&mut value);
+    repair_removed_ocr_backend(&mut value);
     Ok(serde_json::from_value(value).unwrap_or_else(|err| {
         push_load_warning(format!("配置字段解析失败,已回退默认设置: {err}"));
         Settings::default()
@@ -886,6 +887,35 @@ fn repair_blank_microsoft_endpoint(value: &mut serde_json::Value) {
             serde_json::Value::String(crate::translate::microsoft::DEFAULT_ENDPOINT.into()),
         );
     }
+}
+
+/// 已移除 OCR 后端的配置修复：`ocrBackend` 不是当前支持的值时归一为 `system`。
+///
+/// 背景：Tesseract 后端要求用户自行安装并放进 PATH，而设置页从未提供后端选择器，
+/// 只有手改 settings.json 才可能留下 `"tesseract"`。归一必须在**加载时**做：
+/// 设置抽屉保存时回传的是整份已加载对象（`SettingsDrawer.qml` 的 `const s = cur.data`），
+/// 留着这个值会让 `validate()` 拒绝**任何一次保存**，而报错指向用户从未碰过的字段。
+fn repair_removed_ocr_backend(value: &mut serde_json::Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    let Some(current) = obj.get("ocrBackend").and_then(|node| node.as_str()) else {
+        return;
+    };
+    let current = current.trim().to_owned();
+    if matches!(
+        current.to_ascii_lowercase().as_str(),
+        "" | "system" | "windows"
+    ) {
+        return;
+    }
+    push_load_warning(format!(
+        "OCR 后端「{current}」已不再支持，已改用系统内置引擎（system）"
+    ));
+    obj.insert(
+        "ocrBackend".into(),
+        serde_json::Value::String("system".into()),
+    );
 }
 
 /// 旧代理配置迁移（Phase 8）：单串 `translateProxy` → 结构化 `proxy`。
@@ -1311,9 +1341,10 @@ mod tests {
         };
         // 合法组合
         assert!(with("system", "auto", 2).validate().is_ok());
-        assert!(with("tesseract", "en-US", 1).validate().is_ok());
-        // 后端只接受枚举值
+        assert!(with("windows", "en-US", 1).validate().is_ok());
+        // 后端只接受枚举值；已移除的外部后端不得再被接受（旧配置由 Backend::parse 回退）
         assert!(with("paddle", "auto", 2).validate().is_err());
+        assert!(with("tesseract", "auto", 2).validate().is_err());
         // 语言标签格式非法（含空格/符号）
         assert!(with("system", "zh Hans", 2).validate().is_err());
         // 放大倍数范围
@@ -1654,6 +1685,42 @@ mod tests {
         .unwrap();
         let settings = load(&root).unwrap();
         assert_eq!(settings.translate_microsoft.endpoint, "https://my.example/tr");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn load_repairs_removed_ocr_backend() {
+        let root = crate::settings::tests::tmp_dir("ocrbackend");
+        std::fs::create_dir_all(&root).unwrap();
+
+        // 已移除的后端（只有手改 settings.json 才可能出现）→ 加载时归一并留痕。
+        // 不归一的话，抽屉保存时回传整份对象会被 validate() 拒绝，任何设置都存不下去。
+        std::fs::write(
+            root.join(CONFIG_FILE),
+            r#"{"settings":{"ocrBackend":"tesseract"}}"#,
+        )
+        .unwrap();
+        let settings = load(&root).unwrap();
+        assert_eq!(settings.ocr_backend, "system", "已移除的后端应归一到内置引擎");
+        assert!(
+            settings.validate().is_ok(),
+            "归一后整份设置必须仍可保存（这正是归一的目的）"
+        );
+        assert!(
+            crate::settings::take_warnings()
+                .iter()
+                .any(|warn| warn.contains("tesseract")),
+            "静默改写用户配置不可接受，须在可见警告里留痕"
+        );
+
+        // 合法别名不得被改写
+        std::fs::write(
+            root.join(CONFIG_FILE),
+            r#"{"settings":{"ocrBackend":"windows"}}"#,
+        )
+        .unwrap();
+        assert_eq!(load(&root).unwrap().ocr_backend, "windows");
 
         let _ = std::fs::remove_dir_all(&root);
     }

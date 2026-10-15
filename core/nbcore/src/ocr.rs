@@ -68,14 +68,12 @@ impl Preprocess {
 
 /// OCR 后端选择（Phase 6 增强，可自定义）。
 ///
-/// 系统内置引擎开箱即用但小字号/等宽字体存在固有混淆（见 `docs/phase6.md` §3.6 实测）；
-/// 需要更高精度时可切到 Tesseract（需用户自行安装并把 `tesseract` 放进 PATH）。
+/// 目前仅有系统内置引擎：开箱即用、零依赖，但小字号/等宽字体存在固有混淆
+/// （见 `docs/phase6.md` §3.6 实测）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
     /// Windows 内置 OCR（离线、零依赖）。
     System,
-    /// 外部 Tesseract 进程（需自行安装）。
-    Tesseract,
 }
 
 impl Backend {
@@ -83,7 +81,6 @@ impl Backend {
     pub fn parse(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "" | "system" | "windows" => Backend::System,
-            "tesseract" => Backend::Tesseract,
             other => {
                 warn!("未知 OCR 后端「{other}」，回退系统内置引擎");
                 Backend::System
@@ -139,9 +136,6 @@ pub fn recognize_configured(
         Backend::System => {
             recognize_with(rgba, width, height, &options.language, options.preprocess)
         }
-        Backend::Tesseract => {
-            tesseract::recognize(rgba, width, height, &options.language, options.preprocess)
-        }
     }
 }
 
@@ -149,9 +143,9 @@ pub fn recognize_configured(
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OcrProbe {
-    /// 探测的后端标识（`system` / `tesseract`）。
+    /// 探测的后端标识（`system`）。
     pub backend: String,
-    /// 该后端是否可用（Tesseract 未安装时为 false）。
+    /// 该后端是否可用（未装系统 OCR 语言包时为 false）。
     pub available: bool,
     /// 该后端可用的语言标签列表。
     pub languages: Vec<String>,
@@ -161,7 +155,6 @@ pub struct OcrProbe {
 pub fn probe(backend: Backend) -> OcrProbe {
     let (name, available) = match backend {
         Backend::System => ("system", !languages(Backend::System).is_empty()),
-        Backend::Tesseract => ("tesseract", tesseract::available()),
     };
     OcrProbe {
         backend: name.to_owned(),
@@ -183,120 +176,6 @@ pub fn languages(backend: Backend) -> Vec<String> {
                 Vec::new()
             }
         }
-        Backend::Tesseract => tesseract::languages(),
-    }
-}
-
-/// Tesseract 外部进程后端：约定 `tesseract` 在 PATH 中（`tesseract --version` 可用）。
-mod tesseract {
-    use super::*;
-
-    /// 是否检测到 tesseract 可执行文件。
-    pub fn available() -> bool {
-        std::process::Command::new("tesseract")
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    }
-
-    /// 已安装的语言包（`tesseract --list-langs` 的第二行起）。
-    pub fn languages() -> Vec<String> {
-        let Ok(output) = std::process::Command::new("tesseract")
-            .arg("--list-langs")
-            .output()
-        else {
-            return Vec::new();
-        };
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .skip(1)
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(str::to_owned)
-            .collect()
-    }
-
-    /// 语言标签映射：`zh-Hans-CN` → `chi_sim`、`en-US` → `eng`（Tesseract 命名不同）。
-    fn to_tesseract_lang(choice: &LanguageChoice) -> Option<String> {
-        let tag = match choice {
-            LanguageChoice::Auto => return Some("chi_sim+eng".to_owned()),
-            LanguageChoice::Fixed(tag) => tag.as_str(),
-        };
-        let lower = tag.to_ascii_lowercase();
-        let mapped = if lower.starts_with("zh") {
-            "chi_sim"
-        } else if lower.starts_with("en") {
-            "eng"
-        } else if lower.starts_with("ja") {
-            "jpn"
-        } else if lower.starts_with("ko") {
-            "kor"
-        } else {
-            return Some(tag.to_owned());
-        };
-        Some(mapped.to_owned())
-    }
-
-    pub(super) fn recognize(
-        rgba: Vec<u8>,
-        width: u32,
-        height: u32,
-        language: &LanguageChoice,
-        options: Preprocess,
-    ) -> AppResult<String> {
-        if !available() {
-            return Err(AppError::InvalidInput(
-                "未找到 tesseract 可执行文件：请安装 Tesseract OCR 并将其加入 PATH（或在设置中切回系统内置引擎）".into(),
-            ));
-        }
-        if width == 0 || height == 0 {
-            return Err(AppError::InvalidInput("图片尺寸为空，无法识别".into()));
-        }
-        // Tesseract 接受 PNG；复用统一的放大/二值预处理
-        let (pixels, pw, ph) = apply_preprocess(rgba, width, height, options)?;
-        let image = image::RgbaImage::from_raw(pw, ph, pixels)
-            .ok_or_else(|| AppError::Internal("预处理后图像重建失败".into()))?;
-        let mut png = Vec::new();
-        image::DynamicImage::ImageRgba8(image)
-            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)?;
-
-        let dir = std::env::temp_dir();
-        let stem = format!("cp-ocr-{}", uuid::Uuid::now_v7());
-        let input = dir.join(format!("{stem}.png"));
-        let output_base = dir.join(&stem);
-        std::fs::write(&input, &png)?;
-
-        let lang = to_tesseract_lang(language).unwrap_or_else(|| "eng".to_owned());
-        let result = std::process::Command::new("tesseract")
-            .arg(&input)
-            .arg(&output_base)
-            .arg("-l")
-            .arg(&lang)
-            .output();
-        let _ = std::fs::remove_file(&input);
-
-        let output = match result {
-            Ok(output) => output,
-            Err(err) => {
-                let _ = std::fs::remove_file(output_base.with_extension("txt"));
-                return Err(AppError::Internal(format!("调用 tesseract 失败: {err}")));
-            }
-        };
-        let text_path = output_base.with_extension("txt");
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-            let _ = std::fs::remove_file(&text_path);
-            return Err(AppError::Internal(format!(
-                "tesseract 识别失败（语言 {lang}）：{stderr}"
-            )));
-        }
-        let text = std::fs::read_to_string(&text_path).unwrap_or_default();
-        let _ = std::fs::remove_file(&text_path);
-        info!("OCR(tesseract) 完成：{pw}x{ph}，语言 {lang}");
-        Ok(text.trim_end().to_owned())
     }
 }
 
@@ -320,7 +199,7 @@ fn effective_scale(width: u32, height: u32, requested: u32) -> u32 {
     requested.min(max_scale)
 }
 
-/// 统一预处理（两个后端共用）：放大 + 可选 Otsu 二值化。返回 (RGBA, w, h)。
+/// 统一预处理：放大 + 可选 Otsu 二值化。返回 (RGBA, w, h)。
 ///
 /// 收 **owned** 缓冲：不处理时直接沿用（零拷贝），需要处理时也只在必要时新建 ——
 /// 调用方（`ocr_entry`）本就不再需要原始像素。
@@ -692,8 +571,7 @@ mod tests {
         // 后端：大小写/别名容错，未知值回退系统引擎
         assert_eq!(Backend::parse("system"), Backend::System);
         assert_eq!(Backend::parse("WINDOWS"), Backend::System);
-        assert_eq!(Backend::parse("tesseract"), Backend::Tesseract);
-        assert_eq!(Backend::parse("  Tesseract "), Backend::Tesseract);
+        assert_eq!(Backend::parse("  windows "), Backend::System);
         assert_eq!(Backend::parse("paddle"), Backend::System);
         // 语言：空/auto 走自动链，其余为固定标签
         assert_eq!(LanguageChoice::parse(""), LanguageChoice::Auto);
@@ -774,21 +652,19 @@ mod tests {
         assert_eq!(out.len(), (w * h * 4) as usize);
     }
 
-    /// OCR 后端探测（诊断用）：打印两种后端在本机的可用性与语言列表。
+    /// OCR 后端探测（诊断用）：打印内置引擎在本机的可用性与语言列表。
     ///
     /// `cargo test -- --ignored --nocapture ocr_probe_backends`
     #[test]
     #[ignore = "依赖本机环境，按需显式运行以诊断 OCR 后端可用性"]
     fn ocr_probe_backends() {
-        for backend in [Backend::System, Backend::Tesseract] {
-            let result = probe(backend);
-            println!(
-                "后端 {} 可用={} 语言=[{}]",
-                result.backend,
-                result.available,
-                result.languages.join(", ")
-            );
-        }
+        let result = probe(Backend::System);
+        println!(
+            "后端 {} 可用={} 语言=[{}]",
+            result.backend,
+            result.available,
+            result.languages.join(", ")
+        );
     }
 
     /// 真机质量回归：`OCR_CODE_SAMPLE` 指向等宽代码截图时，断言默认预处理（放大 2 倍）
