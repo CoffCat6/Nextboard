@@ -1,11 +1,11 @@
-// 自动化验收:待办交互链路的**真实点击**驱动(仅 --todo-flow / --clear-done-flow 使用)。
+// 自动化验收:待办 / 设置交互链路的**真实点击/按键**驱动
+// (仅 --todo-flow / --clear-done-flow / --settings-flow 使用)。
 //
 // 为什么单独成文件:这段逻辑有 ~100 行、只在验收时跑,留在 main.cpp 里会
 // 把产品入口(参数解析/窗口装配/信号接线)淹没;抽出来也让"哪些代码是验收
 // 专用"一目了然。
 //
-// ⚠️ 本文件只被 main.cpp 的 --todo-flow / --clear-done-flow 分支调用,
-//    不进产品交互路径。
+// ⚠️ 本文件只被 main.cpp 的 --*-flow 分支调用,不进产品交互路径。
 //    移除方式:删本对文件 + main.cpp 的对应分支 + Main.qml 的
 //    acceptance* 成员 + PanelWindow 的验收钩子(见 panel_window.hpp 注释)。
 #pragma once
@@ -26,6 +26,15 @@ void runTodoAcceptanceFlow(PanelWindow& panel);
 /// 读库断言"归档清空 + 未完成不受影响"。日志前缀 CLEAR-DONE STEP*。
 /// ⚠️ 会写库(创建/删除待办),必须配 --data-dir(与 --todo-flow 同一门禁)。
 void runClearDoneFlow(PanelWindow& panel);
+
+/// 设置抽屉交互验收(--settings-flow),回归三类用户实测缺陷:
+///   ① 手输数值不保存 —— 点 SpinBox → 键入 "999" + 回车 → get_settings 读回;
+///   ② 抽屉不挡主界面 / 只能滑到顶关闭 —— 滚到底后点 ✕(固定头部)、
+///      点抽屉外的列表卡片(应被吞掉:抽屉关、面板不隐藏、剪贴板不变)、Esc;
+///   ③ 零待办时「待办」页签被藏 —— 读回页签可见性 + 真实点击切换视图。
+/// 日志前缀 SETTINGS STEP*。会写库(save_text_entry 播种)与 settings(historyLimit),
+/// 必须配 --data-dir(与 --todo-flow 同一门禁)。
+void runSettingsFlow(PanelWindow& panel);
 
 /// 只做一件事:切到待办视图并把各行分组键打出来(STEP5 的自检独立入口)。
 /// 供"先用脚本播种各种分组的待办,再校验组标题分界点"使用 ——

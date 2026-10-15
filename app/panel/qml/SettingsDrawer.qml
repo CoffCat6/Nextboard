@@ -88,7 +88,14 @@ AppDrawer {
             verticalAlignment: TextInput.AlignVCenter
             readOnly: !parent.editable
             selectByMouse: true
-            onEditingFinished: parent.value = parent.valueFromText(text, parent.locale)
+            // ⚠️ 这里**不要**写 `onEditingFinished: parent.value = valueFromText(...)`。
+            //    手输提交由 QQuickSpinBox 原生路径负责(回车键释放 / 失焦 →
+            //    updateValue),它以 modified=true 提交并发射 valueModified,自动保存
+            //    才被触发;QML 侧的程序化赋值会抢先写入同一个值,原生路径随后
+            //    认为"值没变"而不再发射 valueModified —— 保存被静默吞掉
+            //    (qquickspinbox.cpp:setValue 的 modified 标志仅在
+            //    value != correctedValue 时才发 valueModified)。实测症状:手输数值
+            //    关掉抽屉再打开又变回去,只有 +/- 加减能保存。
         }
         background: Rectangle {
             color: Theme.colors.surface
@@ -271,6 +278,14 @@ AppDrawer {
     function isHexColor(value) {
         return /^#[0-9a-fA-F]{6}$/.test(value)
     }
+
+    /// 验收专用:滚到设置内容底部(--settings-flow 验证"滚动后关闭按钮仍可点")。
+    function scrollToBottom() {
+        flick.contentY = Math.max(0, flick.contentHeight - flick.height)
+    }
+
+    /// 验收专用:读回滚动位置(>0 = 确实滚过了)。
+    readonly property real acceptanceScrollY: flick.contentY
 
     function openAndLoad() {
         open()
@@ -497,820 +512,833 @@ AppDrawer {
         statusLabel.isError = false
     }
 
-    contentItem: Flickable {
-        id: flick
-        clip: true
-        contentWidth: width
-        contentHeight: form.implicitHeight + 12
-        boundsBehavior: Flickable.StopAtBounds
-        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+    contentItem: ColumnLayout {
+        spacing: 0
 
-        ColumnLayout {
-            id: form
-            width: flick.width
-            spacing: Theme.metrics.spacingXs
-
-            RowLayout {
-                Layout.fillWidth: true
-                Label {
-                    text: "设置"; font.pixelSize: Theme.metrics.fontPageTitle
-                    font.weight: Font.DemiBold; color: Theme.colors.textPrimary
-                }
-                Item { Layout.fillWidth: true }
-                ThemedButton {
-                    variant: "ghost"
-                    square: true
-                    text: "✕"
-                    Layout.alignment: Qt.AlignVCenter
-                    onClicked: root.close()
-                }
-            }
-
-            Label { text: "历史上限(条)"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
-            ReadableSpinBox {
-                id: historyLimit
-                Layout.fillWidth: true
-                from: 100; to: 100000; stepSize: 500
-                editable: true
-                onValueModified: root.scheduleSave()
-            }
-
-            Label { text: "单张图片上限(MB)"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
-            ReadableSpinBox {
-                id: maxImage
-                Layout.fillWidth: true
-                from: 1; to: 200
-                editable: true
-                onValueModified: root.scheduleSave()
-            }
-
-            ReadableCheckBox {
-                id: monitorCheck
-                text: "剪贴板监听"
-                onClicked: root.scheduleSave()
-            }
-            // 取消勾选后,框选截图会先进编辑器标注,「完成」才入库 + 写剪贴板
-            ReadableCheckBox {
-                id: skipEditorCheck
-                text: "截图后直接入库(跳过编辑器)"
-                onClicked: root.scheduleSave()
-            }
-            // 取消勾选后,选区保留并可拖 8 向手柄微调,Enter 或双击才确认
-            ReadableCheckBox {
-                id: autoConfirmCheck
-                text: "框选后松开鼠标即确认"
-                onClicked: root.scheduleSave()
-            }
-            ReadableCheckBox {
-                id: rightClickCancelCheck
-                text: "框选时鼠标右键取消截图"
-                onClicked: root.scheduleSave()
-            }
-
-            // 延时截图(F16):托盘「延时截图」入口的等待秒数
-            Label { text: "延时截图等待(秒)"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
-            ReadableSpinBox {
-                id: captureDelay
-                Layout.fillWidth: true
-                from: 1; to: 10
-                editable: true
-                onValueModified: root.scheduleSave()
-            }
-
-            // 内存收口(S6.1):框选遮罩持有该屏的整屏冻结底图(4K 约 33MB),
-            // 用户触发截图后离开会一直占着 —— 超时无任何鼠标/键盘操作即自动取消。
-            Label { text: "遮罩空闲超时(分钟,0=不自动取消)"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
-            ReadableSpinBox {
-                id: overlayIdle
-                Layout.fillWidth: true
-                from: 0; to: 60
-                editable: true
-                onValueModified: root.scheduleSave()
-            }
-
-            Label { text: "主题"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
-            ReadableComboBox {
-                id: themeCombo
-                Layout.fillWidth: true
-                model: ["跟随系统", "浅色", "深色"]
-                // 切换即生效(不必等保存),给用户即时反馈
-                onActivated: {
-                    Core.applyTheme(["system", "light", "dark"][currentIndex])
-                    root.scheduleSave()
-                }
-            }
-
-            // ---- 分组:数据(§10 分组标题 + Border Subtle 分隔线) ----
-            component SectionDivider: Rectangle {
-                Layout.fillWidth: true
-                Layout.topMargin: Theme.metrics.spacingMd
-                implicitHeight: Theme.metrics.borderWidth
-                color: Theme.colors.border
-            }
-            component SectionTitle: Label {
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.metrics.fontSection
-                font.weight: Font.DemiBold
-                color: Theme.colors.textPrimary
-                Layout.topMargin: Theme.metrics.spacingXs
-            }
-            component FieldLabel: Label {
-                // 字段标签是与控件直接交互的引导文字,暗色下用 Secondary 的提亮值
-                font.family: Theme.fontFamily
-                color: Theme.colors.textSecondary
-                font.pixelSize: Theme.metrics.fontCaption
-            }
-            component HintLabel: Label {
-                Layout.fillWidth: true
-                // 说明文字较长,是"看不清"的重灾区:暗色下改用 Secondary(提亮档)
-                font.family: Theme.fontFamily
-                color: Theme.colors.textSecondary
-                font.pixelSize: Theme.metrics.fontCaption
-                wrapMode: Text.WrapAnywhere
-            }
-
-            SectionDivider {}
-            SectionTitle { text: "数据" }
-            // 渲染后端(重启生效):软件(CPU 光栅)是**默认**——实测比硬件(D3D11)
-            // 省 ~55MB 首帧 / ~101MB 稳态(隐藏态 231MB → 130MB),代价是渲染改由
-            // CPU 承担(滚动/动画)。显卡充足且更在意跟手感的用户可关掉它。
-            ReadableCheckBox {
-                id: softwareRenderCheck
-                text: "软件渲染(省内存,重启生效)"
-                onClicked: {
-                    root.renderDirty = true
-                    root.scheduleSave()
-                }
-            }
-            HintLabel {
-                text: "默认开启:用 CPU 光栅替代 GPU(D3D11)渲染,约省 100MB 内存;滚动/动画更吃 CPU。关闭后重启生效(也可用 --hardware 启动参数临时切换)。"
-            }
-            ReadableCheckBox {
-                id: autoStartCheck
-                text: "开机自启(写入当前用户注册表 Run 键)"
-                checked: Core.autoStartEnabled()
-                onClicked: {
-                    // 注册表操作立即生效并回读实际结果,失败时还原勾选态并提示原因
-                    if (Core.setAutoStart(checked)) {
-                        checked = Core.autoStartEnabled()
-                    } else {
-                        checked = !checked
-                        Core.showToast("开机自启设置失败:写入注册表被拒绝(可能被安全软件或组策略拦截)")
-                    }
-                }
-            }
-            HintLabel {
-                text: "自定义数据目录(留空 = 默认位置)。变更后重启应用生效:数据库与图片自动迁移到新目录,原目录数据保留。"
-            }
-            ReadableTextField {
-                id: dataDirInput
-                Layout.fillWidth: true
-                placeholderText: "D:\\Data\\Nextboard"
-                onTextEdited: {
-                    root.dataDirDirty = true
-                    root.scheduleSave()
-                }
-            }
-
-            // ---- 备份与导出(手动入口;zip/Markdown 全量 I/O 秒级,走 Core 异步) ----
-            FieldLabel { text: "备份" }
-            HintLabel {
-                text: "打包全部数据(数据库 + 图片)为单个 zip 快照,用于换机或留存。"
-            }
-            ThemedButton {
-                Layout.fillWidth: true
-                variant: "secondary"
-                text: backupRunning ? "备份中…" : "创建备份…"
-                enabled: !backupRunning
-                onClicked: {
-                    const path = Core.saveFileDialog(
-                        "选择备份保存位置",
-                        "备份文件 (*.zip)",
-                        "nextboard-backup-" + new Date().toISOString().slice(0, 10) + ".zip")
-                    if (path === "") return
-                    backupRunning = true
-                    backupHint.text = "正在创建备份…"
-                    backupHint.isError = false
-                    Core.backupCreate(path)
-                }
-            }
-            HintLabel {
-                id: backupHint
-                property bool isError: false
-                color: isError ? Theme.colors.error : Theme.colors.textSecondary
-                wrapMode: Text.WrapAnywhere
-            }
-
-            FieldLabel { text: "导出" }
-            HintLabel {
-                text: "把全部剪贴板历史导出为 Markdown 单文件;图片以 base64 内嵌,可直接在 Typora/Obsidian 等编辑器查看。"
-            }
-            ThemedButton {
-                Layout.fillWidth: true
-                variant: "secondary"
-                text: exportRunning ? "导出中…" : "导出为 Markdown…"
-                enabled: !exportRunning
-                onClicked: {
-                    const path = Core.saveFileDialog(
-                        "选择导出保存位置",
-                        "Markdown (*.md)",
-                        "nextboard-export-" + new Date().toISOString().slice(0, 10) + ".md")
-                    if (path === "") return
-                    exportRunning = true
-                    exportHint.text = "正在导出…"
-                    exportHint.isError = false
-                    Core.exportEntries(path)
-                }
-            }
-            HintLabel {
-                id: exportHint
-                property bool isError: false
-                color: isError ? Theme.colors.error : Theme.colors.textSecondary
-                wrapMode: Text.WrapAnywhere
-            }
-
-            // ---- 贴图 ----
-            SectionDivider {}
-            SectionTitle { text: "贴图" }
-
-            FieldLabel { text: "默认不透明度(%)" }
-            ReadableSpinBox {
-                id: pinOpacity
-                Layout.fillWidth: true
-                from: 30; to: 100; stepSize: 5
-                editable: true
-                onValueModified: root.scheduleSave()
-            }
-            ReadableCheckBox {
-                id: pinDoubleClick
-                text: "双击关闭贴图窗口"
-                onClicked: root.scheduleSave()
-            }
-            ReadableCheckBox {
-                id: pinPreferImage
-                text: "一键贴图 · 图片优先(否则贴最近复制的内容)"
-                onClicked: root.scheduleSave()
-            }
-            HintLabel {
-                text: "关闭(默认):按热键贴出最近复制的文本或图片;开启:只要历史里有图片就贴最近图片,无图时才贴最近文本。"
-            }
-
-            FieldLabel { text: "文本贴图 · 背景色(点色块展开色板)" }
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 6
-                Rectangle {
-                    implicitWidth: 34; implicitHeight: 22; radius: Theme.metrics.radiusBadge
-                    color: root.isHexColor(pinTextBg.text) ? pinTextBg.text : Theme.colors.surfaceSecondary
-                    border.color: root.paletteTarget === "bg" ? Theme.colors.accent : Theme.colors.border
-                    border.width: root.paletteTarget === "bg" ? 2 : Theme.metrics.borderWidth
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.paletteTarget = root.paletteTarget === "bg" ? "" : "bg"
-                    }
-                }
-                ReadableTextField {
-                    id: pinTextBg
-                    Layout.fillWidth: true
-                    placeholderText: "#26272e"
-                    onTextEdited: root.scheduleSave()
-                }
-            }
-            // 就地展开的色板(不用 Popup,原因见 ColorSwatchGrid 注释)
-            ColorSwatchGrid {
-                Layout.fillWidth: true
-                visible: root.paletteTarget === "bg"
-                current: pinTextBg.text
-                onPicked: function(color) {
-                    pinTextBg.text = color
-                    root.paletteTarget = ""
-                    root.scheduleSave()
-                }
-            }
-            FieldLabel { text: "文本贴图 · 文字色(点色块展开色板)" }
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 6
-                Rectangle {
-                    implicitWidth: 34; implicitHeight: 22; radius: Theme.metrics.radiusBadge
-                    color: root.isHexColor(pinTextColor.text) ? pinTextColor.text : Theme.colors.surfaceSecondary
-                    border.color: root.paletteTarget === "color" ? Theme.colors.accent : Theme.colors.border
-                    border.width: root.paletteTarget === "color" ? 2 : Theme.metrics.borderWidth
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.paletteTarget = root.paletteTarget === "color" ? "" : "color"
-                    }
-                }
-                ReadableTextField {
-                    id: pinTextColor
-                    Layout.fillWidth: true
-                    placeholderText: "#dfe1e8"
-                    onTextEdited: root.scheduleSave()
-                }
-            }
-            ColorSwatchGrid {
-                Layout.fillWidth: true
-                visible: root.paletteTarget === "color"
-                current: pinTextColor.text
-                onPicked: function(color) {
-                    pinTextColor.text = color
-                    root.paletteTarget = ""
-                    root.scheduleSave()
-                }
-            }
-            FieldLabel { text: "文本贴图 · 背景不透明度(%)" }
-            ReadableSpinBox {
-                id: pinTextBgOpacity
-                Layout.fillWidth: true
-                from: 0; to: 100; stepSize: 5
-                editable: true
-                onValueModified: root.scheduleSave()
-            }
-            FieldLabel { text: "文本贴图 · 字号(像素)" }
-            ReadableSpinBox {
-                id: pinTextFontSize
-                Layout.fillWidth: true
-                from: 8; to: 96
-                editable: true
-                onValueModified: root.scheduleSave()
-            }
-            FieldLabel { text: "文本贴图 · 最大宽度(像素)" }
-            ReadableSpinBox {
-                id: pinTextMaxWidth
-                Layout.fillWidth: true
-                from: 120; to: 2000; stepSize: 40
-                editable: true
-                onValueModified: root.scheduleSave()
-            }
-
-            // ---- 快捷键 ----
-            SectionDivider {}
-            SectionTitle { text: "快捷键" }
-            HintLabel {
-                text: "点击后按下组合键即可录制。需含至少一个修饰键(Ctrl/Alt/Shift/Win),单按 F1–F24 也可;"
-                      + "按 Delete 清空 = 不绑定该动作。保存后立即生效。"
-            }
-            FieldLabel { text: "呼出/隐藏面板" }
-            HotkeyField {
-                id: hkToggleMain
-                Layout.fillWidth: true
-                onValueModified: {
-                    root.hotkeysDirty = true
-                    root.scheduleSave()
-                }
-            }
-            FieldLabel { text: "矩形截图" }
-            HotkeyField {
-                id: hkCaptureRegion
-                Layout.fillWidth: true
-                onValueModified: {
-                    root.hotkeysDirty = true
-                    root.scheduleSave()
-                }
-            }
-            FieldLabel { text: "全屏截图" }
-            HotkeyField {
-                id: hkCaptureFullscreen
-                Layout.fillWidth: true
-                onValueModified: {
-                    root.hotkeysDirty = true
-                    root.scheduleSave()
-                }
-            }
-            FieldLabel { text: "一键贴图" }
-            HotkeyField {
-                id: hkPinLatest
-                Layout.fillWidth: true
-                onValueModified: {
-                    root.hotkeysDirty = true
-                    root.scheduleSave()
-                }
-            }
-            FieldLabel { text: "打开翻译" }
-            HotkeyField {
-                id: hkOpenTranslate
-                Layout.fillWidth: true
-                onValueModified: {
-                    root.hotkeysDirty = true
-                    root.scheduleSave()
-                }
-            }
-            FieldLabel { text: "截图翻译" }
-            HotkeyField {
-                id: hkCaptureTranslate
-                Layout.fillWidth: true
-                onValueModified: {
-                    root.hotkeysDirty = true
-                    root.scheduleSave()
-                }
-            }
-            FieldLabel { text: "截图取字（入列表）" }
-            HotkeyField {
-                id: hkCaptureOcr
-                Layout.fillWidth: true
-                onValueModified: {
-                    root.hotkeysDirty = true
-                    root.scheduleSave()
-                }
-            }
-            FieldLabel { text: "延时截图" }
-            HotkeyField {
-                id: hkCaptureDelayed
-                Layout.fillWidth: true
-                onValueModified: {
-                    root.hotkeysDirty = true
-                    root.scheduleSave()
-                }
-            }
-
-            // ---- 翻译服务 ----
-            SectionDivider {}
-            SectionTitle { text: "翻译服务" }
-            ReadableComboBox {
-                id: providerCombo
-                Layout.fillWidth: true
-                model: ["微软翻译(免密钥,开箱可用)", "AI 翻译(OpenAI 兼容)", "彩云小译(内置测试 Token)", "自定义 HTTP"]
-                onActivated: root.scheduleSave()
-            }
-
-            // OpenAI 兼容(含国内兼容端点)
-            FieldLabel { text: "接口地址"; visible: root.provider === "openai" }
-            ReadableTextField {
-                id: oaBaseUrl
-                onTextEdited: root.scheduleSave()
-                visible: root.provider === "openai"
-                Layout.fillWidth: true
-                placeholderText: "https://api.openai.com/v1"
-            }
-            FieldLabel { text: "API Key"; visible: root.provider === "openai" }
-            ReadableTextField {
-                id: oaApiKey
-                onTextEdited: root.scheduleSave()
-                visible: root.provider === "openai"
-                Layout.fillWidth: true
-                echoMode: TextInput.Password
-                placeholderText: "sk-…"
-            }
-            FieldLabel { text: "模型"; visible: root.provider === "openai" }
-            ReadableTextField {
-                id: oaModel
-                onTextEdited: root.scheduleSave()
-                visible: root.provider === "openai"
-                Layout.fillWidth: true
-                placeholderText: "gpt-4o-mini"
-            }
-
-            // 微软翻译(免授权端点)
-            HintLabel {
-                visible: root.provider === "microsoft"
-                text: "默认通道:使用 Edge 内置翻译的免授权端点,**无需申请任何密钥**即可翻译。"
-                      + "该端点非微软公开 API(无 SLA),若日后失效,可改下方地址或切到其它通道。"
-            }
-            FieldLabel { text: "接口地址"; visible: root.provider === "microsoft" }
-            ReadableTextField {
-                id: msEndpoint
-                onTextEdited: root.scheduleSave()
-                visible: root.provider === "microsoft"
-                Layout.fillWidth: true
-                placeholderText: "https://edge.microsoft.com/translate"
-            }
-
-            // 彩云小译(内置)
-            HintLabel {
-                visible: root.provider === "caiyun"
-                text: "内置通道:已预填**官方测试 Token**,装上即可试。官方不保证该 Token 的"
-                      + "稳定可用性,持续使用请到彩云科技开放平台申请正式 Token 后替换下方内容"
-                      + "(新用户有 100 万字 / 1 个月免费额度)。"
-            }
-            FieldLabel { text: "访问 Token"; visible: root.provider === "caiyun" }
-            ReadableTextField {
-                id: cyToken
-                onTextEdited: root.scheduleSave()
-                visible: root.provider === "caiyun"
-                Layout.fillWidth: true
-                placeholderText: "3975l6lr5pcbvidl6jl2"
-            }
-            FieldLabel { text: "接口地址"; visible: root.provider === "caiyun" }
-            ReadableTextField {
-                id: cyEndpoint
-                onTextEdited: root.scheduleSave()
-                visible: root.provider === "caiyun"
-                Layout.fillWidth: true
-                placeholderText: "https://api.interpreter.caiyunai.com"
-            }
-
-            // 自定义 HTTP
-            HintLabel {
-                visible: root.provider === "custom"
-                text: "按自己的接口拼请求:下面用占位符描述「发什么」与「从哪取译文」。"
-                      + "占位符 ${text} ${from} ${to} ${apiKey} ${model} 会在发送前替换成实际值"
-                      + "(支持 ${model:-默认值} 写法);未知占位符会直接报错,不会静默留空。"
-            }
-            FieldLabel { text: "请求地址"; visible: root.provider === "custom" }
-            ReadableTextField {
-                id: cuUrl
-                onTextEdited: root.scheduleSave()
-                visible: root.provider === "custom"
-                Layout.fillWidth: true
-                placeholderText: "https://…"
-            }
-            HintLabel {
-                visible: root.provider === "custom"
-                text: "完整接口地址(含查询参数也可以);值里同样可用占位符,会按 URL 编码转义。"
-            }
-            FieldLabel { text: "请求方法"; visible: root.provider === "custom" }
-            ReadableComboBox {
-                id: cuMethod
-                visible: root.provider === "custom"
-                Layout.fillWidth: true
-                model: ["POST", "GET"]
-                onActivated: root.scheduleSave()
-            }
-            FieldLabel { text: "API Key(可选)"; visible: root.provider === "custom" }
-            ReadableTextField {
-                id: cuApiKey
-                onTextEdited: root.scheduleSave()
-                visible: root.provider === "custom"
-                Layout.fillWidth: true
-                echoMode: TextInput.Password
-            }
-            HintLabel {
-                visible: root.provider === "custom"
-                text: "只用于替换 ${apiKey} 占位符,**不会**自动加到请求头 —— 需要哪种鉴权头请自己写在请求头里。"
-            }
-            FieldLabel { text: "模型 / 部署名(可选)"; visible: root.provider === "custom" }
-            ReadableTextField {
-                id: cuModel
-                onTextEdited: root.scheduleSave()
-                visible: root.provider === "custom"
-                Layout.fillWidth: true
-            }
-            HintLabel {
-                visible: root.provider === "custom"
-                text: "只用于替换 ${model} 占位符(Azure 风格接口常把部署名写在地址里)。"
-            }
-            // ---- 请求头(可滚动:内容多时不再被截断) ----
-            FieldLabel { text: "请求头"; visible: root.provider === "custom" }
-            HintLabel {
-                visible: root.provider === "custom"
-                text: "每行一条,格式 Name: Value;值里可用占位符,如 Authorization: Bearer ${apiKey}。"
-            }
-            ScrollView {
-                id: cuHeadersScroll
-                visible: root.provider === "custom"
-                Layout.fillWidth: true
-                Layout.preferredHeight: 84
-                clip: true
-                ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-                background: Rectangle {
-                    color: Theme.colors.surfaceSecondary
-                    radius: Theme.metrics.radiusInput
-                    border.width: Theme.metrics.borderWidth
-                    border.color: cuHeaders.activeFocus ? Theme.colors.accent : Theme.colors.border
-                }
-                TextArea {
-                    id: cuHeaders
-                    onTextEdited: root.scheduleSave()
-                    wrapMode: TextArea.WrapAnywhere
-                    placeholderText: "Content-Type: application/json"
-                    // 技术字段:请求头逐行 "Name: Value",等宽才对齐
-                    font.family: Theme.fontMono
-                    color: Theme.colors.textPrimary
-                    placeholderTextColor: Theme.colors.textTertiary
-                    selectionColor: Theme.colors.accent
-                    selectedTextColor: Theme.colors.accentText
-                    padding: 8
-                }
-            }
-
-            // ---- 请求体模板(可滚动) ----
-            FieldLabel { text: "请求体模板"; visible: root.provider === "custom" }
-            HintLabel {
-                visible: root.provider === "custom"
-                text: "按目标接口的 JSON 结构写,原文放在 ${text} 的位置;"
-                      + "原文里的引号与换行会自动转义,不会破坏 JSON。GET 请求可留空。"
-            }
-            ScrollView {
-                id: cuBodyScroll
-                visible: root.provider === "custom"
-                Layout.fillWidth: true
-                Layout.preferredHeight: 96
-                clip: true
-                ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-                background: Rectangle {
-                    color: Theme.colors.surfaceSecondary
-                    radius: Theme.metrics.radiusInput
-                    border.width: Theme.metrics.borderWidth
-                    border.color: cuBody.activeFocus ? Theme.colors.accent : Theme.colors.border
-                }
-                TextArea {
-                    id: cuBody
-                    onTextEdited: root.scheduleSave()
-                    wrapMode: TextArea.WrapAnywhere
-                    placeholderText: "{\"text\": [\"${text}\"], \"target_lang\": \"${to}\"}"
-                    // 技术字段:JSON 模板,等宽缩进与引号/括号配对最受益
-                    font.family: Theme.fontMono
-                    color: Theme.colors.textPrimary
-                    placeholderTextColor: Theme.colors.textTertiary
-                    selectionColor: Theme.colors.accent
-                    selectedTextColor: Theme.colors.accentText
-                    padding: 8
-                }
-            }
-
-            // ---- 响应取值路径 ----
-            FieldLabel { text: "响应取值路径"; visible: root.provider === "custom" }
-            HintLabel {
-                visible: root.provider === "custom"
-                text: "从响应 JSON 里取译文的路径,用点号与下标逐层往下写。"
-            }
-            ReadableTextField {
-                id: cuPath
-                onTextEdited: root.scheduleSave()
-                visible: root.provider === "custom"
-                Layout.fillWidth: true
-                placeholderText: "如 translations[0].text"
-            }
-            HintLabel {
-                visible: root.provider === "custom"
-                text: "完整示例(以 DeepL 为例):\n"
-                      + "地址 https://api-free.deepl.com/v2/translate\n"
-                      + "请求头 Authorization: DeepL-Auth-Key ${apiKey}\n"
-                      + "请求体 {\"text\":[\"${text}\"],\"target_lang\":\"${to}\"}\n"
-                      + "响应路径 translations[0].text\n"
-                      + "注意:各服务的语言代码写法可能不同(DeepL 用大写 ZH)。"
-                      + "语言代码在翻译窗口顶部可选可改,按服务要求填即可。"
-            }
-
-            FieldLabel { text: "超时(秒)" }
-            ReadableSpinBox {
-                id: timeoutSpin
-                Layout.fillWidth: true
-                from: 5; to: 120
-                editable: true
-                onValueModified: root.scheduleSave()
-            }
-
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: Theme.metrics.spacingSm
-                ThemedButton { variant: "secondary"; text: "测试连接"; onClicked: root.probe() }
-                Item { Layout.fillWidth: true }
-            }
+        // ---- 固定头部:标题 + 关闭(不随内容滚动) ----
+        // ⚠️ 此前这行是 Flickable 内容的第一行:滚到下半页后关闭按钮跟着滚出
+        //    可视区,必须滑回顶部才点得到 ✕(用户实测反馈)。头部独立出来后,
+        //    关闭入口**恒在**;Esc 与点抽屉外也能关(见 AppDrawer 的 closePolicy)。
+        RowLayout {
+            Layout.fillWidth: true
             Label {
-                id: probeLabel
-                property bool isError: false
-                Layout.fillWidth: true
-                color: isError ? Theme.colors.error : Theme.colors.textSecondary
-                font.pixelSize: Theme.metrics.fontCaption
-                wrapMode: Text.WrapAnywhere
+                text: "设置"; font.pixelSize: Theme.metrics.fontPageTitle
+                font.weight: Font.DemiBold; color: Theme.colors.textPrimary
             }
-
-            // ---- 网络与代理 ----
-            // core 的 proxy 校验/分派/proxy_probe 早已就绪,这里只补 UI 入口。
-            // manual 字段始终提交,与 core 一致:仅 mode=manual 时才参与校验与生效。
-            SectionDivider {}
-            SectionTitle { text: "网络与代理" }
-            FieldLabel { text: "代理模式(作用于翻译等网络请求)" }
-            ReadableComboBox {
-                id: proxyModeCombo
-                Layout.fillWidth: true
-                model: ["跟随系统", "直连(不使用代理)", "手动配置"]
-                onActivated: root.scheduleSave()
-            }
-            FieldLabel { text: "协议类型"; visible: root.isProxyManual }
-            ReadableComboBox {
-                id: proxyKindCombo
-                visible: root.isProxyManual
-                Layout.fillWidth: true
-                model: ["HTTP", "SOCKS5"]
-                onActivated: root.scheduleSave()
-            }
-            FieldLabel { text: "服务器地址"; visible: root.isProxyManual }
-            ReadableTextField {
-                id: proxyHost
-                visible: root.isProxyManual
-                Layout.fillWidth: true
-                placeholderText: "127.0.0.1"
-                onTextEdited: root.scheduleSave()
-            }
-            FieldLabel { text: "端口"; visible: root.isProxyManual }
-            ReadableSpinBox {
-                id: proxyPort
-                visible: root.isProxyManual
-                Layout.fillWidth: true
-                from: 0; to: 65535
-                editable: true
-                onValueModified: root.scheduleSave()
-            }
-            FieldLabel { text: "用户名(可选)"; visible: root.isProxyManual }
-            ReadableTextField {
-                id: proxyUser
-                visible: root.isProxyManual
-                Layout.fillWidth: true
-                onTextEdited: root.scheduleSave()
-            }
-            FieldLabel { text: "密码(可选)"; visible: root.isProxyManual }
-            ReadableTextField {
-                id: proxyPassword
-                visible: root.isProxyManual
-                Layout.fillWidth: true
-                echoMode: TextInput.Password
-                onTextEdited: root.scheduleSave()
-            }
-            // SOCKS5 路径(ureq)不支持绕过列表,仅 HTTP 显示该字段(与 core 注释一致)
-            FieldLabel { text: "绕过列表(仅 HTTP,分号分隔)"; visible: root.isProxyManual && proxyKindCombo.currentIndex === 0 }
-            ReadableTextField {
-                id: proxyBypass
-                visible: root.isProxyManual && proxyKindCombo.currentIndex === 0
-                Layout.fillWidth: true
-                placeholderText: "localhost;127.0.0.1;*.internal"
-                onTextEdited: root.scheduleSave()
-            }
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: Theme.metrics.spacingSm
-                ThemedButton { variant: "secondary"; text: "测试代理链路"; onClicked: root.probeProxy() }
-                Item { Layout.fillWidth: true }
-            }
-            Label {
-                id: proxyProbeLabel
-                property bool isError: false
-                Layout.fillWidth: true
-                color: isError ? Theme.colors.error : Theme.colors.textSecondary
-                font.pixelSize: Theme.metrics.fontCaption
-                wrapMode: Text.WrapAnywhere
-            }
-
-            // ---- 危险操作 ----
-            SectionDivider {}
-            SectionTitle { text: "危险操作" }
-            HintLabel {
-                id: clearHint
-                text: Core.counts.all > 0
-                      ? "删除全部 " + Core.counts.all + " 条剪贴板历史(含图片文件),此操作不可恢复。"
-                      : "当前没有历史数据。"
-            }
+            Item { Layout.fillWidth: true }
             ThemedButton {
-                id: clearButton
-                Layout.fillWidth: true
-                variant: "danger"
-                text: "清空历史数据"
-                // 无数据时置灰,避免"点了没反应"的困惑
-                enabled: Core.counts.all > 0
-                onClicked: clearConfirm.visible = true
+                objectName: "settingsClose"   // 验收钩子(--settings-flow 真实点击)
+                variant: "ghost"
+                square: true
+                text: "✕"
+                Layout.alignment: Qt.AlignVCenter
+                onClicked: root.close()
             }
-            // 就地二次确认:破坏性操作必须二次确认,但不弹 Dialog/Popup ——
-            // 外层 SettingsDrawer 本身即 Popup,嵌套弹层有定位/焦点问题
-            // (同 ColorSwatchGrid 的取舍,见上方注释)。
+        }
+
+        Flickable {
+            id: flick
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            clip: true
+            contentWidth: width
+            contentHeight: form.implicitHeight + 12
+            boundsBehavior: Flickable.StopAtBounds
+            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
             ColumnLayout {
-                id: clearConfirm
-                Layout.fillWidth: true
-                visible: false
+                id: form
+                width: flick.width
                 spacing: Theme.metrics.spacingXs
+
+                Label { text: "历史上限(条)"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
+                ReadableSpinBox {
+                    id: historyLimit
+                    objectName: "historyLimitSpin"   // 验收钩子(--settings-flow 手输链路)
+                    Layout.fillWidth: true
+                    from: 100; to: 100000; stepSize: 500
+                    editable: true
+                    onValueModified: root.scheduleSave()
+                }
+
+                Label { text: "单张图片上限(MB)"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
+                ReadableSpinBox {
+                    id: maxImage
+                    Layout.fillWidth: true
+                    from: 1; to: 200
+                    editable: true
+                    onValueModified: root.scheduleSave()
+                }
+
+                ReadableCheckBox {
+                    id: monitorCheck
+                    text: "剪贴板监听"
+                    onClicked: root.scheduleSave()
+                }
+                // 取消勾选后,框选截图会先进编辑器标注,「完成」才入库 + 写剪贴板
+                ReadableCheckBox {
+                    id: skipEditorCheck
+                    text: "截图后直接入库(跳过编辑器)"
+                    onClicked: root.scheduleSave()
+                }
+                // 取消勾选后,选区保留并可拖 8 向手柄微调,Enter 或双击才确认
+                ReadableCheckBox {
+                    id: autoConfirmCheck
+                    text: "框选后松开鼠标即确认"
+                    onClicked: root.scheduleSave()
+                }
+                ReadableCheckBox {
+                    id: rightClickCancelCheck
+                    text: "框选时鼠标右键取消截图"
+                    onClicked: root.scheduleSave()
+                }
+
+                // 延时截图(F16):托盘「延时截图」入口的等待秒数
+                Label { text: "延时截图等待(秒)"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
+                ReadableSpinBox {
+                    id: captureDelay
+                    Layout.fillWidth: true
+                    from: 1; to: 10
+                    editable: true
+                    onValueModified: root.scheduleSave()
+                }
+
+                // 内存收口(S6.1):框选遮罩持有该屏的整屏冻结底图(4K 约 33MB),
+                // 用户触发截图后离开会一直占着 —— 超时无任何鼠标/键盘操作即自动取消。
+                Label { text: "遮罩空闲超时(分钟,0=不自动取消)"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
+                ReadableSpinBox {
+                    id: overlayIdle
+                    Layout.fillWidth: true
+                    from: 0; to: 60
+                    editable: true
+                    onValueModified: root.scheduleSave()
+                }
+
+                Label { text: "主题"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
+                ReadableComboBox {
+                    id: themeCombo
+                    Layout.fillWidth: true
+                    model: ["跟随系统", "浅色", "深色"]
+                    // 切换即生效(不必等保存),给用户即时反馈
+                    onActivated: {
+                        Core.applyTheme(["system", "light", "dark"][currentIndex])
+                        root.scheduleSave()
+                    }
+                }
+
+                // ---- 分组:数据(§10 分组标题 + Border Subtle 分隔线) ----
+                component SectionDivider: Rectangle {
+                    Layout.fillWidth: true
+                    Layout.topMargin: Theme.metrics.spacingMd
+                    implicitHeight: Theme.metrics.borderWidth
+                    color: Theme.colors.border
+                }
+                component SectionTitle: Label {
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.metrics.fontSection
+                    font.weight: Font.DemiBold
+                    color: Theme.colors.textPrimary
+                    Layout.topMargin: Theme.metrics.spacingXs
+                }
+                component FieldLabel: Label {
+                    // 字段标签是与控件直接交互的引导文字,暗色下用 Secondary 的提亮值
+                    font.family: Theme.fontFamily
+                    color: Theme.colors.textSecondary
+                    font.pixelSize: Theme.metrics.fontCaption
+                }
+                component HintLabel: Label {
+                    Layout.fillWidth: true
+                    // 说明文字较长,是"看不清"的重灾区:暗色下改用 Secondary(提亮档)
+                    font.family: Theme.fontFamily
+                    color: Theme.colors.textSecondary
+                    font.pixelSize: Theme.metrics.fontCaption
+                    wrapMode: Text.WrapAnywhere
+                }
+
+                SectionDivider {}
+                SectionTitle { text: "数据" }
+                // 渲染后端(重启生效):软件(CPU 光栅)是**默认**——实测比硬件(D3D11)
+                // 省 ~55MB 首帧 / ~101MB 稳态(隐藏态 231MB → 130MB),代价是渲染改由
+                // CPU 承担(滚动/动画)。显卡充足且更在意跟手感的用户可关掉它。
+                ReadableCheckBox {
+                    id: softwareRenderCheck
+                    text: "软件渲染(省内存,重启生效)"
+                    onClicked: {
+                        root.renderDirty = true
+                        root.scheduleSave()
+                    }
+                }
                 HintLabel {
-                    text: "确认清空全部历史?此操作不可恢复。"
-                    color: Theme.colors.error
+                    text: "默认开启:用 CPU 光栅替代 GPU(D3D11)渲染,约省 100MB 内存;滚动/动画更吃 CPU。关闭后重启生效(也可用 --hardware 启动参数临时切换)。"
+                }
+                ReadableCheckBox {
+                    id: autoStartCheck
+                    text: "开机自启(写入当前用户注册表 Run 键)"
+                    checked: Core.autoStartEnabled()
+                    onClicked: {
+                        // 注册表操作立即生效并回读实际结果,失败时还原勾选态并提示原因
+                        if (Core.setAutoStart(checked)) {
+                            checked = Core.autoStartEnabled()
+                        } else {
+                            checked = !checked
+                            Core.showToast("开机自启设置失败:写入注册表被拒绝(可能被安全软件或组策略拦截)")
+                        }
+                    }
+                }
+                HintLabel {
+                    text: "自定义数据目录(留空 = 默认位置)。变更后重启应用生效:数据库与图片自动迁移到新目录,原目录数据保留。"
+                }
+                ReadableTextField {
+                    id: dataDirInput
+                    Layout.fillWidth: true
+                    placeholderText: "D:\\Data\\Nextboard"
+                    onTextEdited: {
+                        root.dataDirDirty = true
+                        root.scheduleSave()
+                    }
+                }
+
+                // ---- 备份与导出(手动入口;zip/Markdown 全量 I/O 秒级,走 Core 异步) ----
+                FieldLabel { text: "备份" }
+                HintLabel {
+                    text: "打包全部数据(数据库 + 图片)为单个 zip 快照,用于换机或留存。"
+                }
+                ThemedButton {
+                    Layout.fillWidth: true
+                    variant: "secondary"
+                    text: backupRunning ? "备份中…" : "创建备份…"
+                    enabled: !backupRunning
+                    onClicked: {
+                        const path = Core.saveFileDialog(
+                            "选择备份保存位置",
+                            "备份文件 (*.zip)",
+                            "nextboard-backup-" + new Date().toISOString().slice(0, 10) + ".zip")
+                        if (path === "") return
+                        backupRunning = true
+                        backupHint.text = "正在创建备份…"
+                        backupHint.isError = false
+                        Core.backupCreate(path)
+                    }
+                }
+                HintLabel {
+                    id: backupHint
+                    property bool isError: false
+                    color: isError ? Theme.colors.error : Theme.colors.textSecondary
+                    wrapMode: Text.WrapAnywhere
+                }
+
+                FieldLabel { text: "导出" }
+                HintLabel {
+                    text: "把全部剪贴板历史导出为 Markdown 单文件;图片以 base64 内嵌,可直接在 Typora/Obsidian 等编辑器查看。"
+                }
+                ThemedButton {
+                    Layout.fillWidth: true
+                    variant: "secondary"
+                    text: exportRunning ? "导出中…" : "导出为 Markdown…"
+                    enabled: !exportRunning
+                    onClicked: {
+                        const path = Core.saveFileDialog(
+                            "选择导出保存位置",
+                            "Markdown (*.md)",
+                            "nextboard-export-" + new Date().toISOString().slice(0, 10) + ".md")
+                        if (path === "") return
+                        exportRunning = true
+                        exportHint.text = "正在导出…"
+                        exportHint.isError = false
+                        Core.exportEntries(path)
+                    }
+                }
+                HintLabel {
+                    id: exportHint
+                    property bool isError: false
+                    color: isError ? Theme.colors.error : Theme.colors.textSecondary
+                    wrapMode: Text.WrapAnywhere
+                }
+
+                // ---- 贴图 ----
+                SectionDivider {}
+                SectionTitle { text: "贴图" }
+
+                FieldLabel { text: "默认不透明度(%)" }
+                ReadableSpinBox {
+                    id: pinOpacity
+                    Layout.fillWidth: true
+                    from: 30; to: 100; stepSize: 5
+                    editable: true
+                    onValueModified: root.scheduleSave()
+                }
+                ReadableCheckBox {
+                    id: pinDoubleClick
+                    text: "双击关闭贴图窗口"
+                    onClicked: root.scheduleSave()
+                }
+                ReadableCheckBox {
+                    id: pinPreferImage
+                    text: "一键贴图 · 图片优先(否则贴最近复制的内容)"
+                    onClicked: root.scheduleSave()
+                }
+                HintLabel {
+                    text: "关闭(默认):按热键贴出最近复制的文本或图片;开启:只要历史里有图片就贴最近图片,无图时才贴最近文本。"
+                }
+
+                FieldLabel { text: "文本贴图 · 背景色(点色块展开色板)" }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 6
+                    Rectangle {
+                        implicitWidth: 34; implicitHeight: 22; radius: Theme.metrics.radiusBadge
+                        color: root.isHexColor(pinTextBg.text) ? pinTextBg.text : Theme.colors.surfaceSecondary
+                        border.color: root.paletteTarget === "bg" ? Theme.colors.accent : Theme.colors.border
+                        border.width: root.paletteTarget === "bg" ? 2 : Theme.metrics.borderWidth
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.paletteTarget = root.paletteTarget === "bg" ? "" : "bg"
+                        }
+                    }
+                    ReadableTextField {
+                        id: pinTextBg
+                        Layout.fillWidth: true
+                        placeholderText: "#26272e"
+                        onTextEdited: root.scheduleSave()
+                    }
+                }
+                // 就地展开的色板(不用 Popup,原因见 ColorSwatchGrid 注释)
+                ColorSwatchGrid {
+                    Layout.fillWidth: true
+                    visible: root.paletteTarget === "bg"
+                    current: pinTextBg.text
+                    onPicked: function(color) {
+                        pinTextBg.text = color
+                        root.paletteTarget = ""
+                        root.scheduleSave()
+                    }
+                }
+                FieldLabel { text: "文本贴图 · 文字色(点色块展开色板)" }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 6
+                    Rectangle {
+                        implicitWidth: 34; implicitHeight: 22; radius: Theme.metrics.radiusBadge
+                        color: root.isHexColor(pinTextColor.text) ? pinTextColor.text : Theme.colors.surfaceSecondary
+                        border.color: root.paletteTarget === "color" ? Theme.colors.accent : Theme.colors.border
+                        border.width: root.paletteTarget === "color" ? 2 : Theme.metrics.borderWidth
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.paletteTarget = root.paletteTarget === "color" ? "" : "color"
+                        }
+                    }
+                    ReadableTextField {
+                        id: pinTextColor
+                        Layout.fillWidth: true
+                        placeholderText: "#dfe1e8"
+                        onTextEdited: root.scheduleSave()
+                    }
+                }
+                ColorSwatchGrid {
+                    Layout.fillWidth: true
+                    visible: root.paletteTarget === "color"
+                    current: pinTextColor.text
+                    onPicked: function(color) {
+                        pinTextColor.text = color
+                        root.paletteTarget = ""
+                        root.scheduleSave()
+                    }
+                }
+                FieldLabel { text: "文本贴图 · 背景不透明度(%)" }
+                ReadableSpinBox {
+                    id: pinTextBgOpacity
+                    Layout.fillWidth: true
+                    from: 0; to: 100; stepSize: 5
+                    editable: true
+                    onValueModified: root.scheduleSave()
+                }
+                FieldLabel { text: "文本贴图 · 字号(像素)" }
+                ReadableSpinBox {
+                    id: pinTextFontSize
+                    Layout.fillWidth: true
+                    from: 8; to: 96
+                    editable: true
+                    onValueModified: root.scheduleSave()
+                }
+                FieldLabel { text: "文本贴图 · 最大宽度(像素)" }
+                ReadableSpinBox {
+                    id: pinTextMaxWidth
+                    Layout.fillWidth: true
+                    from: 120; to: 2000; stepSize: 40
+                    editable: true
+                    onValueModified: root.scheduleSave()
+                }
+
+                // ---- 快捷键 ----
+                SectionDivider {}
+                SectionTitle { text: "快捷键" }
+                HintLabel {
+                    text: "点击后按下组合键即可录制。需含至少一个修饰键(Ctrl/Alt/Shift/Win),单按 F1–F24 也可;"
+                          + "按 Delete 清空 = 不绑定该动作。保存后立即生效。"
+                }
+                FieldLabel { text: "呼出/隐藏面板" }
+                HotkeyField {
+                    id: hkToggleMain
+                    Layout.fillWidth: true
+                    onValueModified: {
+                        root.hotkeysDirty = true
+                        root.scheduleSave()
+                    }
+                }
+                FieldLabel { text: "矩形截图" }
+                HotkeyField {
+                    id: hkCaptureRegion
+                    Layout.fillWidth: true
+                    onValueModified: {
+                        root.hotkeysDirty = true
+                        root.scheduleSave()
+                    }
+                }
+                FieldLabel { text: "全屏截图" }
+                HotkeyField {
+                    id: hkCaptureFullscreen
+                    Layout.fillWidth: true
+                    onValueModified: {
+                        root.hotkeysDirty = true
+                        root.scheduleSave()
+                    }
+                }
+                FieldLabel { text: "一键贴图" }
+                HotkeyField {
+                    id: hkPinLatest
+                    Layout.fillWidth: true
+                    onValueModified: {
+                        root.hotkeysDirty = true
+                        root.scheduleSave()
+                    }
+                }
+                FieldLabel { text: "打开翻译" }
+                HotkeyField {
+                    id: hkOpenTranslate
+                    Layout.fillWidth: true
+                    onValueModified: {
+                        root.hotkeysDirty = true
+                        root.scheduleSave()
+                    }
+                }
+                FieldLabel { text: "截图翻译" }
+                HotkeyField {
+                    id: hkCaptureTranslate
+                    Layout.fillWidth: true
+                    onValueModified: {
+                        root.hotkeysDirty = true
+                        root.scheduleSave()
+                    }
+                }
+                FieldLabel { text: "截图取字（入列表）" }
+                HotkeyField {
+                    id: hkCaptureOcr
+                    Layout.fillWidth: true
+                    onValueModified: {
+                        root.hotkeysDirty = true
+                        root.scheduleSave()
+                    }
+                }
+                FieldLabel { text: "延时截图" }
+                HotkeyField {
+                    id: hkCaptureDelayed
+                    Layout.fillWidth: true
+                    onValueModified: {
+                        root.hotkeysDirty = true
+                        root.scheduleSave()
+                    }
+                }
+
+                // ---- 翻译服务 ----
+                SectionDivider {}
+                SectionTitle { text: "翻译服务" }
+                ReadableComboBox {
+                    id: providerCombo
+                    Layout.fillWidth: true
+                    model: ["微软翻译(免密钥,开箱可用)", "AI 翻译(OpenAI 兼容)", "彩云小译(内置测试 Token)", "自定义 HTTP"]
+                    onActivated: root.scheduleSave()
+                }
+
+                // OpenAI 兼容(含国内兼容端点)
+                FieldLabel { text: "接口地址"; visible: root.provider === "openai" }
+                ReadableTextField {
+                    id: oaBaseUrl
+                    onTextEdited: root.scheduleSave()
+                    visible: root.provider === "openai"
+                    Layout.fillWidth: true
+                    placeholderText: "https://api.openai.com/v1"
+                }
+                FieldLabel { text: "API Key"; visible: root.provider === "openai" }
+                ReadableTextField {
+                    id: oaApiKey
+                    onTextEdited: root.scheduleSave()
+                    visible: root.provider === "openai"
+                    Layout.fillWidth: true
+                    echoMode: TextInput.Password
+                    placeholderText: "sk-…"
+                }
+                FieldLabel { text: "模型"; visible: root.provider === "openai" }
+                ReadableTextField {
+                    id: oaModel
+                    onTextEdited: root.scheduleSave()
+                    visible: root.provider === "openai"
+                    Layout.fillWidth: true
+                    placeholderText: "gpt-4o-mini"
+                }
+
+                // 微软翻译(免授权端点)
+                HintLabel {
+                    visible: root.provider === "microsoft"
+                    text: "默认通道:使用 Edge 内置翻译的免授权端点,**无需申请任何密钥**即可翻译。"
+                          + "该端点非微软公开 API(无 SLA),若日后失效,可改下方地址或切到其它通道。"
+                }
+                FieldLabel { text: "接口地址"; visible: root.provider === "microsoft" }
+                ReadableTextField {
+                    id: msEndpoint
+                    onTextEdited: root.scheduleSave()
+                    visible: root.provider === "microsoft"
+                    Layout.fillWidth: true
+                    placeholderText: "https://edge.microsoft.com/translate"
+                }
+
+                // 彩云小译(内置)
+                HintLabel {
+                    visible: root.provider === "caiyun"
+                    text: "内置通道:已预填**官方测试 Token**,装上即可试。官方不保证该 Token 的"
+                          + "稳定可用性,持续使用请到彩云科技开放平台申请正式 Token 后替换下方内容"
+                          + "(新用户有 100 万字 / 1 个月免费额度)。"
+                }
+                FieldLabel { text: "访问 Token"; visible: root.provider === "caiyun" }
+                ReadableTextField {
+                    id: cyToken
+                    onTextEdited: root.scheduleSave()
+                    visible: root.provider === "caiyun"
+                    Layout.fillWidth: true
+                    placeholderText: "3975l6lr5pcbvidl6jl2"
+                }
+                FieldLabel { text: "接口地址"; visible: root.provider === "caiyun" }
+                ReadableTextField {
+                    id: cyEndpoint
+                    onTextEdited: root.scheduleSave()
+                    visible: root.provider === "caiyun"
+                    Layout.fillWidth: true
+                    placeholderText: "https://api.interpreter.caiyunai.com"
+                }
+
+                // 自定义 HTTP
+                HintLabel {
+                    visible: root.provider === "custom"
+                    text: "按自己的接口拼请求:下面用占位符描述「发什么」与「从哪取译文」。"
+                          + "占位符 ${text} ${from} ${to} ${apiKey} ${model} 会在发送前替换成实际值"
+                          + "(支持 ${model:-默认值} 写法);未知占位符会直接报错,不会静默留空。"
+                }
+                FieldLabel { text: "请求地址"; visible: root.provider === "custom" }
+                ReadableTextField {
+                    id: cuUrl
+                    onTextEdited: root.scheduleSave()
+                    visible: root.provider === "custom"
+                    Layout.fillWidth: true
+                    placeholderText: "https://…"
+                }
+                HintLabel {
+                    visible: root.provider === "custom"
+                    text: "完整接口地址(含查询参数也可以);值里同样可用占位符,会按 URL 编码转义。"
+                }
+                FieldLabel { text: "请求方法"; visible: root.provider === "custom" }
+                ReadableComboBox {
+                    id: cuMethod
+                    visible: root.provider === "custom"
+                    Layout.fillWidth: true
+                    model: ["POST", "GET"]
+                    onActivated: root.scheduleSave()
+                }
+                FieldLabel { text: "API Key(可选)"; visible: root.provider === "custom" }
+                ReadableTextField {
+                    id: cuApiKey
+                    onTextEdited: root.scheduleSave()
+                    visible: root.provider === "custom"
+                    Layout.fillWidth: true
+                    echoMode: TextInput.Password
+                }
+                HintLabel {
+                    visible: root.provider === "custom"
+                    text: "只用于替换 ${apiKey} 占位符,**不会**自动加到请求头 —— 需要哪种鉴权头请自己写在请求头里。"
+                }
+                FieldLabel { text: "模型 / 部署名(可选)"; visible: root.provider === "custom" }
+                ReadableTextField {
+                    id: cuModel
+                    onTextEdited: root.scheduleSave()
+                    visible: root.provider === "custom"
+                    Layout.fillWidth: true
+                }
+                HintLabel {
+                    visible: root.provider === "custom"
+                    text: "只用于替换 ${model} 占位符(Azure 风格接口常把部署名写在地址里)。"
+                }
+                // ---- 请求头(可滚动:内容多时不再被截断) ----
+                FieldLabel { text: "请求头"; visible: root.provider === "custom" }
+                HintLabel {
+                    visible: root.provider === "custom"
+                    text: "每行一条,格式 Name: Value;值里可用占位符,如 Authorization: Bearer ${apiKey}。"
+                }
+                ScrollView {
+                    id: cuHeadersScroll
+                    visible: root.provider === "custom"
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 84
+                    clip: true
+                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                    background: Rectangle {
+                        color: Theme.colors.surfaceSecondary
+                        radius: Theme.metrics.radiusInput
+                        border.width: Theme.metrics.borderWidth
+                        border.color: cuHeaders.activeFocus ? Theme.colors.accent : Theme.colors.border
+                    }
+                    TextArea {
+                        id: cuHeaders
+                        onTextEdited: root.scheduleSave()
+                        wrapMode: TextArea.WrapAnywhere
+                        placeholderText: "Content-Type: application/json"
+                        // 技术字段:请求头逐行 "Name: Value",等宽才对齐
+                        font.family: Theme.fontMono
+                        color: Theme.colors.textPrimary
+                        placeholderTextColor: Theme.colors.textTertiary
+                        selectionColor: Theme.colors.accent
+                        selectedTextColor: Theme.colors.accentText
+                        padding: 8
+                    }
+                }
+
+                // ---- 请求体模板(可滚动) ----
+                FieldLabel { text: "请求体模板"; visible: root.provider === "custom" }
+                HintLabel {
+                    visible: root.provider === "custom"
+                    text: "按目标接口的 JSON 结构写,原文放在 ${text} 的位置;"
+                          + "原文里的引号与换行会自动转义,不会破坏 JSON。GET 请求可留空。"
+                }
+                ScrollView {
+                    id: cuBodyScroll
+                    visible: root.provider === "custom"
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 96
+                    clip: true
+                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                    background: Rectangle {
+                        color: Theme.colors.surfaceSecondary
+                        radius: Theme.metrics.radiusInput
+                        border.width: Theme.metrics.borderWidth
+                        border.color: cuBody.activeFocus ? Theme.colors.accent : Theme.colors.border
+                    }
+                    TextArea {
+                        id: cuBody
+                        onTextEdited: root.scheduleSave()
+                        wrapMode: TextArea.WrapAnywhere
+                        placeholderText: "{\"text\": [\"${text}\"], \"target_lang\": \"${to}\"}"
+                        // 技术字段:JSON 模板,等宽缩进与引号/括号配对最受益
+                        font.family: Theme.fontMono
+                        color: Theme.colors.textPrimary
+                        placeholderTextColor: Theme.colors.textTertiary
+                        selectionColor: Theme.colors.accent
+                        selectedTextColor: Theme.colors.accentText
+                        padding: 8
+                    }
+                }
+
+                // ---- 响应取值路径 ----
+                FieldLabel { text: "响应取值路径"; visible: root.provider === "custom" }
+                HintLabel {
+                    visible: root.provider === "custom"
+                    text: "从响应 JSON 里取译文的路径,用点号与下标逐层往下写。"
+                }
+                ReadableTextField {
+                    id: cuPath
+                    onTextEdited: root.scheduleSave()
+                    visible: root.provider === "custom"
+                    Layout.fillWidth: true
+                    placeholderText: "如 translations[0].text"
+                }
+                HintLabel {
+                    visible: root.provider === "custom"
+                    text: "完整示例(以 DeepL 为例):\n"
+                          + "地址 https://api-free.deepl.com/v2/translate\n"
+                          + "请求头 Authorization: DeepL-Auth-Key ${apiKey}\n"
+                          + "请求体 {\"text\":[\"${text}\"],\"target_lang\":\"${to}\"}\n"
+                          + "响应路径 translations[0].text\n"
+                          + "注意:各服务的语言代码写法可能不同(DeepL 用大写 ZH)。"
+                          + "语言代码在翻译窗口顶部可选可改,按服务要求填即可。"
+                }
+
+                FieldLabel { text: "超时(秒)" }
+                ReadableSpinBox {
+                    id: timeoutSpin
+                    Layout.fillWidth: true
+                    from: 5; to: 120
+                    editable: true
+                    onValueModified: root.scheduleSave()
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.metrics.spacingSm
+                    ThemedButton { variant: "secondary"; text: "测试连接"; onClicked: root.probe() }
+                    Item { Layout.fillWidth: true }
+                }
+                Label {
+                    id: probeLabel
+                    property bool isError: false
+                    Layout.fillWidth: true
+                    color: isError ? Theme.colors.error : Theme.colors.textSecondary
+                    font.pixelSize: Theme.metrics.fontCaption
+                    wrapMode: Text.WrapAnywhere
+                }
+
+                // ---- 网络与代理 ----
+                // core 的 proxy 校验/分派/proxy_probe 早已就绪,这里只补 UI 入口。
+                // manual 字段始终提交,与 core 一致:仅 mode=manual 时才参与校验与生效。
+                SectionDivider {}
+                SectionTitle { text: "网络与代理" }
+                FieldLabel { text: "代理模式(作用于翻译等网络请求)" }
+                ReadableComboBox {
+                    id: proxyModeCombo
+                    Layout.fillWidth: true
+                    model: ["跟随系统", "直连(不使用代理)", "手动配置"]
+                    onActivated: root.scheduleSave()
+                }
+                FieldLabel { text: "协议类型"; visible: root.isProxyManual }
+                ReadableComboBox {
+                    id: proxyKindCombo
+                    visible: root.isProxyManual
+                    Layout.fillWidth: true
+                    model: ["HTTP", "SOCKS5"]
+                    onActivated: root.scheduleSave()
+                }
+                FieldLabel { text: "服务器地址"; visible: root.isProxyManual }
+                ReadableTextField {
+                    id: proxyHost
+                    visible: root.isProxyManual
+                    Layout.fillWidth: true
+                    placeholderText: "127.0.0.1"
+                    onTextEdited: root.scheduleSave()
+                }
+                FieldLabel { text: "端口"; visible: root.isProxyManual }
+                ReadableSpinBox {
+                    id: proxyPort
+                    visible: root.isProxyManual
+                    Layout.fillWidth: true
+                    from: 0; to: 65535
+                    editable: true
+                    onValueModified: root.scheduleSave()
+                }
+                FieldLabel { text: "用户名(可选)"; visible: root.isProxyManual }
+                ReadableTextField {
+                    id: proxyUser
+                    visible: root.isProxyManual
+                    Layout.fillWidth: true
+                    onTextEdited: root.scheduleSave()
+                }
+                FieldLabel { text: "密码(可选)"; visible: root.isProxyManual }
+                ReadableTextField {
+                    id: proxyPassword
+                    visible: root.isProxyManual
+                    Layout.fillWidth: true
+                    echoMode: TextInput.Password
+                    onTextEdited: root.scheduleSave()
+                }
+                // SOCKS5 路径(ureq)不支持绕过列表,仅 HTTP 显示该字段(与 core 注释一致)
+                FieldLabel { text: "绕过列表(仅 HTTP,分号分隔)"; visible: root.isProxyManual && proxyKindCombo.currentIndex === 0 }
+                ReadableTextField {
+                    id: proxyBypass
+                    visible: root.isProxyManual && proxyKindCombo.currentIndex === 0
+                    Layout.fillWidth: true
+                    placeholderText: "localhost;127.0.0.1;*.internal"
+                    onTextEdited: root.scheduleSave()
                 }
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: Theme.metrics.spacingSm
-                    ThemedButton {
-                        Layout.fillWidth: true
-                        variant: "danger"
-                        text: "确认清空"
-                        onClicked: root.clearHistory()
+                    ThemedButton { variant: "secondary"; text: "测试代理链路"; onClicked: root.probeProxy() }
+                    Item { Layout.fillWidth: true }
+                }
+                Label {
+                    id: proxyProbeLabel
+                    property bool isError: false
+                    Layout.fillWidth: true
+                    color: isError ? Theme.colors.error : Theme.colors.textSecondary
+                    font.pixelSize: Theme.metrics.fontCaption
+                    wrapMode: Text.WrapAnywhere
+                }
+
+                // ---- 危险操作 ----
+                SectionDivider {}
+                SectionTitle { text: "危险操作" }
+                HintLabel {
+                    id: clearHint
+                    text: Core.counts.all > 0
+                          ? "删除全部 " + Core.counts.all + " 条剪贴板历史(含图片文件),此操作不可恢复。"
+                          : "当前没有历史数据。"
+                }
+                ThemedButton {
+                    id: clearButton
+                    Layout.fillWidth: true
+                    variant: "danger"
+                    text: "清空历史数据"
+                    // 无数据时置灰,避免"点了没反应"的困惑
+                    enabled: Core.counts.all > 0
+                    onClicked: clearConfirm.visible = true
+                }
+                // 就地二次确认:破坏性操作必须二次确认,但不弹 Dialog/Popup ——
+                // 外层 SettingsDrawer 本身即 Popup,嵌套弹层有定位/焦点问题
+                // (同 ColorSwatchGrid 的取舍,见上方注释)。
+                ColumnLayout {
+                    id: clearConfirm
+                    Layout.fillWidth: true
+                    visible: false
+                    spacing: Theme.metrics.spacingXs
+                    HintLabel {
+                        text: "确认清空全部历史?此操作不可恢复。"
+                        color: Theme.colors.error
                     }
-                    ThemedButton {
+                    RowLayout {
                         Layout.fillWidth: true
-                        variant: "secondary"
-                        text: "取消"
-                        onClicked: clearConfirm.visible = false
+                        spacing: Theme.metrics.spacingSm
+                        ThemedButton {
+                            Layout.fillWidth: true
+                            variant: "danger"
+                            text: "确认清空"
+                            onClicked: root.clearHistory()
+                        }
+                        ThemedButton {
+                            Layout.fillWidth: true
+                            variant: "secondary"
+                            text: "取消"
+                            onClicked: clearConfirm.visible = false
+                        }
                     }
                 }
-            }
 
-            // ---- 关于 ----
-            SectionDivider {}
-            SectionTitle { text: "关于" }
-            HintLabel {
-                text: "Nextboard " + Core.appVersion
-                      + "\n内核 nbcore " + (Core.coreVersion !== "" ? Core.coreVersion : "未加载")
-                      + "\nWindows 桌面一体化效率板:剪贴板历史 + 截图 / 贴图 + 翻译"
-            }
+                // ---- 关于 ----
+                SectionDivider {}
+                SectionTitle { text: "关于" }
+                HintLabel {
+                    text: "Nextboard " + Core.appVersion
+                          + "\n内核 nbcore " + (Core.coreVersion !== "" ? Core.coreVersion : "未加载")
+                          + "\nWindows 桌面一体化效率板:剪贴板历史 + 截图 / 贴图 + 翻译"
+                }
 
-            // 改动即时保存(去抖 400ms),故不再有「保存 / 关闭」按钮 ——
-            // 关闭抽屉走标题栏的 ✕。状态行只用于反馈结果(尤其是校验失败)。
-            Label {
-                id: statusLabel
-                property bool isError: false
-                Layout.fillWidth: true
-                Layout.topMargin: Theme.metrics.spacingMd
-                color: isError ? Theme.colors.error : Theme.colors.textSecondary
-                font.pixelSize: Theme.metrics.fontCaption
-                wrapMode: Text.WrapAnywhere
+                // 改动即时保存(去抖 400ms),故不再有「保存 / 关闭」按钮 ——
+                // 关闭走固定头部的 ✕、Esc、或点抽屉外(AppDrawer 的 closePolicy)。
+                // 状态行只用于反馈结果(尤其是校验失败)。
+                Label {
+                    id: statusLabel
+                    property bool isError: false
+                    Layout.fillWidth: true
+                    Layout.topMargin: Theme.metrics.spacingMd
+                    color: isError ? Theme.colors.error : Theme.colors.textSecondary
+                    font.pixelSize: Theme.metrics.fontCaption
+                    wrapMode: Text.WrapAnywhere
+                }
             }
         }
     }

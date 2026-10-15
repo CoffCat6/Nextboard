@@ -8,6 +8,7 @@
 #include <QDebug>
 #include <QGuiApplication>
 #include <QHBoxLayout>
+#include <QKeyEvent>
 #include <QMetaObject>
 #include <QMouseEvent>
 #include <QQmlContext>
@@ -315,7 +316,7 @@ QQuickItem* PanelWindow::findAcceptanceItem(const QString& objectName) const {
     return findItemByName(win->contentItem(), objectName);
 }
 
-bool PanelWindow::clickByObjectName(const QString& objectName) {
+bool PanelWindow::clickByObjectName(const QString& objectName, qreal xFrac) {
     QQuickItem* target = findAcceptanceItem(objectName);
     if (!target) {
         qWarning() << "验收:找不到 objectName" << objectName;
@@ -326,8 +327,9 @@ bool PanelWindow::clickByObjectName(const QString& objectName) {
     // QQuickWindow 的场景坐标系原点 = 窗口内容区左上角,与投递到窗口的
     // QMouseEvent 使用的坐标一致 → mapToScene 的结果可直接用,**不要**再减
     // win->x()/y()(那是窗口在屏幕上的位置,减了会得到负数,实测 -2517)。
+    const qreal frac = qBound(qreal(0.0), xFrac, qreal(1.0));
     const QPointF local = target->mapToScene(QPointF(0, 0))
-                          + QPointF(target->width() / 2, target->height() / 2);
+                          + QPointF(target->width() * frac, target->height() / 2);
     qInfo() << "验收点击" << objectName << "local=" << local
             << "size=" << target->width() << target->height()
             << "visible=" << target->isVisible() << "enabled=" << target->isEnabled()
@@ -368,6 +370,20 @@ bool PanelWindow::clickByObjectName(const QString& objectName) {
                       Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
     QMouseEvent release(QEvent::MouseButtonRelease, local, m_quick->mapToGlobal(local),
                         Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(m_quick, &press);
+    QCoreApplication::sendEvent(m_quick, &release);
+    return true;
+}
+
+bool PanelWindow::sendKey(int key, int modifiers, const QString& text) {
+    if (!m_quick) return false;
+    // 与 clickByObjectName 同一注入哲学(见上):发给 QQuickWidget,QQuickWidget::
+    // keyPressEvent 会把事件转投给 QML 场景的 offscreenWindow,再经
+    // QQuickDeliveryAgent::deliverKeyEvent 交给 activeFocusItem 并沿父链冒泡 ——
+    // 与真实键盘完全同一条链路(直调 QML 函数会绕开焦点/冒泡语义)。
+    const auto mods = static_cast<Qt::KeyboardModifiers>(modifiers);
+    QKeyEvent press(QEvent::KeyPress, key, mods, text);
+    QKeyEvent release(QEvent::KeyRelease, key, mods, text);
     QCoreApplication::sendEvent(m_quick, &press);
     QCoreApplication::sendEvent(m_quick, &release);
     return true;

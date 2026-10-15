@@ -101,6 +101,11 @@ Rectangle {
         }
     }
 
+    /// 验收:把设置抽屉的内容滚到底(验证"滚动后 ✕ 仍可点" —— 固定头部)。
+    function acceptanceSettingsToBottom() {
+        if (settingsDrawerLoader.item) settingsDrawerLoader.item.scrollToBottom()
+    }
+
     /// 读回:是否处于编辑态(供断言"保存成功后卡片已关")。
     readonly property string acceptanceEditId: todoEditId
 
@@ -157,7 +162,13 @@ Rectangle {
             for (let i = 0; i < Entries.tagStats.length; ++i)
                 out.push(Entries.tagStats[i].tag)
             return out.join(",")
-        })()
+        })(),
+        // 设置抽屉(--settings-flow):开合状态 + 内容滚动位置(验证固定头部)。
+        settingsOpen: !!(settingsDrawerLoader.item && settingsDrawerLoader.item.opened),
+        settingsScrollY: settingsDrawerLoader.item
+                         ? settingsDrawerLoader.item.acceptanceScrollY : -1,
+        // 页签可见性(0 个未完成待办时「待办」页签必须仍在)。
+        todoTabVisible: tabRepeater.itemAt(4) ? tabRepeater.itemAt(4).visible : false
     })
 
     // ---- 右键菜单:全面板**唯一实例** ----
@@ -1087,6 +1098,7 @@ Rectangle {
                     onClicked: Core.openTranslate()
                 }
                 ThemedButton {
+                    objectName: "settingsButton"   // 验收钩子(--settings-flow 真实点击)
                     variant: "ghost"
                     iconName: "settings"
                     text: "设置"
@@ -1134,6 +1146,7 @@ Rectangle {
                 spacing: Theme.metrics.spacingXs
 
                 Repeater {
+                    id: tabRepeater
                     model: ListModel {
                         ListElement { label: "全部"; viewId: "all" }
                         ListElement { label: "文本"; viewId: "text" }
@@ -1146,17 +1159,23 @@ Rectangle {
                         id: tabDelegate
                         required property string label
                         required property string viewId
+                        // 验收钩子(--settings-flow:零待办时该页签的可见性 + 真实点击)
+                        objectName: tabDelegate.viewId === "todo" ? "todoTab" : ""
                         // 计数来自 Core.counts(单一数据源 + countsChanged 通知)。
                         // 待办页显示**未完成数**(todoOpen),归档不占导航计数(§6.3)。
                         readonly property var count: viewId === "todo"
                             ? Core.counts.todoOpen : Core.counts[viewId]
                         readonly property bool selected: tabs.current === tabDelegate.viewId
                         // ⚠️ 零计数分类**隐藏**("文件 0" 这类空标签页占位是纯噪音,
-                        //    用户点进去只会看到空列表)。"全部"恒显示(它是归位锚点,
-                        //    数量为 0 时也必须留着);当前选中项恒显示 —— 否则用户在
+                        //    用户点进去只会看到空列表)。"全部"与"待办"恒显示:
+                        //    "全部"是归位锚点;待办的计数只算**未完成**(todoOpen),
+                        //    全部完成时计数为 0 —— 按零计数隐藏的话,归档里的已完成
+                        //    条目连同「清空已完成」入口一起消失,再没有按钮能翻到
+                        //    (用户实测反馈)。当前选中项恒显示 —— 否则用户在
                         //    "文本"页删光文本后,连"自己现在在哪"都看不到了。
                         readonly property bool empty: tabDelegate.count === 0
-                        visible: !empty || tabDelegate.viewId === "all" || selected
+                        visible: !empty || tabDelegate.viewId === "all"
+                                 || tabDelegate.viewId === "todo" || selected
                         /// 图标种类与 viewId 同源;"pinned" 复用图钉图标(与头部「固定」按钮同符号)。
                         readonly property string iconKind:
                             tabDelegate.viewId === "pinned" ? "pin" : tabDelegate.viewId
@@ -1664,6 +1683,9 @@ Rectangle {
             delegate: Item {
                 id: rowWrap
                 required property int index
+                // 验收钩子(--settings-flow:点"抽屉外的列表区域"用;只挂首行,
+                // 避免每个委托同名导致 DFS 命中隐藏实例 —— 同 clearDoneLink 的坑)。
+                objectName: rowWrap.index === 0 ? "entryCard0" : ""
                 // 角色透传:委托根不再是 EntryCard,角色注入改由本层显式转发。
                 // ⚠️ 逐个列出而不是只在 EntryCard 上写同名绑定 —— 委托根的
                 //    required property 才是 ListView 注入角色的落点。

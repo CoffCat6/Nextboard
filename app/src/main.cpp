@@ -114,6 +114,7 @@ int main(int argc, char* argv[]) {
             if (arg == QLatin1String("--todo-flow")
                 || arg == QLatin1String("--todo-groups")
                 || arg == QLatin1String("--clear-done-flow")
+                || arg == QLatin1String("--settings-flow")
                 || arg == QLatin1String("--dump-monitors")) {
                 const QString dir = QDir(QCoreApplication::applicationDirPath())
                                         .filePath(QStringLiteral("acceptance-data"));
@@ -221,6 +222,7 @@ int main(int argc, char* argv[]) {
     bool openSettings = false;
     bool todoFlow = false;
     bool clearDoneFlow = false;
+    bool settingsFlow = false;
     bool todoGroups = false;
     bool dumpMonitors = false;
     for (int i = 1; i < argc; ++i) {
@@ -241,6 +243,10 @@ int main(int argc, char* argv[]) {
         // → 点确认 → 读库断言(见 acceptance.cpp 的 runClearDoneFlow)。
         else if (arg == QLatin1String("--clear-done-flow"))
             clearDoneFlow = true;
+        // 设置抽屉交互验收:手输数值保存 / 抽屉模态与三种关闭路径 / 待办页签
+        // 恒显示(见 acceptance.cpp 的 runSettingsFlow)。
+        else if (arg == QLatin1String("--settings-flow"))
+            settingsFlow = true;
         // 待办分组自检:只读回各行分组键(配合脚本播种数据验证组标题分界点)。
         else if (arg == QLatin1String("--todo-groups"))
             todoGroups = true;
@@ -251,6 +257,7 @@ int main(int argc, char* argv[]) {
     // 待办交互验收(--todo-flow):真实点击驱动整条链路,逻辑见 host/acceptance.cpp
     if (todoFlow) nb::runTodoAcceptanceFlow(panel);
     if (clearDoneFlow) nb::runClearDoneFlow(panel);
+    if (settingsFlow) nb::runSettingsFlow(panel);
     if (todoGroups) nb::reportTodoGroups(panel);
     if (dumpMonitors) nb::reportMonitors();
     if (!shotPath.isEmpty()) {

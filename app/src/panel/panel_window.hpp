@@ -92,8 +92,18 @@ public:
     /// ⚠️ 注入目标是 QQuickWidget(QWidget 层)而非 QQuickWindow:后者会绕过
     ///    窗口系统的鼠标状态,事件被 Overlay 的 popup 容器拦下,所有按钮
     ///    都点不着(实测踩坑,详见实现处注释)。
+    /// xFrac:命中点在目标宽度里的相对位置(0~1,默认 0.5 = 正中)。
+    /// ⚠️ 宽到面板右半区的目标(如列表卡片)用默认正中点会落在打开的抽屉底下 ——
+    ///    "点抽屉外"的场景必须用 xFrac 把点挪进抽屉覆盖不到的左半区。
     /// 返回:是否找到目标且事件被派发(找不到返回 false)。
-    bool clickByObjectName(const QString& objectName);
+    bool clickByObjectName(const QString& objectName, qreal xFrac = 0.5);
+
+    /// 验收:向面板投递一次真实按键(press + release),走与真实键盘相同的
+    /// 链路(QQuickWidget → QML 场景的 deliverKeyEvent → activeFocusItem)。
+    /// text 供字符键插入文字用(如 "9");快捷键场景(如 Ctrl+A)传空串。
+    /// 返回:是否派发(QML 侧是否有活动焦点项不在本函数的可见范围,
+    /// 收不到时表现是"键没反应"而非崩溃)。
+    bool sendKey(int key, int modifiers = 0, const QString& text = QString());
 
     /// QML 侧 ESC 调用(关闭抽屉后的兜底隐藏)。
     Q_INVOKABLE void hidePanel() { hide(); }

@@ -5,6 +5,7 @@
 #include "panel/panel_window.hpp"
 
 #include <QApplication>
+#include <QClipboard>
 #include <QDate>
 #include <QDateTime>
 #include <QDebug>
@@ -244,6 +245,140 @@ void reportTodoGroups(PanelWindow& panel) {
                                 qInfo() << "FILTER afterClear active:" << st5.value("filterActive").toBool()
                                         << "count:" << st5.value("filterCount").toInt();
                                 QApplication::quit();
+                            });
+                        });
+                    });
+                });
+            });
+        });
+    });
+}
+
+void runSettingsFlow(PanelWindow& panel) {
+    // 设置抽屉交互验收,回归三组用户实测缺陷。全部走"真实点击/按键",不直调
+    // QML 函数 —— 直调会把"事件没送到"这类缺陷(命中路径/焦点/遮挡)全部掩盖。
+    //
+    // ⚠️ 键盘注入(手输 999 + 回车、Esc)依赖 QML 场景的活动焦点项,而
+    //    QQuickWidget 的 QML activeFocus 要求面板窗口是**系统前台窗口**
+    //    (isRenderWindowFor:widget 顶层窗口 == focusWindow;见 qquickwidget.cpp)。
+    //    故流程开头先把面板激活到前台,否则键会"没反应"而非报错。
+    QTimer::singleShot(3000, &panel, [&panel] {
+        panel.activateWindow();
+        panel.raise();
+
+        // 播种一条文本条目:STEP "点抽屉外的列表区域"要有一个真实卡片可点,
+        // 且用 save_text_entry(不进剪贴板)播种 —— 剪贴板全程保持原样,
+        // "穿透会复制"的判据才干净。
+        const QVariantMap seeded = CoreFacade::instance().call(
+            "save_text_entry", QVariantMap{{"text", QStringLiteral("验收-设置屏蔽-卡片")},
+                                           {"source", "clipboard"}});
+        qInfo() << "SETTINGS STEP1 seeded:" << seeded.value("ok").toBool();
+
+        QTimer::singleShot(1000, &panel, [&panel] {
+            // ---- A. 手输数值保存(此前:改得动、存不上) ----
+            // 用一个与默认值(5000)明显不同的数,便于识别"没写回"。
+            const bool opened = panel.clickByObjectName(QStringLiteral("settingsButton"));
+            qInfo() << "SETTINGS STEP2 clickedOpen:" << opened;
+            QTimer::singleShot(800, &panel, [&panel] {
+                const QVariantMap st = panel.rootProperty("acceptanceState").toMap();
+                qInfo() << "SETTINGS STEP2 drawerOpen:" << st.value("settingsOpen").toBool();
+                const bool focused = panel.clickByObjectName(QStringLiteral("historyLimitSpin"));
+                qInfo() << "SETTINGS STEP3 clickedSpin:" << focused;
+                QTimer::singleShot(600, &panel, [&panel] {
+                    // Ctrl+A 全选 → 键入 999(替换) → 回车走 QQuickSpinBox 原生提交
+                    // (keyRelease → updateValue(modified=true) → valueModified → 自动保存)
+                    panel.sendKey(Qt::Key_A, Qt::ControlModifier);
+                    panel.sendKey(Qt::Key_9, Qt::NoModifier, QStringLiteral("9"));
+                    panel.sendKey(Qt::Key_9, Qt::NoModifier, QStringLiteral("9"));
+                    panel.sendKey(Qt::Key_9, Qt::NoModifier, QStringLiteral("9"));
+                    panel.sendKey(Qt::Key_Return);
+                    qInfo() << "SETTINGS STEP3 typed 999 + Enter";
+                    QTimer::singleShot(1500, &panel, [&panel] {
+                        const QVariantMap resp = CoreFacade::instance().call("get_settings");
+                        const int limit = resp.value("data").toMap()
+                                              .value("historyLimit").toInt();
+                        qInfo() << "SETTINGS STEP4 persisted historyLimit:" << limit
+                                << "expected 999 match:" << (limit == 999);
+
+                        // ---- B1. 滚到底后点 ✕(固定头部:滚动不再挡关闭按钮) ----
+                        panel.invokeAcceptance("acceptanceSettingsToBottom");
+                        QTimer::singleShot(700, &panel, [&panel] {
+                            const QVariantMap st2 = panel.rootProperty("acceptanceState").toMap();
+                            qInfo() << "SETTINGS STEP5 scrolled y:"
+                                    << st2.value("settingsScrollY").toDouble()
+                                    << "scrolledDown:" << (st2.value("settingsScrollY").toDouble() > 0);
+                            const bool closed =
+                                panel.clickByObjectName(QStringLiteral("settingsClose"));
+                            qInfo() << "SETTINGS STEP5 clickedClose:" << closed;
+                            QTimer::singleShot(800, &panel, [&panel] {
+                                const QVariantMap st3 =
+                                    panel.rootProperty("acceptanceState").toMap();
+                                qInfo() << "SETTINGS STEP6 closeBtn drawerOpen:"
+                                        << st3.value("settingsOpen").toBool() << "(期望 false)";
+
+                                // ---- B2. 点抽屉外(列表卡片):应被 modal 吞掉,不穿透 ----
+                                panel.clickByObjectName(QStringLiteral("settingsButton"));
+                                QTimer::singleShot(800, &panel, [&panel] {
+                                    const QVariantMap st4 =
+                                        panel.rootProperty("acceptanceState").toMap();
+                                    const QString clipBefore =
+                                        QApplication::clipboard()->text();
+                                    // xFrac=0.25:卡片宽到面板右半区,正中点会落在打开的
+                                    // 抽屉底下 —— 必须把点击点挪进左半区才是"抽屉外"。
+                                    const bool clickedCard = panel.clickByObjectName(
+                                        QStringLiteral("entryCard0"), 0.25);
+                                    qInfo() << "SETTINGS STEP7 drawerOpen:"
+                                            << st4.value("settingsOpen").toBool()
+                                            << "clickedCard(抽屉外):" << clickedCard;
+                                    QTimer::singleShot(1000, &panel,
+                                                       [&panel, clipBefore] {
+                                        const QVariantMap st5 =
+                                            panel.rootProperty("acceptanceState").toMap();
+                                        const QString clipAfter =
+                                            QApplication::clipboard()->text();
+                                        qInfo() << "SETTINGS STEP8 outsideClick drawerOpen:"
+                                                << st5.value("settingsOpen").toBool()
+                                                << "(期望 false)"
+                                                << "panelStillVisible:" << panel.isVisible()
+                                                << "(期望 true)"
+                                                << "clipboardUnchanged:" << (clipAfter == clipBefore);
+
+                                        // ---- B3. Esc 关闭(interactive:false 时被 Qt 吞掉) ----
+                                        panel.clickByObjectName(
+                                            QStringLiteral("settingsButton"));
+                                        QTimer::singleShot(800, &panel, [&panel] {
+                                            const QVariantMap st6 =
+                                                panel.rootProperty("acceptanceState").toMap();
+                                            panel.sendKey(Qt::Key_Escape);
+                                            qInfo() << "SETTINGS STEP9 drawerOpen:"
+                                                    << st6.value("settingsOpen").toBool()
+                                                    << "sent Esc";
+                                            QTimer::singleShot(900, &panel, [&panel] {
+                                                const QVariantMap st7 =
+                                                    panel.rootProperty("acceptanceState").toMap();
+                                                qInfo() << "SETTINGS STEP10 escClosed drawerOpen:"
+                                                        << st7.value("settingsOpen").toBool()
+                                                        << "(期望 false)";
+
+                                                // ---- C. 待办页签恒显示(零未完成待办时) ----
+                                                qInfo() << "SETTINGS STEP11 todoTabVisible:"
+                                                        << st7.value("todoTabVisible").toBool()
+                                                        << "(期望 true,零未完成待办)";
+                                                panel.clickByObjectName(
+                                                    QStringLiteral("todoTab"));
+                                                QTimer::singleShot(800, &panel, [&panel] {
+                                                    const QVariantMap st8 =
+                                                        panel.rootProperty("acceptanceState")
+                                                            .toMap();
+                                                    qInfo() << "SETTINGS STEP12 viewId:"
+                                                            << st8.value("viewId").toString()
+                                                            << "(期望 todo)";
+                                                    QApplication::quit();
+                                                });
+                                            });
+                                        });
+                                    });
+                                });
                             });
                         });
                     });
