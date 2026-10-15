@@ -35,6 +35,16 @@ AppDrawer {
     property bool backupRunning: false
     property bool exportRunning: false
 
+    /// 恢复/导入:进行中标志 + 待确认的备份文件路径(确认卡点"确认"才发起)。
+    property bool restoreRunning: false
+    property bool importRunning: false
+    property string restorePendingPath: ""
+    property string importPendingPath: ""
+
+    /// 验收只读:确认卡可见性(--restore-flow 读回;QML 外部拿不到内部 id)。
+    readonly property bool acceptanceRestoreCardVisible: restoreConfirm.visible
+    readonly property bool acceptanceImportCardVisible: importConfirm.visible
+
     /// 改动去抖后自动落盘(不再有底部「保存」按钮)。
     /// 各控件只接**用户操作**信号(valueModified / clicked / textEdited / activated),
     /// 因此加载时回填值不会误触发保存,也就不需要 loading 守卫。
@@ -512,6 +522,61 @@ AppDrawer {
         statusLabel.isError = false
     }
 
+    // ---- 恢复 / 导入(备份 zip 的消费端;慢 I/O 走 Core 线程池) ----
+    /// 把表单里的某块滚进可视区(确认块在表单中部,滚动过的用户点按钮后
+    /// 确认块可能在视口外 —— 不滚过去会像"点了没反应")。
+    /// ⚠️ 读位置必须等**布局结算**:visible 刚置 true 时该块还没有真实 y,
+    ///    立刻读会滚到错位置(实测:第一次开确认卡滚对了,第二次滚到 y≈96
+    ///    的位置 —— 起因就是 Qt.callLater 与布局 polish 的竞争,--restore-flow 抓出)。
+    ///    对策:callLater(快路径)+ 120ms 定时器(兜底,布局晚于事件循环时补滚)。
+    function revealItem(it) {
+        Qt.callLater(function() { scrollItemIntoView(it) })
+        revealRetry.item = it
+        revealRetry.restart()
+    }
+    function scrollItemIntoView(it) {
+        const y = it.mapToItem(flick.contentItem, 0, 0).y
+        flick.contentY = Math.max(0, Math.min(y - 40,
+                                              Math.max(0, flick.contentHeight - flick.height)))
+    }
+    Timer {
+        id: revealRetry
+        interval: 120
+        property var item: null
+        onTriggered: if (item) root.scrollItemIntoView(item)
+    }
+    /// 打开恢复确认卡(产品路径 = 原生文件对话框选路径后调用;验收路径 =
+    /// Main.qml 的 acceptanceOpenRestore 直接喂路径,跳过只能人工操作的原生对话框)。
+    function openRestoreConfirm(path) {
+        restorePendingPath = path
+        restoreConfirm.visible = true
+        revealItem(restoreConfirm)
+    }
+    /// 执行恢复:替换当前全部数据;nbcore 侧先自动打险备份。结果走 restoreFinished。
+    function commitRestore() {
+        restoreConfirm.visible = false
+        if (restorePendingPath === "") return
+        restoreRunning = true
+        restoreHint.text = "正在恢复(大备份解包较慢,请勿关闭应用)…"
+        restoreHint.isError = false
+        Core.restoreBackup(restorePendingPath)
+    }
+    /// 打开导入确认卡(同恢复:验收跳过原生对话框)。
+    function openImportConfirm(path) {
+        importPendingPath = path
+        importConfirm.visible = true
+        revealItem(importConfirm)
+    }
+    /// 执行导入:备份条目并入当前数据(去重跳过重复)。结果走 importFinished。
+    function commitImport() {
+        importConfirm.visible = false
+        if (importPendingPath === "") return
+        importRunning = true
+        importHint.text = "正在导入…"
+        importHint.isError = false
+        Core.importBackup(importPendingPath)
+    }
+
     contentItem: ColumnLayout {
         spacing: 0
 
@@ -750,6 +815,111 @@ AppDrawer {
                 }
                 HintLabel {
                     id: exportHint
+                    property bool isError: false
+                    color: isError ? Theme.colors.error : Theme.colors.textSecondary
+                    wrapMode: Text.WrapAnywhere
+                }
+
+                // ---- 恢复 / 导入(备份 zip 的消费端) ----
+                FieldLabel { text: "恢复与导入" }
+                HintLabel {
+                    text: "恢复:用备份**替换**当前全部数据(执行前自动把当前数据备份到所选文件同目录)。导入:把备份里的条目**并入**当前数据,内容相同的自动跳过。"
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.metrics.spacingSm
+                    ThemedButton {
+                        objectName: "restoreBackupButton"   // 验收钩子(--restore-flow 真实点击)
+                        Layout.fillWidth: true
+                        variant: "secondary"
+                        text: root.restoreRunning ? "恢复中…" : "恢复备份…"
+                        enabled: !root.restoreRunning && !root.importRunning
+                                && !root.backupRunning
+                        onClicked: {
+                            const path = Core.openFileDialog("选择要恢复的备份文件",
+                                                             "备份文件 (*.zip)")
+                            if (path === "") return
+                            root.openRestoreConfirm(path)
+                        }
+                    }
+                    ThemedButton {
+                        objectName: "importBackupButton"   // 验收钩子(--restore-flow 真实点击)
+                        Layout.fillWidth: true
+                        variant: "secondary"
+                        text: root.importRunning ? "导入中…" : "导入备份…"
+                        enabled: !root.restoreRunning && !root.importRunning
+                                && !root.backupRunning
+                        onClicked: {
+                            const path = Core.openFileDialog("选择要导入的备份文件",
+                                                             "备份文件 (*.zip)")
+                            if (path === "") return
+                            root.openImportConfirm(path)
+                        }
+                    }
+                }
+                // 就地确认块(与「清空历史」的 clearConfirm 同型:破坏性操作必须二次确认)
+                ColumnLayout {
+                    id: restoreConfirm
+                    Layout.fillWidth: true
+                    visible: false
+                    spacing: Theme.metrics.spacingXs
+                    HintLabel {
+                        text: "确认恢复?当前全部数据(条目 + 图片)将被该备份替换。\n执行前会自动把当前数据备份到所选文件同目录(nextboard-pre-restore-*.zip)。"
+                        color: Theme.colors.error
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.metrics.spacingSm
+                        ThemedButton {
+                            objectName: "restoreConfirmBtn"   // 验收钩子
+                            Layout.fillWidth: true
+                            variant: "danger"
+                            text: "确认恢复"
+                            onClicked: root.commitRestore()
+                        }
+                        ThemedButton {
+                            Layout.fillWidth: true
+                            variant: "secondary"
+                            text: "取消"
+                            onClicked: restoreConfirm.visible = false
+                        }
+                    }
+                }
+                HintLabel {
+                    id: restoreHint
+                    property bool isError: false
+                    color: isError ? Theme.colors.error : Theme.colors.textSecondary
+                    wrapMode: Text.WrapAnywhere
+                }
+                ColumnLayout {
+                    id: importConfirm
+                    Layout.fillWidth: true
+                    visible: false
+                    spacing: Theme.metrics.spacingXs
+                    HintLabel {
+                        text: "确认导入?备份里的条目将并入当前数据,内容相同的自动跳过;不会删除或改动现有条目。"
+                        color: Theme.colors.error
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.metrics.spacingSm
+                        ThemedButton {
+                            objectName: "importConfirmBtn"   // 验收钩子
+                            Layout.fillWidth: true
+                            variant: "danger"
+                            text: "确认导入"
+                            onClicked: root.commitImport()
+                        }
+                        ThemedButton {
+                            Layout.fillWidth: true
+                            variant: "secondary"
+                            text: "取消"
+                            onClicked: importConfirm.visible = false
+                        }
+                    }
+                }
+                HintLabel {
+                    id: importHint
                     property bool isError: false
                     color: isError ? Theme.colors.error : Theme.colors.textSecondary
                     wrapMode: Text.WrapAnywhere
@@ -1391,6 +1561,34 @@ AppDrawer {
             exportHint.text = "✓ 导出完成:" + d.entryCount + " 条条目("
                     + (d.fileBytes / 1048576).toFixed(1) + " MB)"
             exportHint.isError = false
+        }
+        function onRestoreFinished(resp) {
+            root.restoreRunning = false
+            if (!resp.ok) {
+                restoreHint.text = "恢复失败:" + root.errText(resp)
+                restoreHint.isError = true
+                return
+            }
+            const d = resp.data || {}
+            restoreHint.text = "✓ 已恢复:" + d.entryCount + " 条条目、"
+                    + d.blobCount + " 个图片文件;恢复前数据已自动备份到 "
+                    + d.safetyBackupPath
+            restoreHint.isError = false
+            Entries.refreshNow()   // 列表/计数切到恢复后的数据
+        }
+        function onImportFinished(resp) {
+            root.importRunning = false
+            if (!resp.ok) {
+                importHint.text = "导入失败:" + root.errText(resp)
+                importHint.isError = true
+                return
+            }
+            const d = resp.data || {}
+            importHint.text = "✓ 已导入 " + d.imported + " 条(跳过重复 " + d.skipped + " 条)"
+                    + (d.blobMissing > 0
+                       ? ";有 " + d.blobMissing + " 张图片的文件在备份中缺失" : "")
+            importHint.isError = false
+            Entries.refreshNow()
         }
     }
 }

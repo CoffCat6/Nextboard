@@ -262,6 +262,28 @@ void CoreFacade::exportEntries(const QString& path) {
     QThreadPool::globalInstance()->start(job);
 }
 
+void CoreFacade::restoreBackup(const QString& path) {
+    auto* job = new AsyncCall;
+    job->method = "restore_backup";
+    job->req = QJsonObject{{"path", path}};
+    job->setAutoDelete(true);
+    job->onDone = [this](const QJsonObject& resp) {
+        emit restoreFinished(jsonToVariant(resp).toMap());
+    };
+    QThreadPool::globalInstance()->start(job);
+}
+
+void CoreFacade::importBackup(const QString& path) {
+    auto* job = new AsyncCall;
+    job->method = "import_backup";
+    job->req = QJsonObject{{"path", path}};
+    job->setAutoDelete(true);
+    job->onDone = [this](const QJsonObject& resp) {
+        emit importFinished(jsonToVariant(resp).toMap());
+    };
+    QThreadPool::globalInstance()->start(job);
+}
+
 QString CoreFacade::saveFileDialog(const QString& caption, const QString& filter,
                                    const QString& defaultName) {
     // QFileDialog 放 UI 线程:它本身是原生对话框,不涉及 nbcore
@@ -270,6 +292,13 @@ QString CoreFacade::saveFileDialog(const QString& caption, const QString& filter
         defaultName.isEmpty() ? QString() : QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation) + QStringLiteral("/") + defaultName,
         filter);
     return selected;
+}
+
+QString CoreFacade::openFileDialog(const QString& caption, const QString& filter) {
+    // 打开起点同样放 Documents(备份 zip 常见落点;上次目录由系统对话框自己记忆)
+    return QFileDialog::getOpenFileName(
+        nullptr, caption,
+        QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation), filter);
 }
 
 bool CoreFacade::autoStartEnabled() {

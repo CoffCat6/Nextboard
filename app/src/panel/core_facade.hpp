@@ -81,11 +81,19 @@ public:
     Q_INVOKABLE void backupCreate(const QString& path);
     /// 导出全部条目为 Markdown 单文件(图片 base64 内嵌)。
     Q_INVOKABLE void exportEntries(const QString& path);
+    /// 恢复备份(慢 I/O:线程池执行,完成发 restoreFinished):**替换**当前数据;
+    /// nbcore 侧先自动给当前数据打险备份 zip(恢复源同目录)再热替换。
+    Q_INVOKABLE void restoreBackup(const QString& path);
+    /// 导入备份(慢 I/O:线程池执行,完成发 importFinished):**并入**当前数据;
+    /// 按内容 hash 去重(重复跳过),id 冲突重铸,blob 随条目搬迁。
+    Q_INVOKABLE void importBackup(const QString& path);
     /// 保存文件对话框(原生;caption/filter/defaultName)。返回选中路径,取消为空串。
     /// QML 不引 QtQuick.Dialogs(windeployqt 不部署该模块,见 SettingsDrawer 内注释),
     /// 故由 C++ 提供该入口。
     Q_INVOKABLE QString saveFileDialog(const QString& caption, const QString& filter,
                                        const QString& defaultName);
+    /// 打开文件对话框(原生;选备份 zip 等)。返回选中路径,取消为空串。
+    Q_INVOKABLE QString openFileDialog(const QString& caption, const QString& filter);
 
     /// 开机自启当前状态(注册表 Run 键)。
     Q_INVOKABLE bool autoStartEnabled();
@@ -150,6 +158,9 @@ signals:
     /// 备份/导出完成(ok 与错误体都走这里,QML 侧统一提示)。
     void backupFinished(QVariantMap resp);
     void exportFinished(QVariantMap resp);
+    /// 恢复/导入完成(同上;data 携带 entryCount/blobCount 或 imported/skipped)。
+    void restoreFinished(QVariantMap resp);
+    void importFinished(QVariantMap resp);
     void ocrFinished(QVariantMap resp);
     void toastMessage(const QString& message);
     void countsChanged();

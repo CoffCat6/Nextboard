@@ -36,6 +36,15 @@ void runClearDoneFlow(PanelWindow& panel);
 /// 必须配 --data-dir(与 --todo-flow 同一门禁)。
 void runSettingsFlow(PanelWindow& panel);
 
+/// 恢复/导入验收(--restore-flow):确认卡真实点击驱动两条链路 ——
+///   ① 恢复(替换式):备份 → 变更(加条目/删条目/删 blob 文件)→ UI 确认恢复
+///      → 断言数据与图片文件回到备份时刻 + 险备份 zip 存在;
+///   ② 导入(合并式):再备份 → 删掉备份独有条目 → UI 确认导入 → 断言条目回来
+///      (重复跳过)+ 再导一次幂等。
+/// 日志前缀 RESTORE STEP*。⚠️ 唯一跳过的是原生文件对话框(路径直写),
+/// 会写库/替换数据目录,必须配 --data-dir(与 --todo-flow 同一门禁)。
+void runRestoreFlow(PanelWindow& panel);
+
 /// 只做一件事:切到待办视图并把各行分组键打出来(STEP5 的自检独立入口)。
 /// 供"先用脚本播种各种分组的待办,再校验组标题分界点"使用 ——
 /// 不建数据、不改状态,纯读回,故可反复运行。

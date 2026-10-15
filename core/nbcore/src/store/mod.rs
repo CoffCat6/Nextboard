@@ -40,7 +40,9 @@ const MIGRATION_V5: &str = include_str!("migrations/v5.sql");
 pub(crate) const MIGRATION_V6: &str = include_str!("migrations/v6.sql");
 
 /// 当前库结构版本;新增迁移时递增并追加执行分支。
-const LATEST_VERSION: i64 = 6;
+/// ⚠️ 备份/恢复与导入用它做"版本闸门":比它新的备份包一律拒绝(本版代码读不懂
+///    更新的 schema,放任打开会静默误读)—— 见 backup_export::stage_backup。
+pub(crate) const LATEST_VERSION: i64 = 6;
 
 /// 打开(或创建)数据库文件,启用 WAL 并执行迁移。
 pub fn open(path: &Path) -> AppResult<rusqlite::Connection> {

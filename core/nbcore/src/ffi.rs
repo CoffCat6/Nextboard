@@ -642,6 +642,18 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
             let format = str_opt(req, "format").unwrap_or_else(|| "markdown".to_owned());
             Ok(crate::backup_export::export_entries(core, &path, &format)?)
         }
+        // 恢复:备份 zip -> **替换**当前数据(执行前自动险备份;慢 I/O 走宿主工作线程)
+        "restore_backup" => {
+            let core = crate::core::Core::get()?;
+            let path = str_req(req, "path")?;
+            Ok(crate::backup_export::restore_backup(core, &path)?)
+        }
+        // 导入:备份 zip **并入**当前数据(hash 去重、id 冲突重铸;慢 I/O 走宿主工作线程)
+        "import_backup" => {
+            let core = crate::core::Core::get()?;
+            let path = str_req(req, "path")?;
+            Ok(crate::backup_export::import_backup(core, &path)?)
+        }
 
         // ---- 剪贴板读写 ----
         "copy_text_to_clipboard" => {

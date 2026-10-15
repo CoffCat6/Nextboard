@@ -115,6 +115,7 @@ int main(int argc, char* argv[]) {
                 || arg == QLatin1String("--todo-groups")
                 || arg == QLatin1String("--clear-done-flow")
                 || arg == QLatin1String("--settings-flow")
+                || arg == QLatin1String("--restore-flow")
                 || arg == QLatin1String("--dump-monitors")) {
                 const QString dir = QDir(QCoreApplication::applicationDirPath())
                                         .filePath(QStringLiteral("acceptance-data"));
@@ -223,6 +224,7 @@ int main(int argc, char* argv[]) {
     bool todoFlow = false;
     bool clearDoneFlow = false;
     bool settingsFlow = false;
+    bool restoreFlow = false;
     bool todoGroups = false;
     bool dumpMonitors = false;
     for (int i = 1; i < argc; ++i) {
@@ -247,6 +249,9 @@ int main(int argc, char* argv[]) {
         // 恒显示(见 acceptance.cpp 的 runSettingsFlow)。
         else if (arg == QLatin1String("--settings-flow"))
             settingsFlow = true;
+        // 恢复/导入验收:确认真实点击驱动"备份 zip 的消费端"(见 runRestoreFlow)。
+        else if (arg == QLatin1String("--restore-flow"))
+            restoreFlow = true;
         // 待办分组自检:只读回各行分组键(配合脚本播种数据验证组标题分界点)。
         else if (arg == QLatin1String("--todo-groups"))
             todoGroups = true;
@@ -258,6 +263,7 @@ int main(int argc, char* argv[]) {
     if (todoFlow) nb::runTodoAcceptanceFlow(panel);
     if (clearDoneFlow) nb::runClearDoneFlow(panel);
     if (settingsFlow) nb::runSettingsFlow(panel);
+    if (restoreFlow) nb::runRestoreFlow(panel);
     if (todoGroups) nb::reportTodoGroups(panel);
     if (dumpMonitors) nb::reportMonitors();
     if (!shotPath.isEmpty()) {

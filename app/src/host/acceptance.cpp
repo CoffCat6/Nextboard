@@ -9,6 +9,8 @@
 #include <QDate>
 #include <QDateTime>
 #include <QDebug>
+#include <QDir>
+#include <QFile>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QScreen>
@@ -388,8 +390,167 @@ void runSettingsFlow(PanelWindow& panel) {
     });
 }
 
-void reportMonitors() {
-    // 多屏配对自检:把两端清单并排打出来,并逐屏核对"按名能否配对 + 底图是否自洽"。
+void runRestoreFlow(PanelWindow& panel) {
+    // 恢复 / 导入验收:确认卡**真实点击**驱动两条"备份消费端"链路。
+    //   ① 恢复(替换式):播种(A1 文本 + A2 图片)→ 备份 zip1 → 变更(加 C、
+    //      删 A1、删掉 A2 的图片文件)→ UI 确认恢复 → 断言数据与图片文件都回到
+    //      备份时刻 + 险备份 zip 落在恢复源同目录;
+    //   ② 导入(合并式):再备 zip2 → 删掉 zip2 独有的条目 D → UI 确认导入 →
+    //      断言 D 回来、重复的跳过;再导一次断言幂等(全跳过)。
+    // ⚠️ 唯一跳过的一步是"原生文件对话框选文件"(进程内无法交互)——路径经
+    //    acceptanceBackupPath 写入;确认卡 → 真实点击确认 → 真实 Core 调用
+    //    → 异步完成回投这一整段都走产品链路。
+    QTimer::singleShot(3000, &panel, [&panel] {
+        panel.activateWindow();
+        panel.raise();
+
+        const QString dataDir = CoreFacade::instance()
+                                    .call("data_dir").value("data").toMap()
+                                    .value("path").toString();
+        const QString zip1 = dataDir + QStringLiteral("/zip1.zip");
+        const QString zip2 = dataDir + QStringLiteral("/zip2.zip");
+        // 1x1 合法 PNG:图片链路的播种/恢复载体(基64)。
+        const QString pngB64 = QStringLiteral(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAE"
+            "hQGAhKmMIQAAAABJRU5ErkJggg==");
+
+        // ---- STEP1 播种:A1 文本 + A2 图片(图片文件随后会被手删,验证恢复还原) ----
+        const QVariantMap r1 = CoreFacade::instance().call(
+            "save_text_entry",
+            QVariantMap{{"text", QStringLiteral("验收-恢复-A")}, {"source", "clipboard"}});
+        const QVariantMap r2 = CoreFacade::instance().call(
+            "ingest_capture_png", QVariantMap{{"png_base64", pngB64}});
+        const QString a1Id = r1.value("data").toMap().value("entry").toMap()
+                                 .value("id").toString();
+        const QVariantMap a2Entry = r2.value("data").toMap().value("entry").toMap();
+        const QString a2Blob = a2Entry.value("blobPath").toString();
+        qInfo() << "RESTORE STEP1 seeded text:" << r1.value("ok").toBool()
+                << "image:" << r2.value("ok").toBool() << "a2Blob:" << a2Blob;
+
+        QTimer::singleShot(900, &panel, [&panel, zip1, zip2, dataDir, a1Id, a2Blob] {
+            // ---- STEP2 备份 zip1 → 制造变更(加 C、删 A1、删 A2 的图片文件) ----
+            const QVariantMap bk = CoreFacade::instance().call(
+                "backup_create", QVariantMap{{"path", zip1}});
+            CoreFacade::instance().call(
+                "save_text_entry",
+                QVariantMap{{"text", QStringLiteral("验收-恢复-C")}, {"source", "clipboard"}});
+            CoreFacade::instance().call("delete_entry", QVariantMap{{"id", a1Id}});
+            const bool blobRemoved =
+                QFile::remove(dataDir + QStringLiteral("/blobs/") + a2Blob);
+            qInfo() << "RESTORE STEP2 backup1:" << bk.value("ok").toBool()
+                    << "deletedA1:true" << "blobFileRemoved:" << blobRemoved;
+
+            // ---- STEP3 从 UI 打开恢复确认卡(真实点击设置按钮开抽屉) ----
+            QTimer::singleShot(900, &panel, [&panel, zip1, zip2, dataDir, a2Blob] {
+                panel.clickByObjectName(QStringLiteral("settingsButton"));
+                QTimer::singleShot(800, &panel, [&panel, zip1, zip2, dataDir, a2Blob] {
+                    panel.setRootProperty("acceptanceBackupPath", zip1);
+                    panel.invokeAcceptance("acceptanceOpenRestore");
+                    QTimer::singleShot(700, &panel, [&panel, zip1, zip2, dataDir, a2Blob] {
+                        const QVariantMap st = panel.rootProperty("acceptanceState").toMap();
+                        qInfo() << "RESTORE STEP3 restoreCardVisible:"
+                                << st.value("restoreCardVisible").toBool();
+                        const bool clicked =
+                            panel.clickByObjectName(QStringLiteral("restoreConfirmBtn"));
+                        qInfo() << "RESTORE STEP3 clickedConfirm:" << clicked;
+
+                        // ---- STEP4 断言:数据与图片文件都回到备份时刻 + 险备份存在 ----
+                        QTimer::singleShot(2300, &panel, [&panel, dataDir, a2Blob, zip2] {
+                            const QVariantMap resp = CoreFacade::instance().call(
+                                "list_entries", QVariantMap{{"limit", 200}});
+                            const QVariantList items =
+                                resp.value("data").toMap().value("items").toList();
+                            bool hasA1 = false;
+                            bool hasC = false;
+                            for (const QVariant& v : items) {
+                                const QString t = v.toMap().value("textContent").toString();
+                                if (t == QStringLiteral("验收-恢复-A")) hasA1 = true;
+                                if (t == QStringLiteral("验收-恢复-C")) hasC = true;
+                            }
+                            const bool imgBack =
+                                QFile::exists(dataDir + QStringLiteral("/blobs/") + a2Blob);
+                            const int safetyZips = QDir(dataDir)
+                                .entryList(QStringList{QStringLiteral("nextboard-pre-restore-*.zip")},
+                                           QDir::Files)
+                                .size();
+                            qInfo() << "RESTORE STEP4 total:" << items.size()
+                                    << "(期望 2)A1Back:" << hasA1
+                                    << "Cgone:" << !hasC
+                                    << "blobFileBack:" << imgBack
+                                    << "safetyZips:" << safetyZips << "(期望 >=1)";
+
+                            // ---- STEP5 导入预置:加 D → 备份 zip2 → 删 D ----
+                            CoreFacade::instance().call(
+                                "save_text_entry",
+                                QVariantMap{{"text", QStringLiteral("验收-导入-D")},
+                                            {"source", "clipboard"}});
+                            const QVariantMap bk2 = CoreFacade::instance().call(
+                                "backup_create", QVariantMap{{"path", zip2}});
+                            // 找到 D 的 id 并删除(模拟"只有备份里还有 D")
+                            const QVariantList cur = CoreFacade::instance()
+                                                         .call("list_entries", QVariantMap{{"limit", 200}})
+                                                         .value("data").toMap().value("items").toList();
+                            for (const QVariant& v : cur) {
+                                const QVariantMap m = v.toMap();
+                                if (m.value("textContent").toString()
+                                    == QStringLiteral("验收-导入-D")) {
+                                    CoreFacade::instance().call(
+                                        "delete_entry", QVariantMap{{"id", m.value("id")}});
+                                }
+                            }
+                            qInfo() << "RESTORE STEP5 backup2:" << bk2.value("ok").toBool()
+                                    << "D deleted(只在 zip2 里)";
+
+                            // ---- STEP6 UI 确认导入(真实点击) ----
+                            QTimer::singleShot(800, &panel, [&panel, zip2] {
+                                panel.setRootProperty("acceptanceBackupPath", zip2);
+                                panel.invokeAcceptance("acceptanceOpenImport");
+                                QTimer::singleShot(700, &panel, [&panel] {
+                                    const QVariantMap st = panel.rootProperty("acceptanceState").toMap();
+                                    qInfo() << "RESTORE STEP6 importCardVisible:"
+                                            << st.value("importCardVisible").toBool();
+                                    const bool clicked =
+                                        panel.clickByObjectName(QStringLiteral("importConfirmBtn"));
+                                    qInfo() << "RESTORE STEP6 clickedConfirm:" << clicked;
+
+                                    // ---- STEP7 断言合并结果 + STEP8 幂等再导一次 ----
+                                    QTimer::singleShot(1800, &panel, [&panel] {
+                                        const QVariantList items = CoreFacade::instance()
+                                            .call("list_entries", QVariantMap{{"limit", 200}})
+                                            .value("data").toMap().value("items").toList();
+                                        bool hasD = false;
+                                        for (const QVariant& v : items) {
+                                            if (v.toMap().value("textContent").toString()
+                                                == QStringLiteral("验收-导入-D")) hasD = true;
+                                        }
+                                        qInfo() << "RESTORE STEP7 total:" << items.size()
+                                                << "(期望 3)D_back:" << hasD;
+
+                                        panel.invokeAcceptance("acceptanceOpenImport");
+                                        QTimer::singleShot(700, &panel, [&panel] {
+                                            panel.clickByObjectName(QStringLiteral("importConfirmBtn"));
+                                            QTimer::singleShot(1800, &panel, [&panel] {
+                                                const QVariantList items = CoreFacade::instance()
+                                                    .call("list_entries", QVariantMap{{"limit", 200}})
+                                                    .value("data").toMap().value("items").toList();
+                                                qInfo() << "RESTORE STEP8 reimport total:"
+                                                        << items.size()
+                                                        << "(期望 3,全跳过幂等)";
+                                                QApplication::quit();
+                                            });
+                                        });
+                                    });
+                                });
+                            });
+                        });
+                    });
+                });
+            });
+        });
+    });
+}
+
+void reportMonitors() {    // 多屏配对自检:把两端清单并排打出来,并逐屏核对"按名能否配对 + 底图是否自洽"。
     // 这是"多屏位置/分辨率混乱"的回归抓手 —— 该缺陷无法靠单测覆盖(需要真实多屏),
     // 但可以用日志断言:每个 Qt 屏都应能在核心清单里按名找到,且底图尺寸
     // ≈ 几何 × DPR(若把 A 屏的图配给 B 屏,这两者立刻对不上)。

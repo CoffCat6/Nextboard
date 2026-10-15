@@ -106,6 +106,21 @@ Rectangle {
         if (settingsDrawerLoader.item) settingsDrawerLoader.item.scrollToBottom()
     }
 
+    /// 验收(--restore-flow):待恢复/导入的备份文件路径。
+    /// ⚠️ 产品路径里这个路径来自原生文件对话框 —— 进程内验收无法操作它,
+    ///    故由宿主直写属性跳过"选文件"这一步;确认卡 → **真实点击确认按钮**
+    ///    → 真实 Core 调用这一段全走真链路。
+    property string acceptanceBackupPath: ""
+    function acceptanceOpenRestore() {
+        if (settingsDrawerLoader.item) {
+            settingsDrawerLoader.item.openRestoreConfirm(acceptanceBackupPath)
+        }
+    }
+    function acceptanceOpenImport() {
+        if (settingsDrawerLoader.item) {
+            settingsDrawerLoader.item.openImportConfirm(acceptanceBackupPath)
+        }
+    }
     /// 读回:是否处于编辑态(供断言"保存成功后卡片已关")。
     readonly property string acceptanceEditId: todoEditId
 
@@ -167,6 +182,11 @@ Rectangle {
         settingsOpen: !!(settingsDrawerLoader.item && settingsDrawerLoader.item.opened),
         settingsScrollY: settingsDrawerLoader.item
                          ? settingsDrawerLoader.item.acceptanceScrollY : -1,
+        // 恢复/导入确认卡(--restore-flow):点按钮后确认卡应可见。
+        restoreCardVisible: settingsDrawerLoader.item
+                            ? settingsDrawerLoader.item.acceptanceRestoreCardVisible : false,
+        importCardVisible: settingsDrawerLoader.item
+                           ? settingsDrawerLoader.item.acceptanceImportCardVisible : false,
         // 页签可见性(0 个未完成待办时「待办」页签必须仍在)。
         todoTabVisible: tabRepeater.itemAt(4) ? tabRepeater.itemAt(4).visible : false
     })

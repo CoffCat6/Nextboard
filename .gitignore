@@ -2,6 +2,9 @@
 app/build
 build
 core/target
+# 单测临时目录（backup_export 测试按 CARGO_MANIFEST_DIR 拼 target/tmp 放测试数据；
+# 与「工作区内放行、%TEMP% 被拒」的沙箱口径配套,见该文件测试注释）
+core/nbcore/target
 dist
 # 待办交互验收（--todo-flow 未指定 --data-dir 时的兜底数据目录）
 acceptance-data
