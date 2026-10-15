@@ -121,6 +121,12 @@ Rectangle {
             settingsDrawerLoader.item.openImportConfirm(acceptanceBackupPath)
         }
     }
+    /// 验收(--clear-all-flow):把设置抽屉的「清空全部数据」按钮滚进可视区
+    /// (危险区在表单尾部,不滚过去点击会落空)。
+    function acceptanceRevealClearAll() {
+        if (settingsDrawerLoader.item) settingsDrawerLoader.item.revealClearAll()
+    }
+
     /// 读回:是否处于编辑态(供断言"保存成功后卡片已关")。
     readonly property string acceptanceEditId: todoEditId
 

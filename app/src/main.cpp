@@ -102,7 +102,7 @@ int main(int argc, char* argv[]) {
     // 单实例门禁:同一数据目录只允许一个实例。
     // ⚠️ 指定了 --data-dir 时**跳过**(验收/调试常与用户实例并存,且用的是
     //    独立数据目录,不存在竞争;否则第二次验收启动会被门禁静默挡掉)。
-    // ⚠️ 验收模式(--todo-flow / --todo-groups / --clear-done-flow)会**写库或改状态**,
+    // ⚠️ 验收模式(各种 --*-flow / --todo-groups)会**写库或改状态**,
     //    若调用方忘了配 --data-dir,默认落到真实数据目录里 —— 这里兜底切到独立目录,
     //    保证验收不污染用户数据。目录固定在 **exe 同级**的 `acceptance-data`(不用临时
     //    目录:临时目录受 TMP 环境变量影响,位置不确定,排查时反而找不到数据)。
@@ -116,6 +116,7 @@ int main(int argc, char* argv[]) {
                 || arg == QLatin1String("--clear-done-flow")
                 || arg == QLatin1String("--settings-flow")
                 || arg == QLatin1String("--restore-flow")
+                || arg == QLatin1String("--clear-all-flow")
                 || arg == QLatin1String("--dump-monitors")) {
                 const QString dir = QDir(QCoreApplication::applicationDirPath())
                                         .filePath(QStringLiteral("acceptance-data"));
@@ -225,6 +226,7 @@ int main(int argc, char* argv[]) {
     bool clearDoneFlow = false;
     bool settingsFlow = false;
     bool restoreFlow = false;
+    bool clearAllFlow = false;
     bool todoGroups = false;
     bool dumpMonitors = false;
     for (int i = 1; i < argc; ++i) {
@@ -252,6 +254,10 @@ int main(int argc, char* argv[]) {
         // 恢复/导入验收:确认真实点击驱动"备份 zip 的消费端"(见 runRestoreFlow)。
         else if (arg == QLatin1String("--restore-flow"))
             restoreFlow = true;
+        // 清空全部数据验收:播种剪贴板 + 待办 → 真实点击「清空全部数据」→ 点确认
+        // → 读库断言全清(见 runClearAllFlow)。
+        else if (arg == QLatin1String("--clear-all-flow"))
+            clearAllFlow = true;
         // 待办分组自检:只读回各行分组键(配合脚本播种数据验证组标题分界点)。
         else if (arg == QLatin1String("--todo-groups"))
             todoGroups = true;
@@ -264,6 +270,7 @@ int main(int argc, char* argv[]) {
     if (clearDoneFlow) nb::runClearDoneFlow(panel);
     if (settingsFlow) nb::runSettingsFlow(panel);
     if (restoreFlow) nb::runRestoreFlow(panel);
+    if (clearAllFlow) nb::runClearAllFlow(panel);
     if (todoGroups) nb::reportTodoGroups(panel);
     if (dumpMonitors) nb::reportMonitors();
     if (!shotPath.isEmpty()) {

@@ -506,8 +506,9 @@ AppDrawer {
         Core.probeTranslate(provider)   // 网络请求:异步,完成走 translateProbeFinished
     }
 
-    /// 清空历史数据(core `clear_history`):删除全部剪贴板条目并清理图片文件。
-    /// 破坏性操作,由「危险操作」区的就地二次确认块调用。
+    /// 清空全部数据(core `clear_history`):删除**全部**条目(剪贴板历史 + 待办,
+    /// todo_meta 由 core 同事务清理)并清理图片文件。破坏性操作,由「危险操作」区的
+    /// 就地二次确认块调用。
     /// 清空后立即重拉列表(refreshNow 内部一并刷新分类计数),避免界面残留旧条目。
     function clearHistory() {
         const resp = Core.call("clear_history")
@@ -518,7 +519,7 @@ AppDrawer {
             return
         }
         Entries.refreshNow()
-        statusLabel.text = "已清空历史数据"
+        statusLabel.text = "已清空全部数据"
         statusLabel.isError = false
     }
 
@@ -545,6 +546,8 @@ AppDrawer {
         property var item: null
         onTriggered: if (item) root.scrollItemIntoView(item)
     }
+    /// 验收(--clear-all-flow):把「清空全部数据」按钮滚进可视区(危险区在表单尾部)。
+    function revealClearAll() { revealItem(clearButton) }
     /// 打开恢复确认卡(产品路径 = 原生文件对话框选路径后调用;验收路径 =
     /// Main.qml 的 acceptanceOpenRestore 直接喂路径,跳过只能人工操作的原生对话框)。
     function openRestoreConfirm(path) {
@@ -1446,17 +1449,21 @@ AppDrawer {
                 HintLabel {
                     id: clearHint
                     text: Core.counts.all > 0
-                          ? "删除全部 " + Core.counts.all + " 条剪贴板历史(含图片文件),此操作不可恢复。"
-                          : "当前没有历史数据。"
+                          ? "删除全部 " + Core.counts.all + " 条数据(剪贴板历史 + 待办,含图片文件),此操作不可恢复。"
+                          : "当前没有任何数据。"
                 }
                 ThemedButton {
                     id: clearButton
+                    objectName: "clearAllBtn"   // 验收钩子(--clear-all-flow 真实点击)
                     Layout.fillWidth: true
                     variant: "danger"
-                    text: "清空历史数据"
+                    text: "清空全部数据"
                     // 无数据时置灰,避免"点了没反应"的困惑
                     enabled: Core.counts.all > 0
-                    onClicked: clearConfirm.visible = true
+                    onClicked: {
+                        clearConfirm.visible = true
+                        root.revealItem(clearConfirm)   // 同恢复确认卡:滚进可视区
+                    }
                 }
                 // 就地二次确认:破坏性操作必须二次确认,但不弹 Dialog/Popup ——
                 // 外层 SettingsDrawer 本身即 Popup,嵌套弹层有定位/焦点问题
@@ -1467,13 +1474,16 @@ AppDrawer {
                     visible: false
                     spacing: Theme.metrics.spacingXs
                     HintLabel {
-                        text: "确认清空全部历史?此操作不可恢复。"
+                        text: "确认清空全部数据(含待办)?此操作不可恢复。"
                         color: Theme.colors.error
                     }
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: Theme.metrics.spacingSm
                         ThemedButton {
+                            // ⚠️ 用父块 visible 做条件:子项自身的 visible 在父隐藏时仍是 true,
+                            //    直接读会拿到"隐藏中"的按钮,验收点击会落空(clearDoneLink 同教训)
+                            objectName: clearConfirm.visible ? "clearAllConfirmBtn" : ""
                             Layout.fillWidth: true
                             variant: "danger"
                             text: "确认清空"

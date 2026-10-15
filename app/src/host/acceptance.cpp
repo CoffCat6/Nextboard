@@ -194,6 +194,61 @@ void runClearDoneFlow(PanelWindow& panel) {
     });
 }
 
+void runClearAllFlow(PanelWindow& panel) {
+    // 清空全部数据验收(docs/05-todo.md §1.3 语义调整:清空 = 全量重置,含待办):
+    //   播种 1 条剪贴板 + 2 条待办(1 未完成 1 已完成)→ 真实点击设置按钮开抽屉
+    //   → 把「清空全部数据」滚进可视区 → 真实点击按钮 → 真实点击「确认清空」
+    //   → 读库断言:counts 全口径归零、待办视图清空(todo_meta 无孤儿由单测兜底)。
+    QTimer::singleShot(3500, &panel, [&panel] {
+        CoreFacade& core = CoreFacade::instance();
+        const bool clip = core.call("save_text_entry",
+                                    QVariantMap{{"text", QStringLiteral("验收-清空-剪贴板")},
+                                                {"source", "clipboard"}})
+                              .value("ok").toBool();
+        const QVariantMap t1 =
+            core.call("todo_create", QVariantMap{{"text", QStringLiteral("验收-清空-未完成")}});
+        const QVariantMap t2 =
+            core.call("todo_create", QVariantMap{{"text", QStringLiteral("验收-清空-已完成")}});
+        const bool done = core.call(
+            "todo_set_done",
+            QVariantMap{{"id", t2.value("data").toMap().value("id").toString()}, {"done", true}})
+                              .value("ok").toBool();
+        qInfo() << "CLEAR-ALL STEP1 seeded clip:" << clip
+                << "todos:" << (t1.value("ok").toBool() && t2.value("ok").toBool())
+                << "doneMarked:" << done;
+
+        const bool opened = panel.clickByObjectName(QStringLiteral("settingsButton"));
+        qInfo() << "CLEAR-ALL STEP2 clickedOpen:" << opened;
+        QTimer::singleShot(800, &panel, [&panel] {
+            const QVariantMap st = panel.rootProperty("acceptanceState").toMap();
+            qInfo() << "CLEAR-ALL STEP2 drawerOpen:" << st.value("settingsOpen").toBool();
+            // 危险区在表单尾部:不先滚进可视区,按钮点击会落空
+            panel.invokeAcceptance("acceptanceRevealClearAll");
+            QTimer::singleShot(700, &panel, [&panel] {
+                const bool clickedClear = panel.clickByObjectName(QStringLiteral("clearAllBtn"));
+                qInfo() << "CLEAR-ALL STEP3 clickedClear:" << clickedClear;
+                QTimer::singleShot(700, &panel, [&panel] {
+                    const bool clickedConfirm =
+                        panel.clickByObjectName(QStringLiteral("clearAllConfirmBtn"));
+                    qInfo() << "CLEAR-ALL STEP4 clickedConfirm:" << clickedConfirm;
+                    QTimer::singleShot(900, &panel, [&panel] {
+                        const QVariantMap counts = CoreFacade::instance().call("entry_counts");
+                        const QVariantMap todos = CoreFacade::instance().call(
+                            "todo_list", QVariantMap{{"done", "all"}});
+                        const int all = counts.value("data").toMap().value("all").toInt();
+                        const int todosLeft =
+                            todos.value("data").toMap().value("items").toList().size();
+                        qInfo() << "CLEAR-ALL STEP5 counts.all:" << all
+                                << "todosLeft:" << todosLeft
+                                << "| 判据:all==0 且 todosLeft==0";
+                        QApplication::quit();
+                    });
+                });
+            });
+        });
+    });
+}
+
 void reportTodoGroups(PanelWindow& panel) {
     // 只读自检:切待办视图 → 读回各行分组键。配合"脚本先播种各分组待办"使用,
     // 断言组标题的分界点(键序变化处即标题出现处)。

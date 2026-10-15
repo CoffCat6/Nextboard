@@ -1,5 +1,6 @@
-// 自动化验收:待办 / 设置交互链路的**真实点击/按键**驱动
-// (仅 --todo-flow / --clear-done-flow / --settings-flow 使用)。
+// 自动化验收:待办 / 设置 / 备份恢复交互链路的**真实点击/按键**驱动
+// (仅 main.cpp 的 --todo-flow / --clear-done-flow / --clear-all-flow /
+//  --settings-flow / --restore-flow / --todo-groups 分支使用)。
 //
 // 为什么单独成文件:这段逻辑有 ~100 行、只在验收时跑,留在 main.cpp 里会
 // 把产品入口(参数解析/窗口装配/信号接线)淹没;抽出来也让"哪些代码是验收
@@ -26,6 +27,13 @@ void runTodoAcceptanceFlow(PanelWindow& panel);
 /// 读库断言"归档清空 + 未完成不受影响"。日志前缀 CLEAR-DONE STEP*。
 /// ⚠️ 会写库(创建/删除待办),必须配 --data-dir(与 --todo-flow 同一门禁)。
 void runClearDoneFlow(PanelWindow& panel);
+
+/// 清空全部数据验收(--clear-all-flow;2026-10-15 语义调整后的常驻回归):
+///   播种 1 条剪贴板 + 2 条待办(1 未完成 1 已完成)→ 真实点击设置按钮开抽屉 →
+///   「清空全部数据」滚进可视区 → **真实点击**按钮 → **真实点击**「确认清空」→
+///   读库断言"条目/待办全清、counts 全口径归零"。日志前缀 CLEAR-ALL STEP*。
+/// ⚠️ 会写库并删除隔离目录内的全部数据,必须配 --data-dir(与 --todo-flow 同一门禁)。
+void runClearAllFlow(PanelWindow& panel);
 
 /// 设置抽屉交互验收(--settings-flow),回归三类用户实测缺陷:
 ///   ① 手输数值不保存 —— 点 SpinBox → 键入 "999" + 回车 → get_settings 读回;

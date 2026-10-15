@@ -528,19 +528,22 @@ pub fn delete(conn: &Connection, id: &str) -> AppResult<Option<String>> {
     Ok(row.flatten())
 }
 
-/// 清空全部**剪贴板**条目，返回所有图片文件路径供调用方删除文件。
+/// 清空**全部**条目(剪贴板历史 + 待办)并删净待办扩展行，返回图片文件路径供调用方删除。
 ///
-/// ⚠️ 排除 kind='todo'(docs/05-todo.md §2.4):清空剪贴板历史不应误删用户任务。
-/// 待办的清理由 `todo::clear_done`(只清已完成)单独负责。
+/// ⚠️ 语义(2026-10-15 调整，docs/05-todo.md §1.3):「清空全部数据」是设置页危险区的
+/// **全量重置** —— 待办(含归档)随剪贴板历史一并删除；原先"不动待办"的排除已废除
+/// (危险区提示计数 `counts.all` 本来就含待办，"删除全部 N 条"的承诺必须真删光)。
+/// 只想清归档走 `todo::clear_done`。待办无 blob 文件；todo_meta 无外键(v6.sql 注释),
+/// 须显式 DELETE 且与条目删除**同事务** —— 半途失败不得留"meta 孤儿"错位状态。
 pub fn clear(conn: &Connection) -> AppResult<Vec<String>> {
-    let paths: Vec<String> = conn
-        .prepare(
-            "SELECT blob_path FROM clip_entries \
-             WHERE blob_path IS NOT NULL AND kind != 'todo'",
-        )?
+    let tx = conn.unchecked_transaction()?;
+    let paths: Vec<String> = tx
+        .prepare("SELECT blob_path FROM clip_entries WHERE blob_path IS NOT NULL")?
         .query_map([], |row| row.get(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    conn.execute("DELETE FROM clip_entries WHERE kind != 'todo'", [])?;
+    tx.execute("DELETE FROM clip_entries", [])?;
+    tx.execute("DELETE FROM todo_meta", [])?;
+    tx.commit()?;
     Ok(paths)
 }
 

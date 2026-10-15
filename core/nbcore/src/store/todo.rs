@@ -830,7 +830,7 @@ mod tests {
         assert!(pending_bubbles(&conn, 8).expect("p2").is_empty(), "播报确认后不再弹");
     }
 
-    // ---- 淘汰与清空排除(§2.4) ----
+    // ---- 淘汰排除与全量清空 ----
 
     #[test]
     fn evict_spares_todo_and_counts_only_clips() {
@@ -860,22 +860,35 @@ mod tests {
     }
 
     #[test]
-    fn clear_history_keeps_todo() {
+    fn clear_history_removes_everything() {
         let mut conn = crate::store::memory();
         let now = now_ms();
         entry::insert(&conn, &plain_entry("clip", "剪贴板", now)).expect("insert");
-        create_at(&mut conn, "待办", None, None, None, now);
-
-        entry::clear(&conn).expect("clear");
-        assert!(entry::get(&conn, "clip").expect("get").is_none());
-        assert_eq!(open_count(&conn), 1, "清空历史不得动待办");
-
-        // 归档清理只删已完成
+        let open = create_at(&mut conn, "未完成待办", None, None, None, now);
         let done = create_at(&mut conn, "已完成待办", None, None, None, now);
         set_done(&conn, &done, true).expect("done");
+
+        // 全量清空:待办(含归档)随剪贴板历史一并删除,meta 无孤儿 —— 2026-10-15
+        // 语义调整,原"清空不动待办"的排除废除(危险区计数本来就把待办算进 N)。
+        entry::clear(&conn).expect("clear");
+        assert!(entry::get(&conn, "clip").expect("get").is_none());
+        assert!(entry::get(&conn, &open).expect("get").is_none(), "未完成待办应被清空");
+        assert!(entry::get(&conn, &done).expect("get").is_none(), "已完成待办应被清空");
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM todo_meta", [], |r| r.get(0))
+            .expect("meta count");
+        assert_eq!(left, 0, "todo_meta 不得留孤儿行");
+        let c: EntryCounts = entry::counts(&conn).expect("counts");
+        assert_eq!(c.all, 0, "清空后计数应全口径归零");
+
+        // clear_done 语义不变:只删已完成,未完成不受影响
+        let keep = create_at(&mut conn, "保留的未完成", None, None, None, now);
+        let gone = create_at(&mut conn, "要清的已完成", None, None, None, now);
+        set_done(&conn, &gone, true).expect("done2");
         clear_done(&conn).expect("clear done");
         let (items, _) = list(&conn, TodoFilter::All, None, None, None, 50, 0).expect("list");
         assert_eq!(items.len(), 1);
+        assert_eq!(items[0].entry.id, keep);
     }
 
     #[test]
