@@ -316,12 +316,18 @@ powershell -ExecutionPolicy Bypass -File tools\package.ps1 -SkipInstaller   # �
 | 9 | 发布说明:变更摘要/已知问题/系统要求/构建环境 | Release notes |
 | 10 | 更新检查源就绪(§7.3) | 可被「检查更新」发现 |
 
-### 7.3 更新机制(v1 定型,对应路线图 6.4)
+### 7.3 更新机制（v1 已实施;细节见 [07-auto-update.md](./07-auto-update.md)）
 
-- **v1 做**:设置页「关于」区「检查更新」→ app 侧 `QNetworkAccessManager` 请求 GitHub latest release → 语义化版本比较 → 有新版提示 + `QDesktopServices::openUrl` 打开下载页。
-- **v1 不做**:静默下载、差量升级、应用内安装。
-- 后续(v2 设想):下载到临时目录 + 引导用户运行安装包。
-- 注意:Qt6Network.dll 已在部署集内,新增该功能不改变依赖面;失败(断网/代理)需给可读错误。
+- **v1 做**:设置页「关于」区「检查更新」→ 语义化版本比较 → 有新版则提示,并用
+  `QDesktopServices::openUrl` 打开下载页。⚠️ **实现落点是 nbcore 的 `check_update`,
+  不是原先写的宿主 `QNetworkAccessManager`**(2026-10-15 改判,理由见 07 §3 与本文 §8 D12:
+  宿主侧要重复实现一遍应用内代理三态才谈得上一致,而版本比较放 Rust 才有表驱动单测)。
+- **v1 不做**:静默下载、差量升级、应用内安装;启动后台自动检查;托盘入口。
+- **检查地址仍是空置**:`app/CMakeLists.txt` 的 `NB_UPDATE_CHECK_URL` 留空 = 功能禁用
+  (入口可见但置灰并说明原因),渠道定了改这一行重编即启用 —— 07 §5。
+- 后续(v2 设想):下载到临时目录 + SHA256 校验 + 引导用户运行安装包;前置是 D6 代码签名。
+- 注意:Qt6Network.dll 已在部署集内(v1 走 core 的 WinHTTP,不额外依赖它);失败(断网/代理/
+  限流/404)一律给可读中文错误。
 
 ### 7.4 发布检查单(路线图 6.7 展开)
 
@@ -355,7 +361,8 @@ powershell -ExecutionPolicy Bypass -File tools\package.ps1 -SkipInstaller   # �
 | D6 | 代码签名 | 有证书 / 暂不签 | **待用户确认** | 未签名 → SmartScreen 警告,影响安装转化;需要则补充 signtool 与时间戳服务器 |
 | D7 | 发布渠道 | GitHub Releases(gh 已装)/ 其他 | **GitHub Releases** | 与 §7.3 更新检查直接配套 |
 | D8 | 日志策略 | a) 保留文件日志,与数据同目录;b) 放 exe 根目录;c) 发布版移除 | **a(已落地)** | 日志落 `data\nextboard.log`(含崩溃兜底);与数据同处,便于整包取证;c 会丢失崩溃现场 |
-| D9 | 更新机制范围 | v1 仅"检查更新+打开下载页"(§7.3) | **是** | 与路线图 6.4 一致 |
+| D9 | 更新机制范围 | v1 仅"检查更新+打开下载页"(§7.3) | **是(已落地 2026-10-15)** | 与路线图 6.4 一致;实现与实测见 [07-auto-update.md](./07-auto-update.md) |
+| D12 | 更新检查的实现落点 | a) 宿主 `QNetworkAccessManager`(本文原 §7.3 写法);b) nbcore 新增 `check_update`,复用 `translate::http` | **b(已落地,2026-10-15 改判)** | 选 a 要在 C++ 重写一遍 system/manual/SOCKS5 的代理翻译与接线才能与翻译链路行为一致,而本仓无 C++ 测试设施;版本比较与响应解析放 Rust 才能表驱动单测 |
 | D10 | 下一发布版号 | 0.2.1 / 0.3.0 / 1.0.0-rc | 待用户定 | 影响 tag、安装器显示、更新比较基准 |
 | D11 | 自启是否带 `--hidden` | 安装器写 Run 时带 / 不带 | **带(已落地)** | 修开机弹面板(§2.6);应用内自启开关(auto_start.cpp)是否同步改,请一并裁定 |
 

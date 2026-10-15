@@ -27,6 +27,11 @@ class CoreFacade : public QObject {
     Q_PROPERTY(QString appVersion READ appVersion CONSTANT)
     /// nbcore 版本(形如 "0.1.0";核心未加载时为空串)。
     Q_PROPERTY(QString coreVersion READ coreVersion CONSTANT)
+    /// 更新检查地址(CMake 的 `NB_UPDATE_CHECK_URL`,docs/07-auto-update.md §5)。
+    /// **空串 = 功能禁用**:设置页据此把「检查更新」置灰并说明原因。
+    /// ⚠️ CONSTANT 属性 —— QML 绑定时读一次就定型,所以验收的 `--update-url` 覆盖
+    ///    必须在 QML 装配**之前**落到 setUpdateCheckUrlOverride(见 main.cpp)。
+    Q_PROPERTY(QString updateCheckUrl READ updateCheckUrl CONSTANT)
 public:
     static CoreFacade& instance();
 
@@ -63,6 +68,15 @@ public:
     QString appVersion() const;
     QString coreVersion() const;
 
+    /// 更新检查地址(未配置时为空串;空 = 功能禁用)。
+    QString updateCheckUrl() const;
+
+    /// 验收注入的更新检查地址(覆盖编译期常量)。调用时机见属性注释。
+    static void setUpdateCheckUrlOverride(const QString& url);
+    /// 验收模式:openExternalUrl 只记日志、不真起浏览器 —— 否则验收会弹出一个抢焦点的
+    /// 浏览器窗口,既干扰桌面也没法反复跑。真实打开由发布前人工冒烟覆盖。
+    static void setBrowserLaunchDisabledForAcceptance(bool disabled);
+
     /// UI 反馈(toast 由 QML 侧显示;C++ 各处也能发)。
     Q_INVOKABLE void showToast(const QString& message);
 
@@ -75,6 +89,14 @@ public:
 
     /// 测试代理链路(网络,异步:线程池执行,完成发 proxyProbeFinished)。
     Q_INVOKABLE void probeProxy();
+
+    // ---- 更新检查(S6.4 v1「检查更新 + 打开下载页」,docs/07-auto-update.md)----
+    /// 检查更新(网络,异步:线程池执行,完成发 updateFinished)。
+    /// 地址取 `updateCheckUrl()`:为空时 core 侧短路返回 `{configured:false}`,连请求都不发
+    /// —— UI 置灰与这条短路是同一语义的两道保险。
+    Q_INVOKABLE void checkUpdate();
+    /// 用系统默认浏览器打开外部链接(「打开下载页」)。非 http(s) 一律拒绝。
+    Q_INVOKABLE void openExternalUrl(const QString& url);
 
     // ---- 数据备份与导出(慢 I/O:线程池执行,完成发 backupFinished/exportFinished) ----
     /// 创建备份 zip:path 由 QFileDialog 提供,nbcore 内 checkpoint 后打包。
@@ -155,6 +177,9 @@ signals:
     /// 翻译服务探测结果(provider/available/message)。
     void translateProbeFinished(QVariantMap resp);
     void proxyProbeFinished(QVariantMap resp);
+    /// 更新检查完成。data:configured / hasUpdate / upToDate / latestVersion /
+    /// downloadUrl / title / notes / publishedAt / checkedAtMs。
+    void updateFinished(QVariantMap resp);
     /// 备份/导出完成(ok 与错误体都走这里,QML 侧统一提示)。
     void backupFinished(QVariantMap resp);
     void exportFinished(QVariantMap resp);

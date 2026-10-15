@@ -127,6 +127,12 @@ endif()
 # 避免版本号在 CMake 与 C++ 里各写一份而对不上。
 target_compile_definitions(nextboard PRIVATE NB_APP_VERSION="${PROJECT_VERSION}")
 
+# 更新检查地址(docs/07-auto-update.md §5):S6.4 v1 的**唯一配置点**,留空 = 功能禁用
+# (设置页「检查更新」可见但禁用并说明原因)。发布渠道定了填 GitHub releases/latest 或
+# 自建 manifest 的 https 地址,重编即生效 —— 不做成用户设置项,免得多个入口对不上。
+set(NB_UPDATE_CHECK_URL "" CACHE STRING "更新检查地址(留空 = 检查更新功能禁用)")
+target_compile_definitions(nextboard PRIVATE NB_UPDATE_CHECK_URL="${NB_UPDATE_CHECK_URL}")
+
 # ---- 部署:运行所需 DLL 拷贝到输出目录 ----
 add_custom_command(TARGET nextboard POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${NBCORE_DIR}/nbcore.dll" "$<TARGET_FILE_DIR:nextboard>"

@@ -88,11 +88,14 @@ int main(int argc, char* argv[]) {
     bool softwareBackend = false;
     bool hardwareBackend = false;
     bool ownDataDir = false;   // 显式 --data-dir:验收/调试,不参与单实例门禁
+    QString updateUrlOverride; // --update-url:验收注入的更新检查地址(必须早于 QML 装配)
     for (int i = 1; i < argc; ++i) {
         const QString arg = QString::fromLocal8Bit(argv[i]);
         if (arg == QLatin1String("--hidden")) startHidden = true;
         else if (arg == QLatin1String("--software")) softwareBackend = true;
         else if (arg == QLatin1String("--hardware")) hardwareBackend = true;
+        else if (arg == QLatin1String("--update-url") && i + 1 < argc)
+            updateUrlOverride = QString::fromLocal8Bit(argv[++i]);
         else if (arg == QLatin1String("--data-dir") && i + 1 < argc) {
             nb::setAppDataDirOverride(QString::fromLocal8Bit(argv[++i]));
             ownDataDir = true;
@@ -117,6 +120,7 @@ int main(int argc, char* argv[]) {
                 || arg == QLatin1String("--settings-flow")
                 || arg == QLatin1String("--restore-flow")
                 || arg == QLatin1String("--clear-all-flow")
+                || arg == QLatin1String("--update-flow")
                 || arg == QLatin1String("--dump-monitors")) {
                 const QString dir = QDir(QCoreApplication::applicationDirPath())
                                         .filePath(QStringLiteral("acceptance-data"));
@@ -192,6 +196,10 @@ int main(int argc, char* argv[]) {
     }
 
     // 2. QML 装配(类型/单例注册)→ 主面板
+    // 更新检查地址的验收覆盖必须落在 QML 装配**之前**:`updateCheckUrl` 是 CONSTANT 属性,
+    // 绑定时读一次就定型 —— 晚设不会生效(表现为"验收仍在打编译期那个空地址")。
+    if (!updateUrlOverride.isEmpty())
+        nb::CoreFacade::setUpdateCheckUrlOverride(updateUrlOverride);
     nb::setupQmlEnvironment();
     nb::logMemory("qml-env");      // + Qt Quick Controls 风格与全局字体
     nb::PanelWindow panel(core);
@@ -227,6 +235,7 @@ int main(int argc, char* argv[]) {
     bool settingsFlow = false;
     bool restoreFlow = false;
     bool clearAllFlow = false;
+    bool updateFlow = false;
     bool todoGroups = false;
     bool dumpMonitors = false;
     for (int i = 1; i < argc; ++i) {
@@ -258,6 +267,9 @@ int main(int argc, char* argv[]) {
         // → 读库断言全清(见 runClearAllFlow)。
         else if (arg == QLatin1String("--clear-all-flow"))
             clearAllFlow = true;
+        // 更新检查验收:真实点击「检查更新」(检查地址由 --update-url 指向本地 fixture)。
+        else if (arg == QLatin1String("--update-flow"))
+            updateFlow = true;
         // 待办分组自检:只读回各行分组键(配合脚本播种数据验证组标题分界点)。
         else if (arg == QLatin1String("--todo-groups"))
             todoGroups = true;
@@ -271,6 +283,12 @@ int main(int argc, char* argv[]) {
     if (settingsFlow) nb::runSettingsFlow(panel);
     if (restoreFlow) nb::runRestoreFlow(panel);
     if (clearAllFlow) nb::runClearAllFlow(panel);
+    if (updateFlow) {
+        // 「打开下载页」在验收里降级为日志:真起浏览器会抢焦点、干扰断言,也没法反复跑
+        // (docs/07-auto-update.md §11.2)。真实打开由发布前人工冒烟覆盖。
+        nb::CoreFacade::setBrowserLaunchDisabledForAcceptance(true);
+        nb::runUpdateFlow(panel);
+    }
     if (todoGroups) nb::reportTodoGroups(panel);
     if (dumpMonitors) nb::reportMonitors();
     if (!shotPath.isEmpty()) {

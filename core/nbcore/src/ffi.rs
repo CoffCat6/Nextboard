@@ -761,6 +761,20 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
             Ok(serde_json::to_value(probe)?)
         }
 
+        // ---- 更新检查(S6.4 v1「检查更新 + 打开下载页」;docs/07-auto-update.md)----
+        // ⚠️ `url` 允许为空(宿主编译期常量留空 = 功能禁用),所以**不能**用 `str_req`:
+        //    它把空串按"缺失"处理,空置态会被误报成"缺少参数 url"。
+        "check_update" => {
+            let core = crate::core::Core::get()?;
+            let url = req
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_owned();
+            let current = str_req(req, "currentVersion")?;
+            crate::update::check(core, &url, &current)
+        }
+
         // ---- OCR ----
         "ocr_probe" => {
             let probe = crate::ocr::probe(crate::ocr::Backend::System);

@@ -1,5 +1,5 @@
-// 自动化验收:待办 / 设置 / 备份恢复交互链路的**真实点击/按键**驱动
-// (仅 main.cpp 的 --todo-flow / --clear-done-flow / --clear-all-flow /
+// 自动化验收:待办 / 设置 / 备份恢复 / 更新检查交互链路的**真实点击/按键**驱动
+// (仅 main.cpp 的 --todo-flow / --clear-done-flow / --clear-all-flow / --update-flow /
 //  --settings-flow / --restore-flow / --todo-groups 分支使用)。
 //
 // 为什么单独成文件:这段逻辑有 ~100 行、只在验收时跑,留在 main.cpp 里会
@@ -34,6 +34,13 @@ void runClearDoneFlow(PanelWindow& panel);
 ///   读库断言"条目/待办全清、counts 全口径归零"。日志前缀 CLEAR-ALL STEP*。
 /// ⚠️ 会写库并删除隔离目录内的全部数据,必须配 --data-dir(与 --todo-flow 同一门禁)。
 void runClearAllFlow(PanelWindow& panel);
+
+/// 更新检查验收(--update-flow):真实点击「设置 → 关于 → 检查更新」→ 读回状态行与
+/// 下载链接 → 真实点击「打开下载页」。检查地址由 `--update-url` 指向本地环回 fixture
+/// (`tools/update_fixture.py` 的 /new /same /prerelease /notfound /garbage 五种响应),
+/// 全程不依赖外网;验收模式已把浏览器启动降级为日志(不会弹浏览器)。日志前缀 UPDATE STEP*。
+/// ⚠️ 会发网络请求(仅环回)并读设置,必须配 --data-dir(与 --todo-flow 同一门禁)。
+void runUpdateFlow(PanelWindow& panel);
 
 /// 设置抽屉交互验收(--settings-flow),回归三类用户实测缺陷:
 ///   ① 手输数值不保存 —— 点 SpinBox → 键入 "999" + 回车 → get_settings 读回;

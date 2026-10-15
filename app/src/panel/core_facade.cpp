@@ -38,6 +38,12 @@ CoreFacade& CoreFacade::instance() {
     return facade;
 }
 
+// 验收专用的两个进程级开关(只在本 TU 使用,故不挂成员):
+//   g_updateUrlOverride —— --update-url 注入的更新检查地址,覆盖编译期常量;
+//   g_noBrowserLaunch   —— 验收模式下 openExternalUrl 只记日志,不真起浏览器。
+static QString g_updateUrlOverride;
+static bool g_noBrowserLaunch = false;
+
 // 版本号由 CMake 注入(见 app/CMakeLists.txt 的 NB_APP_VERSION);独立构建时兜底。
 #ifndef NB_APP_VERSION
 #define NB_APP_VERSION "0.0.0"
@@ -49,6 +55,26 @@ QString CoreFacade::appVersion() const {
 
 QString CoreFacade::coreVersion() const {
     return CoreBridge::instance().coreVersion();
+}
+
+// 更新检查地址:唯一配置点是 CMake 的 NB_UPDATE_CHECK_URL(docs/07-auto-update.md §5)。
+// 独立构建(不经该 CMake)时兜底为空串 —— 行为与"发布渠道未定"完全一致:功能禁用。
+#ifndef NB_UPDATE_CHECK_URL
+#define NB_UPDATE_CHECK_URL ""
+#endif
+
+QString CoreFacade::updateCheckUrl() const {
+    return g_updateUrlOverride.isEmpty()
+               ? QStringLiteral(NB_UPDATE_CHECK_URL)
+               : g_updateUrlOverride;
+}
+
+void CoreFacade::setUpdateCheckUrlOverride(const QString& url) {
+    g_updateUrlOverride = url;
+}
+
+void CoreFacade::setBrowserLaunchDisabledForAcceptance(bool disabled) {
+    g_noBrowserLaunch = disabled;
 }
 
 int CoreFacade::entryCount(const QString& kind) {
@@ -236,6 +262,43 @@ void CoreFacade::probeProxy() {
         emit proxyProbeFinished(jsonToVariant(resp).toMap());
     };
     QThreadPool::globalInstance()->start(job);
+}
+
+// ---- 更新检查(S6.4 v1;docs/07-auto-update.md)----
+
+void CoreFacade::checkUpdate() {
+    // 与 probeProxy 同一型:网络请求必须在池线程,UI 只等 updateFinished。
+    // 超时/代理/解析与版本比较全在 nbcore 侧(复用 translate::http 那条已实测的路径)。
+    auto* job = new AsyncCall;
+    job->method = "check_update";
+    job->req = QJsonObject{{"url", updateCheckUrl()}, {"currentVersion", appVersion()}};
+    job->setAutoDelete(true);
+    job->onDone = [this](const QJsonObject& resp) {
+        emit updateFinished(jsonToVariant(resp).toMap());
+    };
+    QThreadPool::globalInstance()->start(job);
+}
+
+void CoreFacade::openExternalUrl(const QString& url) {
+    const QUrl target(url.trimmed());
+    // ⚠️ 两道白名单中的第二道:core 解析响应时已只留 http(s),但本方法对 QML 通用,
+    //    而 openUrl 走 shell 语义 —— 给它 file: 之类会真的打开本地文件。
+    //    (Qt 6.9 的 QUrl **没有** isHttp(),实测 qurl.h 只有 isRelative/isLocalFile,
+    //     故这里自己比 scheme;空 scheme = 相对路径,同样拒绝。)
+    const QString scheme = target.scheme().toLower();
+    if (scheme != QLatin1String("http") && scheme != QLatin1String("https")) {
+        emit toastMessage(QStringLiteral("只允许打开 http(s) 链接,已拒绝:%1").arg(url));
+        return;
+    }
+    if (g_noBrowserLaunch) {
+        qInfo() << "ACCEPTANCE openExternalUrl(验收模式已降级,不真起浏览器):" << target.toString();
+        return;
+    }
+    if (QDesktopServices::openUrl(target)) {
+        emit toastMessage(QStringLiteral("已在浏览器中打开下载页"));
+    } else {
+        emit toastMessage(QStringLiteral("打开浏览器失败,可手动访问:%1").arg(target.toString()));
+    }
 }
 
 // ---- 数据备份与导出(zip/Markdown 全量 I/O,秒级;必须离 UI 线程) ----

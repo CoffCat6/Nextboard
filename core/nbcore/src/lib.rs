@@ -22,6 +22,7 @@ pub mod settings;
 pub mod store;
 pub mod todo;
 pub mod translate;
+pub mod update;
 
 /// 初始化日志(log crate → 数据目录 nbcore.log)。
 /// 必须在任何日志调用前执行(nb_init 首行);多次调用无害。

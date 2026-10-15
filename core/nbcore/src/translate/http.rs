@@ -277,7 +277,9 @@ mod winhttp {
             }
             _ => (None, None),
         };
-        let agent = wide(concat!("clipboard-plus/", env!("CARGO_PKG_VERSION")));
+        // UA 会出现在代理与服务端日志里,产品名必须对得上(第一代叫 clipboard-plus,
+        // 本仓已是 Nextboard;docs/07-auto-update.md D-g)。
+        let agent = wide(concat!("nextboard/", env!("CARGO_PKG_VERSION")));
         let proxy_w = manual.map(|endpoint| wide(&proxy_string(endpoint)));
         let bypass_w = bypass.filter(|_| manual.is_some()).map(wide);
         let access_type = match (&manual, req.proxy.as_ref()) {

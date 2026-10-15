@@ -249,6 +249,46 @@ void runClearAllFlow(PanelWindow& panel) {
     });
 }
 
+void runUpdateFlow(PanelWindow& panel) {
+    // 更新检查验收(docs/07-auto-update.md §11.2):真实点击「设置 → 关于 → 检查更新」
+    //   → 读回状态行与下载链接 → 真实点击「打开下载页」。
+    // 检查地址由 --update-url 指向本地环回 fixture(tools/update_fixture.py),全程不碰外网;
+    // 「打开下载页」在验收模式下只记日志(见 CoreFacade::setBrowserLaunchDisabledForAcceptance),
+    // 否则每次跑都会弹一个抢焦点的浏览器。
+    QTimer::singleShot(3500, &panel, [&panel] {
+        qInfo() << "UPDATE STEP1 checkUrl:" << CoreFacade::instance().updateCheckUrl();
+        const bool opened = panel.clickByObjectName(QStringLiteral("settingsButton"));
+        qInfo() << "UPDATE STEP1 clickedOpen:" << opened;
+        QTimer::singleShot(800, &panel, [&panel] {
+            const QVariantMap st = panel.rootProperty("acceptanceState").toMap();
+            qInfo() << "UPDATE STEP2 drawerOpen:" << st.value("settingsOpen").toBool()
+                    << "checkBtnEnabled:" << st.value("updateEnabled").toBool()
+                    << "未配置说明可见:" << st.value("updateNoteVisible").toBool()
+                    << "(判据:空置态应 enabled=false 且说明=true;配好地址应相反)";
+            // 关于区在表单最末:不先滚进可视区,按钮点击会落空
+            panel.invokeAcceptance("acceptanceRevealUpdate");
+            QTimer::singleShot(700, &panel, [&panel] {
+                const bool clickedCheck =
+                    panel.clickByObjectName(QStringLiteral("updateCheckBtn"));
+                qInfo() << "UPDATE STEP3 clickedCheck:" << clickedCheck;
+                // 环回请求本身是毫秒级,这里的裕量是给"点击 → 异步回投 → 绑定刷新"整条链
+                QTimer::singleShot(2000, &panel, [&panel] {
+                    const QVariantMap st2 = panel.rootProperty("acceptanceState").toMap();
+                    const QString hint = st2.value("updateHintText").toString();
+                    const QString page = st2.value("updateDownloadUrl").toString();
+                    qInfo() << "UPDATE STEP4 hint:" << hint << "downloadUrl:" << page;
+                    const bool clickedPage =
+                        panel.clickByObjectName(QStringLiteral("updateOpenPageBtn"));
+                    qInfo() << "UPDATE STEP5 clickedOpenPage:" << clickedPage
+                            << "(判据:STEP4 文案符合该模式的预期;"
+                            << "无下载链接的模式此处置 false 才是对的)";
+                    QTimer::singleShot(400, &panel, [&panel] { QApplication::quit(); });
+                });
+            });
+        });
+    });
+}
+
 void reportTodoGroups(PanelWindow& panel) {
     // 只读自检:切待办视图 → 读回各行分组键。配合"脚本先播种各分组待办"使用,
     // 断言组标题的分界点(键序变化处即标题出现处)。

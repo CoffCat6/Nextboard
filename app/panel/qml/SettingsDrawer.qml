@@ -35,6 +35,11 @@ AppDrawer {
     property bool backupRunning: false
     property bool exportRunning: false
 
+    /// 更新检查(docs/07-auto-update.md §9):进行中标志 + 结果里的下载页链接。
+    /// `updateDownloadUrl` 非空才出现「打开下载页」—— core 只在拿到 http(s) 链接时填它。
+    property bool updateChecking: false
+    property string updateDownloadUrl: ""
+
     /// 恢复/导入:进行中标志 + 待确认的备份文件路径(确认卡点"确认"才发起)。
     property bool restoreRunning: false
     property bool importRunning: false
@@ -548,6 +553,14 @@ AppDrawer {
     }
     /// 验收(--clear-all-flow):把「清空全部数据」按钮滚进可视区(危险区在表单尾部)。
     function revealClearAll() { revealItem(clearButton) }
+    /// 验收(--update-flow):把「检查更新」按钮滚进可视区(关于区在表单最末)。
+    function revealUpdateCheck() { revealItem(updateCheckButton) }
+    /// 验收读回:检查结果的文案与下载链接(状态机断言用,见 docs/07 §11.2)。
+    readonly property string acceptanceUpdateHint: updateHint.text
+    readonly property string acceptanceUpdateUrl: root.updateDownloadUrl
+    /// 验收读回:空置态判据 —— 按钮是否可用、"未配置"说明是否出现(D-c 的核心承诺)。
+    readonly property bool acceptanceUpdateEnabled: updateCheckButton.enabled
+    readonly property bool acceptanceUpdateNoteVisible: updateConfigHint.visible
     /// 打开恢复确认卡(产品路径 = 原生文件对话框选路径后调用;验收路径 =
     /// Main.qml 的 acceptanceOpenRestore 直接喂路径,跳过只能人工操作的原生对话框)。
     function openRestoreConfirm(path) {
@@ -1507,6 +1520,50 @@ AppDrawer {
                           + "\nWindows 桌面一体化效率板:剪贴板历史 + 截图 / 贴图 + 翻译"
                 }
 
+                // 更新检查(S6.4 v1,docs/07-auto-update.md):检查地址的**唯一**配置点是
+                // CMake 的 NB_UPDATE_CHECK_URL。留空 = 功能禁用 —— 按钮仍可见但置灰,原因写在
+                // 上面那行,不留"点了没反应"的歧义;渠道定了填地址重编即启用,这里零改动。
+                HintLabel {
+                    id: updateConfigHint
+                    visible: Core.updateCheckUrl === ""
+                    text: "更新源未配置:发布渠道确定后,在 app/CMakeLists.txt 填入"
+                          + " NB_UPDATE_CHECK_URL 并重编即可启用检查更新。"
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.metrics.spacingSm
+                    ThemedButton {
+                        id: updateCheckButton
+                        objectName: "updateCheckBtn"   // 验收钩子(--update-flow 真实点击)
+                        variant: "secondary"
+                        text: root.updateChecking ? "检查中…" : "检查更新"
+                        enabled: Core.updateCheckUrl !== "" && !root.updateChecking
+                        onClicked: {
+                            root.updateChecking = true
+                            root.updateDownloadUrl = ""
+                            updateHint.isError = false
+                            updateHint.text = "正在检查更新…"
+                            Core.checkUpdate()
+                        }
+                    }
+                    ThemedButton {
+                        // ⚠️ 条件 objectName:按钮只在有下载链接时出现,隐藏期间若仍带名字,
+                        //    验收 DFS 会把它当命中目标、点到别处(clearDoneLink 同教训)。
+                        objectName: visible ? "updateOpenPageBtn" : ""
+                        variant: "secondary"
+                        visible: root.updateDownloadUrl !== ""
+                        text: "打开下载页"
+                        onClicked: Core.openExternalUrl(root.updateDownloadUrl)
+                    }
+                    Item { Layout.fillWidth: true }
+                }
+                HintLabel {
+                    id: updateHint
+                    property bool isError: false
+                    color: isError ? Theme.colors.error : Theme.colors.textSecondary
+                    wrapMode: Text.WrapAnywhere
+                }
+
                 // 改动即时保存(去抖 400ms),故不再有「保存 / 关闭」按钮 ——
                 // 关闭走固定头部的 ✕、Esc、或点抽屉外(AppDrawer 的 closePolicy)。
                 // 状态行只用于反馈结果(尤其是校验失败)。
@@ -1599,6 +1656,32 @@ AppDrawer {
                        ? ";有 " + d.blobMissing + " 张图片的文件在备份中缺失" : "")
             importHint.isError = false
             Entries.refreshNow()
+        }
+        function onUpdateFinished(resp) {
+            root.updateChecking = false
+            if (!resp.ok) {
+                updateHint.text = "检查失败:" + root.errText(resp)
+                updateHint.isError = true
+                return
+            }
+            const d = resp.data || {}
+            if (d.configured === false) {
+                // 常量在运行期是空的(不该走到这里:按钮此时置灰)—— 兜底成一句人话
+                updateHint.text = "更新源未配置"
+                updateHint.isError = false
+                return
+            }
+            // ⚠️ 只在真的要更新时才交出下载链接:已最新 / 被忽略的预发布,把老版本(或 rc)
+            //    的发布页摊在设置页上是噪音 —— --update-flow 的 /same 模式实测抓出过。
+            root.updateDownloadUrl = d.hasUpdate ? (d.downloadUrl || "") : ""
+            updateHint.isError = false
+            if (d.hasUpdate) {
+                const date = d.publishedAt ? "（" + d.publishedAt + "）" : ""
+                updateHint.text = "发现新版本 " + d.latestVersion + date
+                        + (root.updateDownloadUrl === "" ? ";本次响应未给出下载链接" : "")
+            } else {
+                updateHint.text = "已是最新版本 " + (d.currentVersion || Core.appVersion)
+            }
         }
     }
 }

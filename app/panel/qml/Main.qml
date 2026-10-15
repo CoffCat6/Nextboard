@@ -126,6 +126,10 @@ Rectangle {
     function acceptanceRevealClearAll() {
         if (settingsDrawerLoader.item) settingsDrawerLoader.item.revealClearAll()
     }
+    /// 验收(--update-flow):把设置抽屉的「检查更新」按钮滚进可视区(关于区在最末)。
+    function acceptanceRevealUpdate() {
+        if (settingsDrawerLoader.item) settingsDrawerLoader.item.revealUpdateCheck()
+    }
 
     /// 读回:是否处于编辑态(供断言"保存成功后卡片已关")。
     readonly property string acceptanceEditId: todoEditId
@@ -193,6 +197,15 @@ Rectangle {
                             ? settingsDrawerLoader.item.acceptanceRestoreCardVisible : false,
         importCardVisible: settingsDrawerLoader.item
                            ? settingsDrawerLoader.item.acceptanceImportCardVisible : false,
+        // 更新检查(--update-flow):结果文案 + 交给浏览器的下载链接。
+        updateHintText: settingsDrawerLoader.item
+                        ? settingsDrawerLoader.item.acceptanceUpdateHint : "",
+        updateDownloadUrl: settingsDrawerLoader.item
+                           ? settingsDrawerLoader.item.acceptanceUpdateUrl : "",
+        updateEnabled: settingsDrawerLoader.item
+                       ? settingsDrawerLoader.item.acceptanceUpdateEnabled : false,
+        updateNoteVisible: settingsDrawerLoader.item
+                           ? settingsDrawerLoader.item.acceptanceUpdateNoteVisible : false,
         // 页签可见性(0 个未完成待办时「待办」页签必须仍在)。
         todoTabVisible: tabRepeater.itemAt(4) ? tabRepeater.itemAt(4).visible : false
     })
