@@ -71,6 +71,10 @@ private:
     void showOcrResult(const QString& text, const QString& reason);
     void syncColorSwatch();
     void syncToolAction();
+    /// 画布的光标形状与"穿透态"和当前状态对齐(当前工具 / 是否文字编辑中)。
+    /// **单一入口**:任何会改变这两者的地方都调它 —— 否则两处状态各走各的
+    /// (此前 passthrough 只置 true 不复位,文字确认后画布再也画不上东西)。
+    void syncCanvasState();
 
     AnnotationEngine* m_engine = nullptr;
 

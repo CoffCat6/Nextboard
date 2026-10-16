@@ -78,6 +78,12 @@ public:
 
     void setPassthrough(bool on) { m_passthrough = on; }
 
+    /// 当前工具的光标(逻辑像素无关,直接存形状)。
+    void setToolCursor(Qt::CursorShape shape) {
+        m_toolCursor = shape;
+        if (!m_passthrough) viewport()->setCursor(shape);
+    }
+
     /// 适配显示:重置为指定缩放,并清除"用户已手动缩放"标记。
     void resetZoom(qreal zoom) {
         m_userZoomed = false;
@@ -126,6 +132,10 @@ protected:
     void mouseMoveEvent(QMouseEvent* e) override {
         if (!m_passthrough) emit canvasMoved(mapToScene(e->pos()));
         QGraphicsView::mouseMoveEvent(e);
+        // ⚠️ 必须放在 base 调用**之后**:QGraphicsView 的移动处理会按"鼠标下的图元"
+        //    重设视口光标(图元没设 cursor 就 unset),先设会被它冲掉 ——
+        //    表现就是"光标时对时错、动不动变回箭头"。
+        if (!m_passthrough) viewport()->setCursor(m_toolCursor);
     }
     void mouseReleaseEvent(QMouseEvent* e) override {
         if (m_passthrough || e->button() != Qt::LeftButton) {
@@ -143,6 +153,7 @@ private:
     qreal m_zoom = 1.0;
     bool m_userZoomed = false;
     bool m_passthrough = false;
+    Qt::CursorShape m_toolCursor = Qt::CrossCursor;   // 见 setToolCursor
 };
 
 // ---------- EditorWindow ----------
@@ -164,6 +175,7 @@ EditorWindow::EditorWindow(QImage base, QWidget* parent) : QWidget(parent), m_ba
     canvas->setAlignment(Qt::AlignCenter);
     canvas->setMouseTracking(true);
     m_view = canvas;
+    syncCanvasState();   // 初值:光标 = 当前工具(真正保持靠 onCanvasMoved)
 
     connect(canvas, &EditorCanvas::canvasPressed, this, &EditorWindow::onCanvasPressed);
     connect(canvas, &EditorCanvas::canvasMoved, this, &EditorWindow::onCanvasMoved);
@@ -348,21 +360,37 @@ void EditorWindow::resizeEvent(QResizeEvent* e) {
 }
 
 void EditorWindow::setTool(EditorTool tool) {
+    // ⚠️ 引擎的 setTool 内部会**自己**把进行中的文字图元烘焙掉,不走本窗口的
+    //    bakeTextItem —— 所以这里必须显式 sync,否则切工具后画布仍留在穿透态。
     m_engine->setTool(tool);
+    syncCanvasState();   // 切工具立刻换光标(不必等鼠标先动一下)
     syncColorSwatch();
+}
+
+void EditorWindow::syncCanvasState() {
+    auto* canvas = qobject_cast<EditorCanvas*>(m_view);
+    if (!canvas) return;
+    const bool editing = m_engine && m_engine->editingText();
+    // 文字编辑期间穿透:把鼠标事件还给 QGraphicsView/QGraphicsTextItem,
+    // 文本才能正常框选/点选;其余时候必须关掉,否则画布收不到画笔事件。
+    canvas->setPassthrough(editing);
+    // 光标**只由画布拥有**:形状存在画布上,由它在每次移动处理之后统一应用 ——
+    // QGraphicsView 自己会按"鼠标下的图元"重设视口光标,只有压在其后才能生效
+    // (文字态它不碰,交给文本控件给 IBeam)。
+    canvas->setToolCursor(toolCursor(m_engine->tool()));
 }
 
 void EditorWindow::onCanvasPressed(const QPointF& scenePos) {
     m_engine->onCanvasPressed(scenePos);
-    if (m_engine->editingText()) {
-        // 文字编辑态:焦点交给图元 + 视图 passthrough(引擎无视图)
-        if (auto* canvas = qobject_cast<EditorCanvas*>(m_view)) canvas->setPassthrough(true);
-        m_view->setFocus();
-    }
+    if (m_engine->editingText()) m_view->setFocus();   // 焦点交给文字图元
+    syncCanvasState();
 }
 
 void EditorWindow::onCanvasMoved(const QPointF& scenePos) {
     m_engine->onCanvasMoved(scenePos);
+    // 每次移动都对一次:QGraphicsView 会用"图元自己的 cursor"覆盖视口光标
+    // (图元没设 = unset),只设一次会被它冲掉 —— 表现为"设了没用/光标变回箭头"。
+    syncCanvasState();
 }
 
 void EditorWindow::onCanvasReleased(const QPointF& scenePos) {
@@ -371,6 +399,8 @@ void EditorWindow::onCanvasReleased(const QPointF& scenePos) {
 
 void EditorWindow::bakeTextItem() {
     m_engine->bakeTextItem();
+    // 文字编辑结束 → 立刻退出穿透态并恢复工具光标(见 syncCanvasState 注释)
+    syncCanvasState();
 }
 
 QImage EditorWindow::compose() const {

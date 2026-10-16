@@ -119,6 +119,14 @@ QString toolLabel(EditorTool tool) {
 }
 
 
+Qt::CursorShape toolCursor(EditorTool tool) {
+    switch (tool) {
+        case EditorTool::Text: return Qt::IBeamCursor;
+        case EditorTool::Picker: return Qt::PointingHandCursor;
+        default: return Qt::CrossCursor;
+    }
+}
+
 // ---------- AnnotationEngine ----------
 
 AnnotationEngine::AnnotationEngine(QImage base, QObject* parent)

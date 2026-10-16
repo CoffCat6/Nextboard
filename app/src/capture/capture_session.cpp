@@ -699,9 +699,10 @@ void OverlayWidget::mousePressEvent(QMouseEvent* e) {
         }
         const QPointF scenePos = overlay::toScene(e->pos(), sel, dpr());
         m_engine->onCanvasPressed(scenePos);
-        // 取色器:引擎采样后会自动切回上一个绘图工具并把颜色改掉,宿主同步选中态
+        // 取色器:引擎采样后会自动切回上一个绘图工具并把颜色改掉,宿主同步选中态与光标
         m_annoTool = m_engine->tool();
         m_annoColor = m_engine->color();
+        setCursor(toolCursor(m_annoTool));
         m_draggingStroke = true;
         update(sel.adjusted(-2, -2, 2, 2));   // 只重画选区(整屏重绘在 4K 上很吃帧)
         return;
@@ -731,6 +732,19 @@ void OverlayWidget::mouseMoveEvent(QMouseEvent* e) {
     if (m_adjusting) {
         applyAdjustment(e->pos());
         update();
+        return;
+    }
+    // 悬停在浮条/二级条的按钮上:给"可点"的手型(否则标注态会顶着一个画笔光标,
+    // 用户不知道这里点得动)
+    if (toolbarContains(e->pos()) || subbarContains(e->pos())) {
+        setCursor(Qt::PointingHandCursor);
+        return;
+    }
+    // 标注态:光标按**工具**给(文字=竖线/取色=手型/其余=十字)。
+    // ⚠️ 不能落到下面的手柄逻辑:选区内会命中 Handle::Inside → SizeAllCursor,
+    //    而标注态在这里是"画画",显示"可整体拖动"是误导。
+    if (m_engine) {
+        setCursor(toolCursor(m_engine->tool()));
         return;
     }
     // 悬停时给出光标反馈(仅微调模式有意义)
@@ -1007,6 +1021,7 @@ void OverlayWidget::enterAnnotating() {
     m_subbarVisible = true;
     m_toolbarRect = toolbarRect();   // 先定浮条位置
     m_subbarRect = subbarRect();     // 二级条几何依赖浮条(文档 §16.1:叠在其上方)
+    setCursor(toolCursor(m_annoTool));   // 进标注态立刻换光标(别等鼠标动一下)
     update();
 }
 
@@ -1017,6 +1032,7 @@ void OverlayWidget::exitAnnotating() {
     m_engine = nullptr;
     m_subbarVisible = false;
     m_subbarRect = QRect();
+    setCursor(Qt::CrossCursor);          // 回到框选语义的十字
     update();
 }
 
@@ -1043,6 +1059,7 @@ void OverlayWidget::beginInlineText(const QPoint& widgetPos) {
     edit->move(qBound(0, widgetPos.x(), qMax(0, width() - w)),
                qBound(0, widgetPos.y(), qMax(0, height() - 34)));
     edit->installEventFilter(this);
+    setCursor(Qt::IBeamCursor);   // 输入期间整体保持竖线(含框外),与文本框连成一体
     connect(edit, &QLineEdit::returnPressed, this, [this] { commitInlineText(); });
     edit->show();
     edit->setFocus();
@@ -1062,6 +1079,7 @@ void OverlayWidget::commitInlineText() {
                           overlay::toScene(m_textAnchor, m_selection.normalized(), dpr()),
                           m_annoColor, m_fontSize);
     }
+    if (m_engine) setCursor(toolCursor(m_engine->tool()));   // 回到工具光标(文字工具=竖线)
     update();
 }
 
@@ -1072,6 +1090,7 @@ void OverlayWidget::cancelInlineText() {
     edit->removeEventFilter(this);
     edit->hide();
     edit->deleteLater();
+    if (m_engine) setCursor(toolCursor(m_engine->tool()));
     update();
 }
 
@@ -1151,6 +1170,7 @@ void OverlayWidget::setAnnoTool(EditorTool tool) {
     m_engine->setColor(m_annoColor);
     m_engine->setStrokeWidth(m_penSize);
     m_engine->setFontSize(m_fontSize);
+    setCursor(toolCursor(tool));      // 切工具立刻换光标
     update();
 }
 

@@ -10,6 +10,7 @@
 #pragma once
 
 #include <QColor>
+#include <QCursor>
 #include <QObject>
 #include <QImage>
 #include <QList>
@@ -32,6 +33,14 @@ enum class EditorTool { Pen, Arrow, Line, Rect, Ellipse, Mosaic, Blur, Number, T
 /// 工具的中文显示名(编辑窗与遮罩浮条共用)。
 QString toolLabel(EditorTool tool);
 
+/// 工具对应的鼠标光标形状(编辑窗画布与遮罩标注态共用,**单一来源**)。
+///
+/// 为什么要集中一处:光标是"当前在画什么"最直接的反馈,而两个宿主各写一份必然漂移
+/// (一处改形状、另一处忘了)。落点语义:
+///   - 文字 = 竖线(IBeam):提示"这里会落一个字";
+///   - 取色 = 手型:Qt 内置没有吸管形状,手型已是"取一下"的最接近表达;
+///   - 其余(画笔/箭头/直线/矩形/椭圆/马赛克/模糊/序号)= 十字准星:精确落点。
+Qt::CursorShape toolCursor(EditorTool tool);
 
 class AnnotationEngine : public QObject {
     Q_OBJECT
