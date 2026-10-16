@@ -650,8 +650,10 @@ void OverlayWidget::mousePressEvent(QMouseEvent* e) {
     // 点到浮条外:收起浮条(允许直接重新框选),见下方起新选区逻辑
     if (toolbarVisible()) hideToolbar();
 
-    // 微调模式:已有选区时,按在手柄/内部上就进入调整,而不是重新框选
-    if (!m_autoConfirm && !m_selection.isNull()) {
+    // 微调模式:已有选区时,按在手柄/内部上就进入调整,而不是重新框选。
+    // ⚠️ 标注态**跳过**本段:Inside 命中会把"按下开始画画"吞成"整体拖动选区"
+    // (实测症状:笔画不出现、选区跟着鼠标跑 = 整体偏移);手柄此时本就隐藏。
+    if (!m_autoConfirm && !m_engine && !m_selection.isNull()) {
         const Handle handle = handleAt(e->pos());
         if (handle != Handle::None) {
             m_adjusting = true;
