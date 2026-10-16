@@ -1,6 +1,6 @@
 #include "capture_session.hpp"
 #include "capture/overlay_geometry.hpp"
-#include "editor/editor_window.hpp"
+#include "editor/annotation_toolbar.hpp"
 #include "host/core_bridge.hpp"
 #include "panel/core_facade.hpp"
 #include "host/memory_probe.hpp"
@@ -14,7 +14,6 @@
 #include <QList>
 #include <QMouseEvent>
 #include <QPainter>
-#include <QPointer>
 #include <QToolTip>
 #include <QUndoStack>
 #include <QGraphicsItem>
@@ -215,19 +214,23 @@ void finishCapture(const QImage& image, const CaptureDone& done) {
     if (!id.isEmpty() && done) done(id);
 }
 
-/// regionSkipEditor(默认 true):框选确认后跳过编辑器,直接入库 + 写剪贴板。
-bool skipEditor() {
-    const QJsonObject resp = CoreBridge::instance().call("get_settings");
-    if (!resp.value("ok").toBool()) return true;   // 读不到设置时按默认(直通)
-    return resp.value("data").toObject().value("regionSkipEditor").toBool(true);
-}
+/// 框选之后去哪儿(§18.4):**单一出口**取代原先两个布尔量
+/// (regionSkipEditor × regionAutoConfirm)的四种组合 —— 其中两种自相矛盾
+/// (「松开即确认」与「进编辑器」不可能同时成立),且组合语义无法向用户解释。
+///
+/// ⚠️ 「进编辑器」这条出口**已下线**(§18.5):编辑器只保留唯一入口 = 右键编辑
+/// (主面板条目右键 / 贴图右键)。框选链路的编辑能力由**浮条工具栏**承担。
+/// 故这里只剩两种:
+///   Direct  —— 松手即入库 + 写剪贴板(原 regionSkipEditor=true & autoConfirm=true)
+///   Toolbar —— 选区保留、浮出工具栏,就地标注/OCR/贴图/保存/完成/取消
+///              (原 regionSkipEditor=true & autoConfirm=false)
+enum class RegionExit { Direct, Toolbar };
 
-/// regionAutoConfirm(默认 true):框选松开鼠标即确认;false 则选区保留、可用 8 向
-/// 手柄微调,需 Enter 或双击确认(第一代 F10 的两种确认方式)。
+/// regionAutoConfirm(默认 true):松手即确认(Direct);false 则浮出工具栏(Toolbar)。
 /// regionRightClickCancel(默认 true):框选时右键取消本次截图。
 } // namespace
 
-void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured, bool allowEditor) {
+void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured) {
     // 会话进行中 = 屏幕上还有遮罩(第一代 CAPTURE_BUSY 语义)
     if (pruneOverlays()) {
         qInfo() << "截图进行中,忽略本次触发";
@@ -298,6 +301,10 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured, bool allo
     // 兜底值必须与 core 默认值一致(settings.rs 的 overlay_idle_secs = 60):
     // 这里原先写 600,一旦 get_settings 失败(核心未就绪/新旧 dll 错配)就会让遮罩
     // 白占整屏冻结底图十分钟 —— 实测遮罩会话常驻 +77.5MB。
+    // 浮条底板不透明度(docs/17 §17.5):三档,兜底 217 必须与 core 默认
+    // (settings.rs 的 capture_bar_alpha = 217)一致 —— 读不到设置时退化成
+    // "半透",而不是硬编码的不透明。
+    const int barAlpha = data.value("captureBarAlpha").toInt(OverlayWidget::kBarAlphaHalf);
     const int idleSecs = qBound(0, data.value("overlayIdleSecs").toInt(60), 3600);
     if (idleSecs > 0 && !g_idleTimer) {
         g_idleTimer = new QTimer(qApp);
@@ -317,6 +324,7 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured, bool allo
             continue;
         }
         auto* overlay = new OverlayWidget(frozen, i, screen, autoConfirm, rightClickCancel);
+        overlay->setBarAlpha(barAlpha);   // 会话内三档可调,初始取设置
         overlay->setAttribute(Qt::WA_DeleteOnClose);
         g_overlays.append(overlay);
 
@@ -330,50 +338,22 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured, bool allo
         // 冻结底图已在宿主侧(QImage 隐式共享,lambda 捕获代价为 0);
         // 裁剪仍走核心 RGBA 通道 nb_capture_crop,保持"有逻辑的归 Rust"。
         QObject::connect(overlay, &OverlayWidget::regionConfirmed, overlay,
-                [frozen, allowEditor](const QRect& physicalRect) {
+                [frozen](const QRect& physicalRect) {
             const CaptureDone done = g_onCaptured;   // closeAllOverlays 会清空,先取出
-            // 任一屏确认即收起全部遮罩,并**等它们真正析构后**再裁剪/入库/建编辑器
+            // 任一屏确认即收起全部遮罩,并**等它们真正析构后**再裁剪/入库
             // (原因见 closeAllOverlays 的注释:否则整屏底图 + 后备缓冲会陪跑整条链)。
-            closeAllOverlays([frozen, physicalRect, done, allowEditor] {
+            closeAllOverlays([frozen, physicalRect, done] {
                 const QImage cropped =
                     CoreBridge::instance().captureCrop(frozen, physicalRect);
                 if (cropped.isNull()) {
                     qWarning() << "选区裁剪失败(空选区或越界)";
                     return;
                 }
-                if (!allowEditor || skipEditor()) {
-                    finishCapture(cropped, done);
-                    return;
-                }
-                // regionSkipEditor=false:先进编辑器标注,「完成」时才入库 + 写剪贴板
-                auto* editor = new EditorWindow(cropped);
-                QObject::connect(editor, &EditorWindow::committed, editor,
-                        [editor, done](const QImage& composed) {
-                    // finish() 里 close() 只是 deleteLater:此刻编辑器仍持底图 +
-                    // 合成输出 + 窗口后备缓冲。等它真析构完再入库,峰值里就不含这一份。
-                    runAfterDestroyed(editor, [done, composed] {
-                        finishCapture(composed, done);
-                    });
-                });
-                QObject::connect(editor, &EditorWindow::cancelled, editor,
-                                 [] { qInfo() << "截图编辑已取消"; });
-                // 「贴图」:编辑器只发合成图;贴图窗口归宿主(软上限/淘汰/设置读取
-                // 都在 pinComposedImage 一条通道,不在编辑器里绕过)。
-                // 决策(docs/14 §15.6-4):贴图后编辑器自己关闭 —— 信号在 close()
-                // 之前发出,这里等析构完再贴,避免编辑器底图陪跑。
-                QObject::connect(editor, &EditorWindow::pinRequested, editor,
-                        [editor](const QImage& composed) {
-                    runAfterDestroyed(editor, [composed] { pinComposedImage(composed); });
-                });
-                // 「OCR 取字」:识别与弹层都在编辑器内;宿主只记日志。
-                // 不入库、不写剪贴板(复制能力预留,docs/14 §15.6-2)。
-                QObject::connect(editor, &EditorWindow::ocrFinished, editor,
-                                 [](const QString&, const QString&) {
-                    qInfo() << "截图 OCR 取字完成";
-                });
-                editor->show();
-                editor->raise();
-                editor->activateWindow();
+                // ⚠️ 框选确认后**一律直通**(入库 + 写剪贴板):「进编辑器」这条出口
+                //    已下线(§18.5)—— 编辑器只保留唯一入口 = 右键编辑
+                //    (主面板条目右键 / 贴图右键);框选链路要标注就走浮条工具栏的
+                //    「标注」,要事后精修走右键「编辑」。
+                finishCapture(cropped, done);
             });
         });
         QObject::connect(overlay, &OverlayWidget::cancelled, overlay, [] {
@@ -417,20 +397,19 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured, bool allo
 
 // ---- OverlayWidget ----
 
-void startDelayedCapture(int seconds, CaptureIntent intent, CaptureDone onCaptured,
-                         bool allowEditor) {
+void startDelayedCapture(int seconds, CaptureIntent intent, CaptureDone onCaptured) {
     if (seconds <= 0) {
-        startCaptureSession(intent, std::move(onCaptured), allowEditor);
+        startCaptureSession(intent, std::move(onCaptured));
         return;
     }
     auto* overlay = new CountdownOverlay(seconds);
     QPointer<CountdownOverlay> guard(overlay);
     overlay->show();
-    QTimer::singleShot(seconds * 1000, [guard, intent, onCaptured, allowEditor] {
+    QTimer::singleShot(seconds * 1000, [guard, intent, onCaptured] {
         // 先收起倒计时(否则数字会被冻进底图),再等窗口真正消失后采屏
         if (guard) guard->close();
-        QTimer::singleShot(80, [intent, onCaptured, allowEditor] {
-            startCaptureSession(intent, onCaptured, allowEditor);
+        QTimer::singleShot(80, [intent, onCaptured] {
+            startCaptureSession(intent, onCaptured);
         });
     });
 }
@@ -660,10 +639,11 @@ void OverlayWidget::mousePressEvent(QMouseEvent* e) {
     // 文字输入中:先落字(点别处 = 确认,不再需要第二次点击)
     if (m_textEdit) commitInlineText();
 
-    // 二级条/浮条命中:**先于一切** —— 点按钮走动作,点条上不当作重新框选
-    if (subbarContains(e->pos())) {
-        handleSubbarClick(e->pos());
-        return;
+    // 二级条/浮条命中:**先于一切** —— 点按钮走动作,点条上不当作重新框选。
+    // 二级条已是**共享控件**(§17.3 A):按钮是真实子控件,点击根本不会落到这里;
+    // 这条兜底拦的是控件的空白内边距区(落在这里 = 点在条上,不该当重新框选)。
+    if (subbarWidgetContains(e->pos())) {
+        return;   // 控件自己处理;遮罩什么都不做(不重框、不取消)
     }
     if (toolbarContains(e->pos())) {
         handleToolbarClick(e->pos());
@@ -736,7 +716,7 @@ void OverlayWidget::mouseMoveEvent(QMouseEvent* e) {
     }
     // 悬停在浮条/二级条的按钮上:给"可点"的手型(否则标注态会顶着一个画笔光标,
     // 用户不知道这里点得动)
-    if (toolbarContains(e->pos()) || subbarContains(e->pos())) {
+    if (toolbarContains(e->pos()) || subbarWidgetContains(e->pos())) {
         setCursor(Qt::PointingHandCursor);
         return;
     }
@@ -823,39 +803,10 @@ QString toolbarButtonText(int index) {
         case 1: return QStringLiteral("OCR取字");
         case 2: return QStringLiteral("贴图");
         case 3: return QStringLiteral("保存");
-        case 4: return QStringLiteral("完成");
+        case 4: return QStringLiteral("透明");   // 底板不透明度三档循环(docs/17 §17.5)
+        case 5: return QStringLiteral("完成");
         default: return QStringLiteral("取消");
     }
-}
-
-/// 标注工具顺序(二级条工具行 = 本顺序);名称走引擎的 toolLabel,单一来源。
-const QList<EditorTool>& toolOrder() {
-    static const QList<EditorTool> kTools = {
-        EditorTool::Pen,    EditorTool::Arrow, EditorTool::Line,   EditorTool::Rect,
-        EditorTool::Ellipse, EditorTool::Mosaic, EditorTool::Blur, EditorTool::Number,
-        EditorTool::Text,   EditorTool::Picker,
-    };
-    return kTools;
-}
-
-/// 第一代七色调色板。
-const QList<QColor>& paletteColors() {
-    static const QList<QColor> kPalette = {
-        QColor(0xE0, 0x31, 0x31), QColor(0xF7, 0x67, 0x07), QColor(0xFA, 0xB0, 0x05),
-        QColor(0x40, 0xC0, 0x57), QColor(0x1C, 0x7E, 0xD6), QColor(0x21, 0x25, 0x29),
-        QColor(0xFF, 0xFF, 0xFF),
-    };
-    return kPalette;
-}
-
-const QList<int>& penSizes() {
-    static const QList<int> kSizes = {2, 4, 8};
-    return kSizes;
-}
-
-const QList<int>& fontSizes() {
-    static const QList<int> kSizes = {24, 36, 48};
-    return kSizes;
 }
 
 } // namespace
@@ -873,7 +824,10 @@ QRect OverlayWidget::toolbarRect() const {
 
 void OverlayWidget::showToolbar() {
     m_toolbarRect = toolbarRect();
-    if (m_subbarVisible) m_subbarRect = subbarRect();   // 二级条跟着浮条走
+    if (m_subbarVisible) {
+        m_subbarRect = subbarRect();   // 二级条跟着浮条走
+        if (m_subbar) { m_subbar->setGeometry(m_subbarRect); m_subbar->raise(); }
+    }
     update();
 }
 
@@ -900,17 +854,24 @@ void OverlayWidget::drawToolbar(QPainter& painter) const {
     const QRect rc = m_toolbarRect;
     // 底板
     painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(0x26, 0x27, 0x2E, 242));
+    // 底板不透明度走**用户可调的三档**(docs/17 §17.5):原先硬编码 242(≈95% 不透明),
+    // 压在选区底部会把待截内容整片盖住 —— 这正是"浮条挡原图"的成因。
+    painter.setBrush(QColor(0x26, 0x27, 0x2E, barAlpha()));
     painter.drawRoundedRect(rc, 8, 8);
     // 按钮均分;完成/取消给强调/弱化色,其余普通
     const int count = overlay::kToolbarButtons;
     const int bw = rc.width() / count;
+    // 极简档下底板仅 70% 不透明,默认灰字会"透到看不清" —— 提高对比度兜底
+    const QColor baseFg = barNeedsContrastBoost() ? QColor(0xFF, 0xFF, 0xFF)
+                                                  : QColor(0xDF, 0xE1, 0xE8);
     for (int i = 0; i < count; ++i) {
         const QRect btn(rc.x() + i * bw, rc.y(), bw, rc.height());
-        QColor fg = QColor(0xDF, 0xE1, 0xE8);
-        if (i == 0 && annotating()) fg = QColor(0x1C, 0x7E, 0xD6);  // 标注态:蓝
-        if (i == 4) fg = QColor(0x40, 0xC0, 0x57);   // 完成:绿
-        if (i == 5) fg = QColor(0xE0, 0x31, 0x31);   // 取消:红
+        QColor fg = baseFg;
+        const QColor accent = barNeedsContrastBoost() ? QColor(255, 255, 255) : QColor();
+        if (i == 0 && annotating()) fg = accent.isValid() ? accent : QColor(0x1C, 0x7E, 0xD6);
+        if (i == 5) fg = accent.isValid() ? accent : QColor(0x40, 0xC0, 0x57);   // 完成:绿
+        if (i == 6) fg = accent.isValid() ? accent : QColor(0xE0, 0x31, 0x31);   // 取消:红
+        if (i == 4) fg = accent.isValid() ? accent : baseFg;                     // 透明档位
         painter.setPen(fg);
         painter.drawText(btn, Qt::AlignCenter, toolbarButtonText(i));
         if (i < count - 1) {
@@ -928,10 +889,13 @@ void OverlayWidget::handleToolbarClick(const QPoint& pos) {
     const int bw = rc.width() / count;
     const int index = qBound(0, (pos.x() - rc.x()) / bw, count - 1);
     switch (index) {
-        case 4:   // 完成
+        case 4:   // 透明:底板不透明度三档循环(即时生效,不结束会话)
+            cycleBarAlpha();
+            return;
+        case 5:   // 完成
             confirmSelection();
             return;
-        case 5:   // 取消
+        case 6:   // 取消
             emit cancelled();
             return;
         case 0:   // 标注:进入/退出标注态(S3)
@@ -1021,7 +985,39 @@ void OverlayWidget::enterAnnotating() {
     m_subbarVisible = true;
     m_toolbarRect = toolbarRect();   // 先定浮条位置
     m_subbarRect = subbarRect();     // 二级条几何依赖浮条(文档 §16.1:叠在其上方)
-    setCursor(toolCursor(m_annoTool));   // 进标注态立刻换光标(别等鼠标动一下)
+    // 二级条换成**共享控件**(§17.3 A):与编辑器同一个 AnnotationToolbar,
+    // 工具/颜色/粗细/字号的图标与选中态逻辑只此一份。遮罩上 QLineEdit 内联输入
+    // 已是先例,子控件在遮罩窗口上工作正常。透明背景 → 底板仍由 paintEvent 画,
+    // 视觉与主浮条一致(同一 barAlpha 三档)。
+    if (!m_subbar) {
+        m_subbar = new AnnotationToolbar(this);
+        m_subbar->setAttribute(Qt::WA_TranslucentBackground);
+        m_subbar->setAttribute(Qt::WA_NoMousePropagation);   // 事件别漏给遮罩
+        m_subbar->setOverlayMode(true);                       // 无手型(遮罩无画布可拖)
+        m_subbar->setGeometry(m_subbarRect);
+        m_subbar->show();
+        // 控件点按钮 → 引擎与浮条成员同步(取色器回退等仍走 setAnnoTool)
+        connect(m_subbar, &AnnotationToolbar::toolChanged, this,
+                [this](EditorTool tool) { setAnnoTool(tool); });
+        connect(m_subbar, &AnnotationToolbar::colorChanged, this, [this](const QColor& c) {
+            m_annoColor = c;
+            if (m_engine) m_engine->setColor(c);
+            update();
+        });
+        connect(m_subbar, &AnnotationToolbar::strokeWidthChanged, this, [this](int w) {
+            m_penSize = w;
+            if (m_engine) m_engine->setStrokeWidth(w);
+            update();
+        });
+        connect(m_subbar, &AnnotationToolbar::fontSizeChanged, this, [this](int px) {
+            m_fontSize = px;
+            if (m_engine) m_engine->setFontSize(px);
+            update();
+        });
+        // 控件初值 = 浮条成员(用户可能先点过主浮条的颜色再进标注态)
+        m_subbar->setEngine(m_engine);
+    }
+    setCursor(crosshairCursor(palette().color(QPalette::Window).lightness() < 128, dpr()));
     update();
 }
 
@@ -1030,6 +1026,7 @@ void OverlayWidget::exitAnnotating() {
     cancelInlineText();              // 退出标注态,未确认的文字一并丢弃
     m_engine->deleteLater();
     m_engine = nullptr;
+    if (m_subbar) { m_subbar->hide(); m_subbar->deleteLater(); }   // 共享控件随标注态销毁
     m_subbarVisible = false;
     m_subbarRect = QRect();
     setCursor(Qt::CrossCursor);          // 回到框选语义的十字
@@ -1120,49 +1117,38 @@ bool OverlayWidget::subbarContains(const QPoint& pos) const {
     return m_subbarVisible && m_subbarRect.contains(pos);
 }
 
+bool OverlayWidget::subbarWidgetContains(const QPoint& pos) const {
+    // 控件的真实边界(它有自己的内边距/按钮),比 m_subbarRect 更精确;
+    // 控件不在(未进标注态)时退回几何判断,选区微调的拖拽不受影响。
+    return m_subbar ? m_subbar->geometry().contains(pos) : subbarContains(pos);
+}
+
 QRect OverlayWidget::annotationSceneRect() const {
     return overlay::annotationSceneRect(m_selection.normalized(), dpr());
 }
 
-OverlayWidget::SubbarCells OverlayWidget::subbarCells() const {
-    // 二级条两行:上行 = 工具(画笔/箭头/…/取色),下行 = 撤销·重做 + 七色 + 粗细(+字号)。
-    // 全部现算自 m_subbarRect —— **绘制与命中测试共用本函数**,不再各写一份算式。
-    SubbarCells cells;
-    const QRect rc = m_subbarRect;
-    if (rc.isNull()) return cells;
-
-    const QList<EditorTool>& tools = toolOrder();
-    const QRect toolsRow(rc.x(), rc.y(), rc.width(), overlay::kSubToolsRow);
-    const int tw = toolsRow.width() / qMax(1, int(tools.size()));
-    for (int i = 0; i < tools.size(); ++i)
-        cells.tools.append(QRect(toolsRow.x() + i * tw, toolsRow.y(), tw, toolsRow.height()));
-
-    const QRect row(rc.x(), rc.y() + overlay::kSubToolsRow, rc.width(), overlay::kSubParamsRow);
-    int x = row.x() + 6;
-    cells.undo = QRect(x, row.y(), 44, row.height());
-    x += 48;
-    cells.redo = QRect(x, row.y(), 44, row.height());
-    x += 52;
-    const int colorCell = 30;
-    for (int i = 0; i < paletteColors().size(); ++i) {
-        cells.colors.append(QRect(x, row.y(), colorCell, row.height()));
-        x += colorCell;
-    }
-    x += 10;
-    for (int i = 0; i < penSizes().size(); ++i) {
-        cells.widths.append(QRect(x, row.y(), colorCell, row.height()));
-        x += colorCell;
-    }
-    if (m_annoTool == EditorTool::Text) {
-        x += 10;
-        for (int i = 0; i < fontSizes().size(); ++i) {
-            cells.fonts.append(QRect(x, row.y(), 34, row.height()));
-            x += 34;
-        }
-    }
-    return cells;
+void OverlayWidget::setBarAlpha(int alpha) {
+    // 只接受三档:设置校验已限定,这里再夹一次防越界值直接进来
+    m_barAlpha = (alpha == kBarAlphaSolid || alpha == kBarAlphaMinimal) ? alpha : kBarAlphaHalf;
+    update();
 }
 
+void OverlayWidget::cycleBarAlpha() {
+    // 半透 → 极简 → 不透明 → 半透(默认档居中,两个方向都只需一次点击)
+    const int next = m_barAlpha == kBarAlphaHalf      ? kBarAlphaMinimal
+                     : m_barAlpha == kBarAlphaMinimal ? kBarAlphaSolid
+                                                      : kBarAlphaHalf;
+    setBarAlpha(next);
+    // 持久化:同类工具的"记住上次选择"语义(贴图不透明度也是设置项)
+    CoreBridge::instance().call("save_settings",
+                                {{"captureBarAlpha", static_cast<int>(next)}});
+}
+
+QString OverlayWidget::barAlphaTip() const {
+    if (m_barAlpha >= kBarAlphaSolid) return QStringLiteral("底板不透明(点按切换)");
+    if (m_barAlpha <= kBarAlphaMinimal) return QStringLiteral("底板极简(尽量不挡原图)");
+    return QStringLiteral("底板半透(点按切换)");
+}
 void OverlayWidget::setAnnoTool(EditorTool tool) {
     if (!m_engine) return;
     m_annoTool = tool;
@@ -1176,120 +1162,13 @@ void OverlayWidget::setAnnoTool(EditorTool tool) {
 
 void OverlayWidget::drawSubbar(QPainter& painter) const {
     if (!m_subbarVisible || m_subbarRect.isNull()) return;
-    const QRect rc = m_subbarRect;
-    const SubbarCells cells = subbarCells();   // 几何与命中测试同源
-
+    // ⚠️ 只画**底板**。条目(工具/颜色/粗细/字号/撤销重做)已换成共享控件
+    //    AnnotationToolbar(§17.3 A),不再自绘 —— 自绘版的"绘制与命中测试各写
+    //    一份"是反复错位的来源。控件本体带透明背景,底板由这里统一画,
+    //    视觉随主浮条(barAlpha 三档)。
     painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(0x26, 0x27, 0x2E, 242));
-    painter.drawRoundedRect(rc, 8, 8);
-    // 两行之间的分隔线
-    painter.setPen(QColor(255, 255, 255, 24));
-    painter.drawLine(rc.x() + 6, rc.y() + overlay::kSubToolsRow,
-                     rc.right() - 6, rc.y() + overlay::kSubToolsRow);
-
-    QFont f = painter.font();
-    f.setPixelSize(13);
-    painter.setFont(f);
-
-    // 工具行:当前工具高亮(选中态一眼可见 —— 此前只能盲猜当前在画什么)
-    const QList<EditorTool>& tools = toolOrder();
-    for (int i = 0; i < cells.tools.size() && i < tools.size(); ++i) {
-        const bool current = tools[i] == m_annoTool;
-        if (current) {
-            painter.setPen(Qt::NoPen);
-            painter.setBrush(QColor(0x1C, 0x7E, 0xD6));
-            painter.drawRoundedRect(cells.tools[i].adjusted(2, 3, -2, -3), 4, 4);
-        }
-        painter.setPen(current ? QColor(0xFF, 0xFF, 0xFF) : QColor(0xDF, 0xE1, 0xE8, 190));
-        painter.drawText(cells.tools[i], Qt::AlignCenter, toolLabel(tools[i]));
-    }
-
-    // 撤销/重做
-    const bool canUndo = m_engine && m_engine->undoStack()->canUndo();
-    const bool canRedo = m_engine && m_engine->undoStack()->canRedo();
-    painter.setPen(canUndo ? QColor(0xDF, 0xE1, 0xE8) : QColor(0xDF, 0xE1, 0xE8, 70));
-    painter.drawText(cells.undo, Qt::AlignCenter, QStringLiteral("撤销"));
-    painter.setPen(canRedo ? QColor(0xDF, 0xE1, 0xE8) : QColor(0xDF, 0xE1, 0xE8, 70));
-    painter.drawText(cells.redo, Qt::AlignCenter, QStringLiteral("重做"));
-    painter.setPen(QColor(255, 255, 255, 28));
-    painter.drawLine(cells.redo.right() + 2, cells.redo.top() + 10,
-                     cells.redo.right() + 2, cells.redo.bottom() - 10);
-
-    // 色块(第一代 PALETTE 七色)
-    const QList<QColor>& colors = paletteColors();
-    for (int i = 0; i < cells.colors.size() && i < colors.size(); ++i) {
-        const QRect cell = cells.colors[i];
-        const int sw = 14;
-        const QRectF dot(cell.center().x() - sw / 2.0, cell.center().y() - sw / 2.0, sw, sw);
-        painter.setPen(colors[i] == m_annoColor ? QPen(QColor(255, 255, 255), 2)
-                                                : QPen(QColor(0x33, 0x35, 0x3D), 1));
-        painter.setBrush(colors[i]);
-        painter.drawRoundedRect(dot, 3, 3);
-    }
-    // 粗细(三档:小点/中点/大点示意)
-    const QList<int>& sizes = penSizes();
-    for (int i = 0; i < cells.widths.size() && i < sizes.size(); ++i) {
-        const QRect cell = cells.widths[i];
-        const bool current = sizes[i] == m_penSize;
-        const qreal r = 2.0 + i * 2.5;
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(current ? QColor(255, 255, 255) : QColor(0xDF, 0xE1, 0xE8, 150));
-        painter.drawEllipse(QPointF(cell.center()), r, r);
-    }
-    // 字号(仅文字工具)
-    const QList<int>& fz = fontSizes();
-    for (int i = 0; i < cells.fonts.size() && i < fz.size(); ++i) {
-        painter.setPen(fz[i] == m_fontSize ? QColor(255, 255, 255)
-                                           : QColor(0xDF, 0xE1, 0xE8, 150));
-        painter.drawText(cells.fonts[i], Qt::AlignCenter, QString::number(fz[i]));
-    }
-}
-
-void OverlayWidget::handleSubbarClick(const QPoint& pos) {
-    if (!subbarContains(pos)) return;
-    const SubbarCells cells = subbarCells();   // 与绘制同一份几何:所见即所点
-
-    if (cells.undo.contains(pos)) {
-        if (m_engine) m_engine->undoStack()->undo();
-        update();
-        return;
-    }
-    if (cells.redo.contains(pos)) {
-        if (m_engine) m_engine->undoStack()->redo();
-        update();
-        return;
-    }
-    const QList<EditorTool>& tools = toolOrder();
-    for (int i = 0; i < cells.tools.size() && i < tools.size(); ++i) {
-        if (cells.tools[i].contains(pos)) {
-            setAnnoTool(tools[i]);
-            return;
-        }
-    }
-    const QList<QColor>& colors = paletteColors();
-    for (int i = 0; i < cells.colors.size() && i < colors.size(); ++i) {
-        if (!cells.colors[i].contains(pos)) continue;
-        m_annoColor = colors[i];
-        if (m_engine) m_engine->setColor(m_annoColor);
-        update();
-        return;
-    }
-    const QList<int>& sizes = penSizes();
-    for (int i = 0; i < cells.widths.size() && i < sizes.size(); ++i) {
-        if (!cells.widths[i].contains(pos)) continue;
-        m_penSize = sizes[i];
-        if (m_engine) m_engine->setStrokeWidth(m_penSize);
-        update();
-        return;
-    }
-    const QList<int>& fz = fontSizes();
-    for (int i = 0; i < cells.fonts.size() && i < fz.size(); ++i) {
-        if (!cells.fonts[i].contains(pos)) continue;
-        m_fontSize = fz[i];
-        if (m_engine) m_engine->setFontSize(m_fontSize);
-        update();
-        return;
-    }
+    painter.setBrush(QColor(0x26, 0x27, 0x2E, barAlpha()));
+    painter.drawRoundedRect(m_subbarRect, 8, 8);
 }
 
 void OverlayWidget::bakeSaveDialog(const QImage& image) {

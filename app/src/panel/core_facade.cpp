@@ -433,12 +433,11 @@ void CoreFacade::processCapture(const QString& id, const QString& mode) {
 
 void CoreFacade::captureOcr() {
     // 调用方(翻译窗口)已先收起自身;这里再等窗口真正消失,避免被拍进画面。
-    // allowEditor=false:取字链路始终直通,不弹标注编辑器。
     QTimer::singleShot(150, [] {
         startCaptureSession(CaptureIntent::Region, [](const QString& entryId) {
             if (!entryId.isEmpty())
                 CoreFacade::instance().processCapture(entryId, QStringLiteral("ocr"));
-        }, /*allowEditor=*/false);
+        });
     });
 }
 
@@ -559,6 +558,21 @@ void showPinWindow(const PinContent& content) {
             facade.notifyClipChanged();   // 让主面板列表刷新出新图
             if (guard) guard->setImage(composed);
         });
+        // ⚠️ 编辑器里的「贴图」按钮:此前**无人连接 pinRequested** —— 点了按钮
+        //    编辑器 close(),贴图窗口却没建(信号飘在空中)。这个入口是框选链路
+        //    下线后仅存的两个编辑器入口之一,必须接上。
+        //    贴图产物同样入库 + 回写本贴图(与 committed 同口径,只是不关贴图)。
+        QObject::connect(editor, &EditorWindow::pinRequested, editor,
+                         [guard](const QImage& composed) {
+            CoreFacade& facade = CoreFacade::instance();
+            if (ingestImageAndCopy(composed).isEmpty()) {
+                facade.showToast(QStringLiteral("贴图失败(可能超过图片大小上限)"));
+                return;
+            }
+            facade.notifyClipChanged();
+            pinComposedImage(composed);      // 新建贴图窗口
+            if (guard) guard->setImage(composed);   // 原贴图同步为新画面
+        });
         editor->show();
         editor->raise();
         editor->activateWindow();
@@ -633,6 +647,17 @@ void CoreFacade::editEntry(const QString& id) {
         }
         emit toastMessage(QStringLiteral("已保存编辑结果"));
         emit clipChanged();   // 让主面板列表刷新出新图
+    });
+    // ⚠️ 「贴图」按钮:pinRequested 此前无人连接 —— 这是框选链路(唯一接过此信号的
+    //    地方)下线后遗留的孤儿信号,点了按钮编辑器关闭、贴图却没出现。
+    //    口径与 committed 一致:入库 + 写剪贴板,再开贴图窗口。
+    QObject::connect(editor, &EditorWindow::pinRequested, editor, [this](const QImage& composed) {
+        if (ingestImageAndCopy(composed).isEmpty()) {
+            emit toastMessage(QStringLiteral("贴图失败(可能超过图片大小上限)"));
+            return;
+        }
+        emit clipChanged();
+        pinComposedImage(composed);
     });
     editor->show();
     editor->raise();

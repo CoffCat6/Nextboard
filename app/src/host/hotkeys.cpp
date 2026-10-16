@@ -39,10 +39,10 @@ bool parseComboImpl(const QString& combo, UINT* modifiers, UINT* vk) {
 /// 截图前收起主面板并等窗口真正消失,否则面板会被拍进画面。
 /// onCaptured:入库后接续的动作(截图翻译/取字);为空则只入库 + 写剪贴板。
 void hidePanelThenCapture(PanelWindow& panel, CaptureIntent intent,
-                          CaptureDone onCaptured = {}, bool allowEditor = true) {
+                          CaptureDone onCaptured = {}) {
     panel.hide();
-    QTimer::singleShot(150, [intent, onCaptured, allowEditor] {
-        startCaptureSession(intent, onCaptured, allowEditor);
+    QTimer::singleShot(150, [intent, onCaptured] {
+        startCaptureSession(intent, onCaptured);
     });
 }
 
@@ -98,13 +98,12 @@ Hotkeys::Hotkeys(PanelWindow& panel, CoreBridge& core, QObject* parent)
                 break;
             case Action::CaptureTranslate:
                 // 截图翻译(F25):收起面板 → 框选 → 入库 → OCR → 翻译窗口预填并翻译。
-                // allowEditor=false:取内容链路始终直通,不弹标注编辑器。
                 hidePanelThenCapture(m_panel, nb::CaptureIntent::Region,
                                      [](const QString& entryId) {
                     if (!entryId.isEmpty())
                         CoreFacade::instance().processCapture(entryId,
                                                               QStringLiteral("translate"));
-                }, /*allowEditor=*/false);
+                });
                 break;
             case Action::CaptureDelayed:
                 // 延时截图(F16):等 N 秒再框选(等待秒数取设置,与托盘入口同一取值口径)
@@ -120,7 +119,7 @@ Hotkeys::Hotkeys(PanelWindow& panel, CoreBridge& core, QObject* parent)
                     if (!entryId.isEmpty())
                         CoreFacade::instance().processCapture(entryId,
                                                               QStringLiteral("entry"));
-                }, /*allowEditor=*/false);
+                });
                 break;
             default:
                 qInfo() << "hotkey action" << static_cast<int>(m_registered.value(id));

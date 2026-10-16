@@ -192,8 +192,11 @@ void runCaptureToolbarFlow() {
                       && gotLogical.right() <= sel.right() + 8,
                   QStringLiteral("标注被裁在选区内(不出框)"));
 
-            // ---- B2. 「完成」(下标 4)交出的合成图 ----
-            click(QPoint(tb.x() + bw * 4 + bw / 2, tb.y() + tb.height() / 2));
+            // ---- B2. 「完成」交出的合成图 ----
+            // ⚠️ 索引跟着按钮集合走:加入「透明」档位后 完成 = 5、取消 = 6(此前 4/5)。
+            //    写死旧索引会点到「透明」,测试会静默跑到另一条路径上还以为通过。
+            const int doneIndex = 5;
+            click(QPoint(tb.x() + bw * doneIndex + bw / 2, tb.y() + tb.height() / 2));
             const QSize wantSize(qRound(sel.width() * 2.0), qRound(sel.height() * 2.0));
             qInfo() << "CAPTURE-TOOLBAR  confirm -> image" << g_composed.size()
                     << "expected" << wantSize;

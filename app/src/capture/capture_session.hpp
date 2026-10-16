@@ -8,6 +8,7 @@
 #pragma once
 
 #include <QObject>
+#include <QPointer>
 #include <QString>
 #include <QWidget>
 
@@ -20,6 +21,8 @@ class QScreen;
 
 namespace nb {
 
+class AnnotationToolbar;   // 二级条共享控件(编辑器/浮条同一类)
+
 enum class CaptureIntent { Region, Fullscreen };
 
 /// 裁剪入库完成后的回调,参数是刚入库条目的 id(未入库/失败时为空串)。
@@ -29,16 +32,14 @@ using CaptureDone = std::function<void(const QString& entryId)>;
 /// 启动会话(Fullscreen = 光标屏整屏直通;Region = 各屏遮罩框选)。
 /// 忙碌重入检查沿用第一代 CAPTURE_BUSY 语义。
 ///
-/// allowEditor:是否允许走标注编辑器(仅在 regionSkipEditor=false 时才有意义)。
-/// 截图翻译 / 截图取字是"取内容"链路,应**始终直通**——中间弹一个标注编辑器
-/// 既多余又会打断流程,故这两条链路传 false。
-void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured = {},
-                         bool allowEditor = true);
+/// ⚠️ 框选确认后**一律直通**(入库 + 写剪贴板),不再有"进编辑器"这条出口(§18.5):
+/// 编辑器只保留唯一入口 = 右键编辑(主面板条目右键 / 贴图右键),框选链路的编辑
+/// 能力由**浮条工具栏**承担。原先的 allowEditor 参数随之移除。
+void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured = {});
 
 /// 延时截图(F16):先弹一个置顶的倒计时数字(鼠标穿透),倒计时结束再启动会话。
 /// 用途:按下入口后有时间去展开菜单 / 等悬浮提示出现。seconds<=0 时等同立即截图。
-void startDelayedCapture(int seconds, CaptureIntent intent, CaptureDone onCaptured = {},
-                         bool allowEditor = true);
+void startDelayedCapture(int seconds, CaptureIntent intent, CaptureDone onCaptured = {});
 
 /// 读取设置里的延时截图等待秒数(钳制到 1~10;读取失败按 3 秒)。
 /// 托盘入口与快捷键共用,避免两处各写一份。
@@ -61,6 +62,23 @@ public:
     /// rightClickCancel:对应设置 regionRightClickCancel —— 右键是否取消本次截图。
     OverlayWidget(QImage frozen, int screenIndex, QScreen* screen, bool autoConfirm,
                   bool rightClickCancel, QWidget* parent = nullptr);
+
+    // ---- 浮条底板不透明度三档(docs/17 §17.5)----
+    // 三档常量放 public:会话建立处(startCaptureSession,自由函数)要用它做兜底值。
+    /// 三档 alpha:不透明 / 半透(默认) / 极简。
+    static constexpr int kBarAlphaSolid = 242;
+    static constexpr int kBarAlphaHalf = 217;
+    static constexpr int kBarAlphaMinimal = 179;
+    /// 应用档位(只接受三档,其余按半透处理)。
+    void setBarAlpha(int alpha);
+    /// 当前档位(循环切换用)。
+    int barAlpha() const { return m_barAlpha; }
+    /// 切到下一档并写回设置(一键循环,不弹滑块 —— 浮条空间紧张且截图时不该精细调节)。
+    void cycleBarAlpha();
+    /// 当前档位的说明文案(按钮 ToolTip 用)。
+    QString barAlphaTip() const;
+    /// 极简档下底板仅 70% 不透明 → 按钮文字需更高对比度,否则"透到看不清"。
+    bool barNeedsContrastBoost() const { return m_barAlpha <= kBarAlphaMinimal; }
 
 signals:
     /// 选区确认:**本屏物理像素**坐标,相对该屏左上角(直接供 nb_capture_crop)。
@@ -142,20 +160,8 @@ private:
     void exitAnnotating();                   // 退出(清理引擎+收起二级条)
     QRect subbarRect() const;                // 二级条几何(浮条上方)
     bool subbarContains(const QPoint& pos) const;
-    void handleSubbarClick(const QPoint& pos);
-    void drawSubbar(QPainter& painter) const;
+    void drawSubbar(QPainter& painter) const;   // 只画底板(条目在共享控件里)
 
-    /// 二级条的单元格几何:**一次算好,绘制与命中测试共用**。
-    /// (此前两边各写一份布局算式,一旦漂移就表现为"看得见、点不中"。)
-    struct SubbarCells {
-        QRect undo;
-        QRect redo;
-        QList<QRect> tools;     // 与 toolOrder() 一一对应
-        QList<QRect> colors;    // 与 palette() 一一对应
-        QList<QRect> widths;    // 与 penSizes() 一一对应
-        QList<QRect> fonts;     // 与 fontSizes() 一一对应(仅文字工具非空)
-    };
-    SubbarCells subbarCells() const;
     /// 切标注工具(含取色器采完自动回退的同步)。
     void setAnnoTool(EditorTool tool);
 
@@ -170,12 +176,20 @@ private:
     AnnotationEngine* m_engine = nullptr;    // 进入标注态才建(平时零开销)
     bool m_subbarVisible = false;
     QRect m_subbarRect;
+    /// 二级标注条 = **共享控件**(§17.3 A,与编辑器同一个 AnnotationToolbar)。
+    /// 浮条只画它的底板(视觉随主浮条),条目绘制/命中测试全由控件负责 ——
+    /// 自绘版的"绘制与命中测试各写一份"是反复出 bug 的来源,不再保留。
+    /// 生命周期随标注态:enterAnnotating 建,exitAnnotating 销毁(平时零开销)。
+    QPointer<AnnotationToolbar> m_subbar;
+    /// 控件命中:鼠标在共享控件上时,遮罩不得把它当成"选区外点击"去取消。
+    bool subbarWidgetContains(const QPoint& pos) const;
     int m_penSize = 4;                       // 二级条选中的粗细档位
     int m_fontSize = 36;                     // 二级条选中的字号
     EditorTool m_annoTool = EditorTool::Pen; // 当前标注工具
     QColor m_annoColor = QColor(0xE0, 0x31, 0x31);
     bool m_draggingStroke = false;           // 标注笔画拖拽中
 
+    int m_barAlpha = kBarAlphaHalf;   // 浮条底板不透明度(默认半透;设置可覆盖)
     QRect m_toolbarRect;        // 当前浮条几何(缓存,翻转后更新)
     QString m_ocrPending;       // 非空 = OCR 进行中(浮条按钮置灰语义)
 };

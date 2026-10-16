@@ -20,8 +20,10 @@ namespace nb::overlay {
 // ---- 浮条公共尺寸(逻辑像素)----
 // 放在头文件是为了让**验收脚本能按同一份数字**算出按钮位置去真点,不会出现
 // "测试点到了别处"这种假通过。
-constexpr int kToolbarButtons = 6;                            // 标注/OCR/贴图/保存/完成/取消
-constexpr int kToolbarButtonWidth = 92;
+// 按钮数含「透明」档位(docs/17 §17.5)。
+constexpr int kToolbarButtons = 7;                            // 标注/OCR/贴图/保存/透明/完成/取消
+// 按钮均分宽度:7 个按钮仍要落在原先的浮条总宽附近(552 → 553),故从 92 收到 79。
+constexpr int kToolbarButtonWidth = 79;
 constexpr int kToolbarWidth = kToolbarButtons * kToolbarButtonWidth;
 constexpr int kButtonHeight = 44;                             // 单行按钮高
 constexpr int kBarMargin = 8;                                 // 浮条离选区边的间距
