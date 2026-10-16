@@ -15,6 +15,7 @@
 #include <QPainter>
 #include <QPointer>
 #include <QToolTip>
+#include <QUndoStack>
 #include <QtConcurrent/QtConcurrentRun>
 #include <QFutureWatcher>
 #include <QFileDialog>
@@ -375,6 +376,17 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured, bool allo
             qInfo() << "截图已取消";
         });
 
+                // 带标注的确认(浮条标注态):合成图直接入库+剪贴板,跳过裁剪。
+                // closeAllOverlays 会清空 g_onCaptured,须先取出(与 regionConfirmed 同套路)。
+                QObject::connect(overlay, &OverlayWidget::annotatedConfirmed,
+                        [](const QImage& composed) {
+                    const CaptureDone done = g_onCaptured;
+                    g_onCaptured = {};
+                    closeAllOverlays([&composed, done] {
+                        finishCapture(composed, done);
+                    });
+                });
+
         // ⚠️ showFullScreen() 只把窗口放到"它当前所在的屏",而新建窗口默认落在主屏:
         // 多屏时若不先定位,所有遮罩会**叠在主屏上**,看到的其实是别屏的底图被拉伸
         // (既糊又错位),点一次只关掉最上面那块 → 表现为"逐屏依次确认"。
@@ -579,8 +591,16 @@ void OverlayWidget::paintEvent(QPaintEvent*) {
         painter.setBrush(Qt::NoBrush);
         painter.drawRect(sel);
 
-        // 微调模式:画 8 个手柄(提示可拖动调整)
-        if (!m_autoConfirm && selectionUsable()) {
+        // 标注态:把手柄藏起来(标注锚定选区,再改选区语义混乱),画引擎合成
+        if (m_engine && selectionUsable()) {
+            const QImage composed = m_engine->compose(selectionPhysical());
+            if (!composed.isNull()) {
+                painter.setRenderHint(QPainter::SmoothPixmapTransform);
+                painter.drawImage(sel, composed);
+            }
+        }
+        // 微调模式:画 8 个手柄(提示可拖动调整);有标注时不画(互斥)
+        if (!m_autoConfirm && !m_engine && selectionUsable()) {
             painter.setPen(QPen(QColor(80, 160, 255), 1));
             painter.setBrush(QColor(255, 255, 255));
             for (const QPoint& point : handlePoints(sel)) {
@@ -594,8 +614,9 @@ void OverlayWidget::paintEvent(QPaintEvent*) {
         painter.drawText(QPoint(sel.x(), sel.y() - 6),
                          QStringLiteral("%1 × %2").arg(src.width()).arg(src.height()));
 
-        // 浮条最后画(压在手柄/选区之上)
+        // 二级条再浮条(二级条在上层)
         drawToolbar(painter);
+        drawSubbar(painter);
     } else if (!m_selecting) {
         painter.setPen(QColor(255, 255, 255, 200));
         painter.drawText(rect(), Qt::AlignHCenter | Qt::AlignTop,
@@ -615,7 +636,12 @@ void OverlayWidget::mousePressEvent(QMouseEvent* e) {
     }
     if (e->button() != Qt::LeftButton) return;
 
-    // 浮条命中:**先于一切** —— 点按钮走动作,点浮条空白不当作重新框选
+    // 二级条/浮条命中:**先于一切** —— 点按钮走动作,点条上不当作重新框选
+    if (subbarContains(e->pos())) {
+        m_toolbarAction = true;
+        handleSubbarClick(e->pos());
+        return;
+    }
     if (toolbarContains(e->pos())) {
         m_toolbarAction = true;
         handleToolbarClick(e->pos());
@@ -636,6 +662,17 @@ void OverlayWidget::mousePressEvent(QMouseEvent* e) {
         }
     }
 
+    // 标注态:选区内的按下交给引擎(坐标换算:逻辑 → 选区物理)
+    if (m_engine && m_selection.normalized().contains(e->pos())) {
+        const qreal k = dpr();
+        const QRect sel = m_selection.normalized();
+        const QPointF scenePos((e->pos().x() - sel.x()) * k, (e->pos().y() - sel.y()) * k);
+        m_engine->onCanvasPressed(scenePos);
+        m_draggingStroke = true;
+        update();
+        return;
+    }
+
     // 起新选区
     m_origin = e->pos();
     m_selection = QRect(m_origin, QSize(0, 0));
@@ -647,6 +684,14 @@ void OverlayWidget::mouseMoveEvent(QMouseEvent* e) {
     emit activity();
     if (m_selecting) {
         m_selection = QRect(m_origin, e->pos()).normalized();
+        update();
+        return;
+    }
+    if (m_engine && m_draggingStroke) {
+        const qreal k = dpr();
+        const QRect sel = m_selection.normalized();
+        m_engine->onCanvasMoved(QPointF((e->pos().x() - sel.x()) * k,
+                                        (e->pos().y() - sel.y()) * k));
         update();
         return;
     }
@@ -666,6 +711,15 @@ void OverlayWidget::mouseReleaseEvent(QMouseEvent* e) {
     emit activity();
     if (e->button() != Qt::LeftButton) return;
 
+    if (m_engine && m_draggingStroke) {
+        const qreal k = dpr();
+        const QRect sel = m_selection.normalized();
+        m_engine->onCanvasReleased(QPointF((e->pos().x() - sel.x()) * k,
+                                           (e->pos().y() - sel.y()) * k));
+        m_draggingStroke = false;
+        update();
+        return;
+    }
     if (m_adjusting) {
         m_adjusting = false;
         m_activeHandle = Handle::None;
@@ -774,6 +828,7 @@ void OverlayWidget::drawToolbar(QPainter& painter) const {
     for (int i = 0; i < kBtnCount; ++i) {
         const QRect btn(rc.x() + i * bw, rc.y(), bw, rc.height());
         QColor fg = QColor(0xDF, 0xE1, 0xE8);
+        if (i == 0 && annotating()) fg = QColor(0x1C, 0x7E, 0xD6);  // 标注态:蓝
         if (i == 4) fg = QColor(0x40, 0xC0, 0x57);   // 完成:绿
         if (i == 5) fg = QColor(0xE0, 0x31, 0x31);   // 取消:红
         painter.setPen(fg);
@@ -799,13 +854,19 @@ void OverlayWidget::handleToolbarClick(const QPoint& pos) {
         case 5:   // 取消
             emit cancelled();
             return;
-        case 0:   // 标注:S3 接 AnnotationEngine;本期按下不动作
+        case 0:   // 标注:进入/退出标注态(S3)
+            if (annotating()) exitAnnotating();
+            else enterAnnotating();
+            m_toolbarRect = toolbarRect();   // 布局可能因二级条显隐变化
+            update();
             return;
         default:
             break;
     }
-    // OCR/贴图/保存:输入 = 选区图(未标注时零 compose 开销,docs/14 §16.3-6)
-    const QImage cropped = m_frozen.copy(selectionPhysical());
+    // OCR/贴图/保存:输入 = 选区图(未标注时零 compose 开销,docs/14 §16.3-6);
+    // 有标注则用引擎合成(含标注)。
+    const QImage cropped = m_engine ? m_engine->compose(selectionPhysical())
+                                    : m_frozen.copy(selectionPhysical());
     if (cropped.isNull()) return;
     // 决策:三者在弹层/贴图/另存完成后**结束会话** —— 与形态 B 一致。
     switch (index) {
@@ -843,6 +904,150 @@ void OverlayWidget::handleToolbarClick(const QPoint& pos) {
         }
         default:
             return;
+    }
+}
+
+// ---- 标注态(S3)----
+
+bool OverlayWidget::hasAnnotations() const {
+    // 引擎存在且已有至少一条标注(撤销栈非空)
+    return m_engine && m_engine->undoStack()->index() > 0;
+}
+
+void OverlayWidget::enterAnnotating() {
+    if (m_engine) return;
+    // 引擎吃**选区图**(物理像素):场景坐标 = 选区局部物理坐标,遮罩 mouse ×dpr - 选区原点
+    const QImage crop = m_frozen.copy(selectionPhysical());
+    m_engine = new AnnotationEngine(crop, this);
+    m_engine->setTool(m_annoTool);
+    m_engine->setColor(m_annoColor);
+    m_engine->setStrokeWidth(m_penSize);
+    m_engine->setFontSize(m_fontSize);
+    m_subbarVisible = true;
+    update();
+}
+
+void OverlayWidget::exitAnnotating() {
+    if (!m_engine) return;
+    m_engine->deleteLater();
+    m_engine = nullptr;
+    m_subbarVisible = false;
+    update();
+}
+
+QRect OverlayWidget::subbarRect() const {
+    const QRect rc = m_toolbarRect;
+    // 二级条与浮条同宽,叠在其上方
+    return QRect(rc.x(), rc.y() - kTbHeight - 4, rc.width(), kTbHeight);
+}
+
+bool OverlayWidget::subbarContains(const QPoint& pos) const {
+    return m_subbarVisible && m_subbarRect.contains(pos);
+}
+
+void OverlayWidget::drawSwatches(QPainter& painter, const QRect& rc,
+                                 const QList<QColor>& palette, const QColor& current) const {
+    Q_UNUSED(painter); Q_UNUSED(rc); Q_UNUSED(palette); Q_UNUSED(current);
+}
+
+void OverlayWidget::drawSubbar(QPainter& painter) const {
+    if (!m_subbarVisible) return;
+    const QRect rc = m_subbarRect;
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(0x26, 0x27, 0x2E, 242));
+    painter.drawRoundedRect(rc, 8, 8);
+    // 布局:[撤销][重做] | 7色块 | [粗细3] [字号3](当前标注工具是文字才显字号)
+    const int seg1 = 72;                    // 撤销/重做
+    const int seg3 = m_annoTool == EditorTool::Text ? 150 : 96;
+    const int swatchW = rc.width() - seg1 - seg3 - 24;
+    QFont f = painter.font();
+    f.setPixelSize(13);
+    painter.setFont(f);
+    // 撤销/重做
+    painter.setPen(m_engine && m_engine->undoStack()->canUndo()
+                       ? QColor(0xDF, 0xE1, 0xE8) : QColor(0xDF, 0xE1, 0xE8, 70));
+    painter.drawText(QRect(rc.x(), rc.y(), 36, rc.height()), Qt::AlignCenter, QStringLiteral("撤销"));
+    painter.setPen(m_engine && m_engine->undoStack()->canRedo()
+                       ? QColor(0xDF, 0xE1, 0xE8) : QColor(0xDF, 0xE1, 0xE8, 70));
+    painter.drawText(QRect(rc.x() + 36, rc.y(), 36, rc.height()), Qt::AlignCenter, QStringLiteral("重做"));
+    // 色块(第一代 PALETTE 七色)
+    const QColor kPalette[] = {QColor(0xE0, 0x31, 0x31), QColor(0xF7, 0x67, 0x07),
+                               QColor(0xFA, 0xB0, 0x05), QColor(0x40, 0xC0, 0x57),
+                               QColor(0x1C, 0x7E, 0xD6), QColor(0x21, 0x25, 0x29),
+                               QColor(0xFF, 0xFF, 0xFF)};
+    const int sw = 14, gap = (swatchW - 7 * sw) / 6;
+    for (int i = 0; i < 7; ++i) {
+        const int x = rc.x() + seg1 + 8 + i * (sw + qMax(2, gap));
+        const QColor& c = kPalette[i];
+        painter.setPen(c == m_annoColor ? QPen(QColor(255, 255, 255), 2)
+                                        : QPen(QColor(0x33, 0x35, 0x3D), 1));
+        painter.setBrush(c);
+        painter.drawRoundedRect(QRectF(x + 0.5, rc.y() + (rc.height() - sw) / 2.0, sw, sw), 3, 3);
+    }
+    // 粗细(三档:小点/中点/大点示意)
+    const int bz = rc.x() + seg1 + 8 + swatchW + 8;
+    const int bw = (seg3 - 12) / (m_annoTool == EditorTool::Text ? 2 : 1);
+    const int sizes[] = {2, 4, 8};
+    for (int i = 0; i < 3; ++i) {
+        const QRect cell(bz + i * bw / 3, rc.y(), bw / 3, rc.height());
+        painter.setPen(m_penSize == sizes[i] ? QColor(255, 255, 255) : QColor(0xDF, 0xE1, 0xE8, 140));
+        const qreal r = 2.0 + i * 2.5;
+        painter.setBrush(m_penSize == sizes[i] ? QColor(255, 255, 255) : QColor(0xDF, 0xE1, 0xE8, 140));
+        painter.drawEllipse(QPointF(cell.center()), r, r);
+    }
+    if (m_annoTool == EditorTool::Text) {
+        const int fz = bz + bw + 8;
+        const int fSizes[] = {24, 36, 48};
+        for (int i = 0; i < 3; ++i) {
+            const QRect cell(fz + i * (seg3 - 8) / 3, rc.y(), (seg3 - 8) / 3, rc.height());
+            painter.setPen(m_fontSize == fSizes[i] ? QColor(255, 255, 255) : QColor(0xDF, 0xE1, 0xE8, 140));
+            painter.drawText(cell, Qt::AlignCenter, QString::number(fSizes[i]));
+        }
+    }
+}
+
+void OverlayWidget::handleSubbarClick(const QPoint& pos) {
+    if (!subbarContains(pos)) return;
+    const QRect rc = m_subbarRect;
+    const int seg1 = 72;
+    const int seg3 = m_annoTool == EditorTool::Text ? 150 : 96;
+    const int swatchW = rc.width() - seg1 - seg3 - 24;
+    // 撤销/重做
+    if (pos.x() < rc.x() + 36) { m_engine->undoStack()->undo(); update(); return; }
+    if (pos.x() < rc.x() + seg1) { m_engine->undoStack()->redo(); update(); return; }
+    // 色块
+    const int sw = 14;
+    const int swx = rc.x() + seg1 + 8;
+    const int gap = (swatchW - 7 * sw) / 6;
+    if (pos.x() >= swx - 2 && pos.x() <= swx + 7 * sw + 6 * qMax(2, gap) + 2 &&
+        pos.y() >= rc.y() && pos.y() <= rc.bottom()) {
+        const QColor kPalette[] = {QColor(0xE0, 0x31, 0x31), QColor(0xF7, 0x67, 0x07),
+                                   QColor(0xFA, 0xB0, 0x05), QColor(0x40, 0xC0, 0x57),
+                                   QColor(0x1C, 0x7E, 0xD6), QColor(0x21, 0x25, 0x29),
+                                   QColor(0xFF, 0xFF, 0xFF)};
+        const int idx = qBound(0, (pos.x() - swx) / (sw + qMax(2, gap)), 6);
+        m_annoColor = kPalette[idx];
+        if (m_engine) m_engine->setColor(m_annoColor);
+        update();
+        return;
+    }
+    // 粗细/字号
+    const int bz = rc.x() + seg1 + 8 + swatchW + 8;
+    const int bw = (seg3 - 12) / (m_annoTool == EditorTool::Text ? 2 : 1);
+    const int sizes[] = {2, 4, 8};
+    if (pos.x() >= bz && pos.x() < bz + bw) {
+        const int i = qBound(0, (pos.x() - bz) / (bw / 3), 2);
+        m_penSize = sizes[i];
+        if (m_engine) m_engine->setStrokeWidth(m_penSize);
+        update();
+        return;
+    }
+    if (m_annoTool == EditorTool::Text && pos.x() >= bz + bw) {
+        const int fSizes[] = {24, 36, 48};
+        const int i = qBound(0, (pos.x() - bz - bw) / ((seg3 - 8) / 3), 2);
+        m_fontSize = fSizes[i];
+        if (m_engine) m_engine->setFontSize(m_fontSize);
+        update();
     }
 }
 

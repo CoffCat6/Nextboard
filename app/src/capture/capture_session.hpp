@@ -13,6 +13,8 @@
 
 #include <functional>
 
+#include "editor/annotation_engine.hpp"
+
 class QScreen;
 
 namespace nb {
@@ -62,6 +64,9 @@ public:
 signals:
     /// 选区确认:**本屏物理像素**坐标,相对该屏左上角(直接供 nb_capture_crop)。
     void regionConfirmed(const QRect& physicalRect);
+    /// 带标注的确认:合成图已含标注(浮条标注态确认专用),宿主**不再裁剪**,
+    /// 直接把这张图入库+剪贴板。与 regionConfirmed 互斥触发。
+    void annotatedConfirmed(const QImage& composed);
     void cancelled();
     /// 用户在本遮罩上有鼠标/键盘动作 —— 会话据此重置空闲超时(S6.1)。
     void activity();
@@ -119,6 +124,30 @@ private:
     void handleToolbarClick(const QPoint& pos);      // 分发按钮动作
     void drawToolbar(QPainter& painter) const;       // paintEvent 内绘制
     void bakeSaveDialog(const QImage& image);        // 另存对话框(保存按钮)
+
+    // ---- 标注态(S3):引擎 + 二级条(颜色/粗细/字号/撤销重做)----
+    // 「标注」按钮进入标注态:二级条展开,遮罩上的拖拽变成引擎笔画。
+    // 标注与手柄微调**互斥**(docs/14 §16.3-5):有标注即隐藏手柄。
+    bool annotating() const { return m_engine != nullptr; }
+    bool hasAnnotations() const;             // 是否已有标注(隐藏手柄用)
+    void enterAnnotating();                  // 进入标注态(建引擎+展开二级条)
+    void exitAnnotating();                   // 退出(清理引擎+收起二级条)
+    QRect subbarRect() const;                // 二级条几何(浮条上方)
+    bool subbarContains(const QPoint& pos) const;
+    void handleSubbarClick(const QPoint& pos);
+    void drawSubbar(QPainter& painter) const;
+    /// 浮条/二级条绘制辅助:色块与当前选中态。
+    void drawSwatches(QPainter& painter, const QRect& rc,
+                      const QList<QColor>& palette, const QColor& current) const;
+
+    AnnotationEngine* m_engine = nullptr;    // 进入标注态才建(平时零开销)
+    bool m_subbarVisible = false;
+    QRect m_subbarRect;
+    int m_penSize = 4;                       // 二级条选中的粗细档位
+    int m_fontSize = 36;                     // 二级条选中的字号
+    EditorTool m_annoTool = EditorTool::Pen; // 当前标注工具
+    QColor m_annoColor = QColor(0xE0, 0x31, 0x31);
+    bool m_draggingStroke = false;           // 标注笔画拖拽中
 
     QRect m_toolbarRect;        // 当前浮条几何(缓存,翻转后更新)
     QString m_ocrPending;       // 非空 = OCR 进行中(浮条按钮置灰语义)
