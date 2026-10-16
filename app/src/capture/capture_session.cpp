@@ -673,7 +673,8 @@ void OverlayWidget::mousePressEvent(QMouseEvent* e) {
         return;
     }
 
-    // 起新选区
+    // 起新选区:旧标注锚定在旧选区上,选区一变全部失效 → 退出标注态(重新来)
+    if (m_engine) exitAnnotating();
     m_origin = e->pos();
     m_selection = QRect(m_origin, QSize(0, 0));
     m_selecting = true;
@@ -723,7 +724,10 @@ void OverlayWidget::mouseReleaseEvent(QMouseEvent* e) {
     if (m_adjusting) {
         m_adjusting = false;
         m_activeHandle = Handle::None;
-        if (toolbarVisible()) showToolbar();   // 选区变了,浮条跟随
+        if (toolbarVisible()) {
+            showToolbar();                    // 选区变了,浮条跟随
+            if (m_subbarVisible) m_subbarRect = subbarRect();
+        }
         return;   // 微调结束不触发确认
     }
     if (!m_selecting) return;
@@ -924,6 +928,8 @@ void OverlayWidget::enterAnnotating() {
     m_engine->setStrokeWidth(m_penSize);
     m_engine->setFontSize(m_fontSize);
     m_subbarVisible = true;
+    m_toolbarRect = toolbarRect();   // 先定浮条位置
+    m_subbarRect = subbarRect();     // 二级条几何依赖浮条(文档 §16.1:叠在其上方)
     update();
 }
 
@@ -932,13 +938,16 @@ void OverlayWidget::exitAnnotating() {
     m_engine->deleteLater();
     m_engine = nullptr;
     m_subbarVisible = false;
+    m_subbarRect = QRect();
     update();
 }
 
 QRect OverlayWidget::subbarRect() const {
     const QRect rc = m_toolbarRect;
-    // 二级条与浮条同宽,叠在其上方
-    return QRect(rc.x(), rc.y() - kTbHeight - 4, rc.width(), kTbHeight);
+    // 二级条与浮条同宽,叠在其上方;越出屏顶则改到浮条下方(两者不重叠即可)
+    int y = rc.y() - kTbHeight - 4;
+    if (y < 4) y = rc.bottom() + kTbMargin + 4;
+    return QRect(rc.x(), y, rc.width(), kTbHeight);
 }
 
 bool OverlayWidget::subbarContains(const QPoint& pos) const {
