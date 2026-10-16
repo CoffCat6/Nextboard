@@ -777,7 +777,12 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
 
         // ---- OCR ----
         "ocr_probe" => {
-            let probe = crate::ocr::probe(crate::ocr::Backend::System);
+            // 可选 backend 参数(向后兼容:不传即内置引擎,与旧调用方行为一致)。
+            let backend = match str_opt(req, "backend").as_deref() {
+                Some(value) => crate::ocr::Backend::parse(value),
+                None => crate::ocr::Backend::System,
+            };
+            let probe = crate::ocr::probe(backend);
             Ok(serde_json::to_value(probe)?)
         }
         "ocr_entry" => {

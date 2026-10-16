@@ -28,6 +28,21 @@ base64 = "0.22"
 zip = { version = "=8.0.0", default-features = false, features = ["deflate-flate2"] }
 ureq = { version = "3", default-features = false, features = ["socks-proxy", "native-tls"] }
 
+# ---- OCR 引擎(RapidOCR)的依赖 ----
+# 引擎实现已**内化**为 src/ocr/rapid/(派生自 rapid-ocr-rs v0.7.0, Apache-2.0;
+# 见 docs/11-rapidocr-rewrite-design.md)。以下为其直接依赖,已按需裁剪。
+#
+# ONNX Runtime 绑定:load-dynamic + api-28,以便显式指定 DLL 路径(不依赖 PATH)。
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["ndarray", "std", "load-dynamic", "api-28"] }
+ndarray = "0.17"
+rayon = "1.10"
+geo-clipper = "0.9.0"
+geo-types = "0.7"
+nalgebra = "0.33"
+unicode-bidi = "0.3"
+num_cpus = "1.16"
+serde_yaml = "0.9"
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
   "Foundation",
@@ -46,3 +61,19 @@ windows = { version = "0.62", features = [
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
 ] }
+
+
+[features]
+# OCR 引擎(rapid/)派生自 rapid-ocr-rs,其源码里用 cfg(feature = "...") 标记
+# 可选能力。本项目**固定不启用**以下特性,但源码中的 cfg 判断仍需被 rustc 认知,
+# 否则会报 "unexpected cfg condition value" 警告。故在此声明为空特性。
+# ⚠️ 这些特性本意为"关闭",不要误开:
+opencv-backend = []      # 我们走纯 Rust 视觉后端(vision/image_backend.rs)
+model-download = []      # 本项目全离线,模型路径显式传入
+config-yaml = []         # 不读 YAML 配置
+remote-input = []        # 不从 URL 拉图
+turbojpeg-decode = []    # 不用 libjpeg-turbo 解码
+image-io = []            # 不在此层做图片文件解码(由调用方给 RGBA)
+cuda-provider = []
+directml-provider = []
+cann-provider = []

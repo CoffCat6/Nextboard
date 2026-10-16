@@ -105,7 +105,8 @@ pub struct Settings {
     pub software_render: bool,
     /// OCR 语言：`auto`（默认，按 zh-Hans-CN → en-US → 用户配置语言）/ 指定语言标签如 `en-US`。
     pub ocr_language: String,
-    /// OCR 后端：仅 `system`（默认，Windows 内置离线引擎，别名 `windows`）。
+    /// OCR 后端：`system`（默认，Windows 内置离线引擎，别名 `windows`）/ `rapidocr`（RapidOCR，
+    /// 自带 PP-OCRv4 mobile 模型，不依赖系统语言包）。取值口径见 [ocr_backend]。
     pub ocr_backend: String,
     /// OCR 放大倍数（1~4）：小字号截图放大后再识别可显著提升准确率，默认 2。
     pub ocr_scale: i64,
@@ -482,7 +483,9 @@ impl Settings {
         }
         // 文本贴图样式：字号/最大宽度/背景不透明度范围 + 两个颜色须为 #RRGGBB
         if !(8..=96).contains(&self.pin_text_font_size) {
-            return Err(AppError::InvalidInput("文本贴图字号须在 8 ~ 96 之间".into()));
+            return Err(AppError::InvalidInput(
+                "文本贴图字号须在 8 ~ 96 之间".into(),
+            ));
         }
         if !(120..=2000).contains(&self.pin_text_max_width) {
             return Err(AppError::InvalidInput(
@@ -505,12 +508,9 @@ impl Settings {
             }
         }
         // OCR：后端枚举 + 语言标签格式 + 放大倍数范围
-        if !matches!(
-            self.ocr_backend.trim().to_ascii_lowercase().as_str(),
-            "" | "system" | "windows"
-        ) {
+        if !ocr_backend::is_supported(&self.ocr_backend) {
             return Err(AppError::InvalidInput(
-                "OCR 后端只支持 system（内置离线引擎）".into(),
+                "OCR 后端只支持 system（内置离线引擎）或 rapidocr（RapidOCR）".into(),
             ));
         }
         let language = self.ocr_language.trim();
@@ -889,6 +889,33 @@ fn repair_blank_microsoft_endpoint(value: &mut serde_json::Value) {
     }
 }
 
+/// OCR 后端取值的**单一来源**。
+///
+/// ⚠️ 这是本文件内两处消费点的**唯一口径**,必须同时覆盖:
+///   - `Settings::validate()` —— 校验用户提交的值;
+///   - `repair_removed_ocr_backend()` —— 加载时归一已移除的值。
+///
+/// 另需与 `crate::ocr::Backend::parse` 认识的取值保持一致(由单测
+/// `every_supported_backend_is_recognized_by_parse` 交叉断言)。
+///
+/// 历史教训(docs/08a §1.2.3):这两处曾是同一口径的**两份副本** ——
+/// 新增引擎时只改一处,会导致「设置页能选、但加载时被静默归零回 system」。
+/// 因此抽成本模块,新增后端只需改这里一处。
+pub mod ocr_backend {
+    /// 后端标识:Windows 内置 OCR(默认,别名 `windows`)。
+    pub const SYSTEM: &str = "system";
+    /// 后端标识:RapidOCR(PP-OCRv4 mobile,自带模型)。
+    pub const RAPIDOCR: &str = "rapidocr";
+
+    /// 该值是否为**受支持**的 OCR 后端(空串等价于默认值)。
+    pub fn is_supported(value: &str) -> bool {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "" | "system" | "windows" | "rapidocr" | "rapid"
+        )
+    }
+}
+
 /// 已移除 OCR 后端的配置修复：`ocrBackend` 不是当前支持的值时归一为 `system`。
 ///
 /// 背景：Tesseract 后端要求用户自行安装并放进 PATH，而设置页从未提供后端选择器，
@@ -903,10 +930,7 @@ fn repair_removed_ocr_backend(value: &mut serde_json::Value) {
         return;
     };
     let current = current.trim().to_owned();
-    if matches!(
-        current.to_ascii_lowercase().as_str(),
-        "" | "system" | "windows"
-    ) {
+    if ocr_backend::is_supported(&current) {
         return;
     }
     push_load_warning(format!(
@@ -1067,7 +1091,11 @@ mod tests {
             .join("target")
             .join("tmp");
         let _ = std::fs::create_dir_all(&base);
-        base.join(format!("nb_settings_{tag}_{}_{}", std::process::id(), crate::now_ms()))
+        base.join(format!(
+            "nb_settings_{tag}_{}_{}",
+            std::process::id(),
+            crate::now_ms()
+        ))
     }
 
     #[test]
@@ -1510,11 +1538,9 @@ mod tests {
             },
             ..Default::default()
         };
-        assert!(
-            with_endpoint("https://edge.microsoft.com/translate")
-                .validate()
-                .is_ok()
-        );
+        assert!(with_endpoint("https://edge.microsoft.com/translate")
+            .validate()
+            .is_ok());
         assert!(
             with_endpoint("edge.microsoft.com").validate().is_err(),
             "缺少协议应非法"
@@ -1684,9 +1710,70 @@ mod tests {
         )
         .unwrap();
         let settings = load(&root).unwrap();
-        assert_eq!(settings.translate_microsoft.endpoint, "https://my.example/tr");
+        assert_eq!(
+            settings.translate_microsoft.endpoint,
+            "https://my.example/tr"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---------- OCR 后端取值同源(防"静默归零",见 docs/08a §1.2.3) ----------
+
+    /// ⚠️ **P0 防护测试**:`rapidocr` 必须能通过校验、且**不被加载期归一改写**。
+    ///
+    /// 背景:校验(`validate`)与归一(`repair_removed_ocr_backend`)曾是两份口径副本。
+    /// 若只放宽其中一处,会出现「设置页能选 RapidOCR,但加载时被静默改回 system」
+    /// —— 表现为"选了新引擎却仍在跑内置",且**质量回归测试查不出来**(两条路都返回文本)。
+    #[test]
+    fn rapidocr_backend_survives_validate_and_repair() {
+        // 1) 必须通过校验(否则设置页保存直接报错,用户根本存不进去)
+        let settings = Settings {
+            ocr_backend: "rapidocr".into(),
+            ..Default::default()
+        };
+        assert!(settings.validate().is_ok(), "rapidocr 必须通过校验");
+
+        // 2) 必须**不被加载期归一改写**(否则重启后静默变回 system)
+        let root = crate::settings::tests::tmp_dir("ocrbackend_rapid");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join(CONFIG_FILE),
+            r#"{"settings":{"ocrBackend":"rapidocr"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            load(&root).unwrap().ocr_backend,
+            "rapidocr",
+            "rapidocr 是受支持后端,不得被 repair 归零回 system"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 单一来源与 `crate::ocr::Backend::parse` 的口径必须一致:
+    /// 凡 `is_supported` 认可的具名后端,`parse` 都不得当作"未知值"回退。
+    #[test]
+    fn every_supported_backend_is_recognized_by_parse() {
+        use crate::ocr::Backend;
+
+        for value in ["system", "windows", "rapidocr", "rapid"] {
+            assert!(ocr_backend::is_supported(value), "{value} 应被白名单接受");
+        }
+        // 既有别名
+        assert_eq!(Backend::parse("system"), Backend::System);
+        assert_eq!(Backend::parse("windows"), Backend::System);
+        // 新增后端:parse 必须认识,否则会静默回退 System(跑内置引擎)
+        assert_eq!(
+            Backend::parse("rapidocr"),
+            Backend::RapidOcr,
+            "parse 必须认识 rapidocr,否则会静默跑内置引擎"
+        );
+        assert_eq!(Backend::parse("rapid"), Backend::RapidOcr);
+        assert_eq!(
+            Backend::parse("RapidOCR"),
+            Backend::RapidOcr,
+            "大小写不敏感"
+        );
     }
 
     #[test]
@@ -1702,7 +1789,10 @@ mod tests {
         )
         .unwrap();
         let settings = load(&root).unwrap();
-        assert_eq!(settings.ocr_backend, "system", "已移除的后端应归一到内置引擎");
+        assert_eq!(
+            settings.ocr_backend, "system",
+            "已移除的后端应归一到内置引擎"
+        );
         assert!(
             settings.validate().is_ok(),
             "归一后整份设置必须仍可保存（这正是归一的目的）"
@@ -1758,8 +1848,11 @@ mod tests {
         assert!(source.join("clipboard.db").exists());
 
         // 目标已有数据时不覆盖:再写标记,新 target 内容应保持不变
-        std::fs::write(default_dir.join(DATA_MOVE_MARKER), source.to_string_lossy().as_bytes())
-            .unwrap();
+        std::fs::write(
+            default_dir.join(DATA_MOVE_MARKER),
+            source.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
         std::fs::write(target.join("clipboard.db"), b"newer").unwrap();
         take_pending_move(&default_dir, &target);
         assert_eq!(
@@ -1814,8 +1907,14 @@ mod tests {
     fn hotkeys_may_be_left_unbound() {
         // 新增动作默认不预置组合键（由用户决定）
         let defaults = Settings::default();
-        assert!(defaults.hotkeys.capture_delayed.is_empty(), "延时截图默认不绑定");
-        assert!(defaults.hotkeys.capture_ocr.is_empty(), "截图取字默认不绑定");
+        assert!(
+            defaults.hotkeys.capture_delayed.is_empty(),
+            "延时截图默认不绑定"
+        );
+        assert!(
+            defaults.hotkeys.capture_ocr.is_empty(),
+            "截图取字默认不绑定"
+        );
         assert!(defaults.validate().is_ok(), "含未绑定项也应通过校验");
 
         // 全部清空 = 一个键都不绑，仍应合法

@@ -1,0 +1,478 @@
+use rayon::prelude::*;
+
+use crate::ocr::rapid::{
+    config::{RecImage, VisionBackend},
+    error::{RapidOcrError, Result},
+    vision::{
+        backend::resolve_backend_strict,
+        image_backend::resize_image,
+        resize::{LinearResizeScratch, resize_bgr_inter_linear_into_with_scratch},
+    },
+};
+
+#[derive(Debug, Clone)]
+pub struct DetPreProcess {
+    pub limit_side_len: usize,
+    pub limit_type: String,
+    /// 放大倍数上界(0.0 = 关闭)。只**削减放大**,不引入缩小。
+    /// 见 `compute_resize_hw` 的说明与 docs/12-ocr-memory-analysis.md。
+    pub max_upscale: f32,
+    /// 检测输入"最长边"上界(0 = 关闭)。与 `max_upscale` 共同生效。
+    pub max_input_side: usize,
+    pub mean: [f32; 3],
+    pub std: [f32; 3],
+    pub vision_backend: VisionBackend,
+}
+
+impl Default for DetPreProcess {
+    fn default() -> Self {
+        Self {
+            limit_side_len: 736,
+            limit_type: "min".to_string(),
+            max_upscale: 0.0,
+            max_input_side: 0,
+            mean: [0.5, 0.5, 0.5],
+            std: [0.5, 0.5, 0.5],
+            vision_backend: VisionBackend::PureRust,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct DetPreprocessScratch {
+    pub tmp_bgr: Vec<u8>,
+    pub resize: LinearResizeScratch,
+}
+
+impl DetPreProcess {
+    pub(crate) fn run_into_buffer_with_scratch(
+        &self,
+        img: &RecImage,
+        buffer: &mut Vec<f32>,
+        scratch: &mut DetPreprocessScratch,
+        limit_side_len: Option<usize>,
+    ) -> Result<(usize, usize)> {
+        let (resize_h, resize_w) =
+            self.compute_resize_hw(img, limit_side_len.unwrap_or(self.limit_side_len))?;
+        let expected_len = 3usize
+            .checked_mul(resize_h)
+            .and_then(|v| v.checked_mul(resize_w))
+            .ok_or_else(|| {
+                RapidOcrError::InvalidInput("det output buffer size overflow".to_string())
+            })?;
+        buffer.resize(expected_len, 0.0);
+
+        let backend = resolve_backend_strict(self.vision_backend)?;
+        match backend {
+            VisionBackend::PureRust => {
+                let src = img.as_bgr_cow();
+                resize_bgr_inter_linear_into_with_scratch(
+                    src.as_ref(),
+                    img.width(),
+                    img.height(),
+                    resize_w,
+                    resize_h,
+                    &mut scratch.tmp_bgr,
+                    &mut scratch.resize,
+                )?;
+                self.normalize_bgr_into_slice(
+                    &scratch.tmp_bgr,
+                    resize_w,
+                    resize_h,
+                    &mut buffer[..expected_len],
+                )?;
+            }
+            VisionBackend::OpenCv => {
+                let resized = resize_image(img, resize_w, resize_h, backend)?;
+                self.normalize_resized_into_slice(&resized, &mut buffer[..expected_len])?;
+            }
+        }
+
+        Ok((resize_h, resize_w))
+    }
+
+    fn compute_resize_hw(&self, img: &RecImage, limit_side_len: usize) -> Result<(usize, usize)> {
+        let h = img.height();
+        let w = img.width();
+        if h == 0 || w == 0 {
+            return Err(RapidOcrError::InvalidImage(
+                "detector image width/height cannot be zero".to_string(),
+            ));
+        }
+
+        let ratio = if self.limit_type == "max" {
+            if h.max(w) > limit_side_len {
+                limit_side_len as f32 / h.max(w) as f32
+            } else {
+                1.0
+            }
+        } else if h.min(w) < limit_side_len {
+            limit_side_len as f32 / h.min(w) as f32
+        } else {
+            1.0
+        };
+
+        // ---- 放大上界(本项目加固)----------------------------------------------
+        // 上游 `limit_type = "min"` 只把**短边**撑到 limit_side_len,**完全不看长边**,
+        // 于是放大倍数无上界:
+        //   720x70   → 放 10.5 倍 → 7568x736  (557 万像素)
+        //   8000x120 → 放  6.1 倍 → 49067x736 (3600 万像素)
+        // 实测 det 峰值内存因此从 ~150MB 涨到 265~340MB(docs/12-ocr-memory-analysis.md)。
+        //
+        // 实测规律(真实截图):
+        //   有收益的放大,倍数都 ≤ 2.45(screen 1.36 / crop760 1.75 / 1920x800 1.84 /
+        //   1920x600 2.45);而爆炸的都 ≥ 9.2(mixed14 10.5 / code12 9.2)。
+        //   且在 0.4M~5.6M 像素区间内,mixed14 的识别结果**完全不变** ——
+        //   说明那些放大对识别毫无贡献,只是徒增内存与插值伪影(code12 少放大反而更准)。
+        //
+        // 故这里给两道闸:
+        //   ① `max_upscale` —— 放大倍数上界(直击根因,保得住所有"有收益"的场景);
+        //   ② `max_input_side` —— 最长边上界(兜住极端宽高比,保证内存有硬上界)。
+        // 两者都只**削减放大**,绝不引入缩小(各取 max(.., 1.0)),故对大图与常规截图无影响。
+        let ratio = if ratio > 1.0 {
+            let mut r = ratio;
+            if self.max_upscale > 0.0 {
+                r = r.min(self.max_upscale);
+            }
+            if self.max_input_side > 0 {
+                let longest = h.max(w) as f64;
+                r = r.min((self.max_input_side as f64 / longest).max(1.0) as f32);
+            }
+            r
+        } else {
+            ratio
+        };
+
+        // Keep parity with Python: int(h * ratio), int(w * ratio), then round to 32-multiples.
+        let mut resize_h = ((h as f32 * ratio) as usize).max(1);
+        let mut resize_w = ((w as f32 * ratio) as usize).max(1);
+        resize_h = ((resize_h as f32 / 32.0).round_ties_even() as usize * 32).max(32);
+        resize_w = ((resize_w as f32 / 32.0).round_ties_even() as usize * 32).max(32);
+        Ok((resize_h, resize_w))
+    }
+
+    fn normalize_resized_into_slice(
+        &self,
+        resized: &RecImage,
+        out_slice: &mut [f32],
+    ) -> Result<()> {
+        let src = resized.as_bgr_cow();
+        self.normalize_bgr_into_slice(src.as_ref(), resized.width(), resized.height(), out_slice)
+    }
+
+    fn normalize_bgr_into_slice(
+        &self,
+        src: &[u8],
+        width: usize,
+        height: usize,
+        out_slice: &mut [f32],
+    ) -> Result<()> {
+        let expected_len = 3usize
+            .checked_mul(height)
+            .and_then(|v| v.checked_mul(width))
+            .ok_or_else(|| {
+                RapidOcrError::InvalidInput("det output buffer size overflow".to_string())
+            })?;
+        let expected_src_len = expected_len;
+        if src.len() != expected_src_len {
+            return Err(RapidOcrError::InvalidInput(format!(
+                "det source BGR size mismatch: expected {expected_src_len}, got {}",
+                src.len()
+            )));
+        }
+        if out_slice.len() != expected_len {
+            return Err(RapidOcrError::InvalidInput(format!(
+                "det output buffer size mismatch: expected {expected_len}, got {}",
+                out_slice.len()
+            )));
+        }
+
+        let plane_stride = width * height;
+        let row_src_stride = width * 3;
+        let row_parallel = should_parallelize_rows(width, height);
+        let norm_mul = [
+            (1.0 / 255.0) / self.std[0],
+            (1.0 / 255.0) / self.std[1],
+            (1.0 / 255.0) / self.std[2],
+        ];
+        let norm_add = [
+            -self.mean[0] / self.std[0],
+            -self.mean[1] / self.std[1],
+            -self.mean[2] / self.std[2],
+        ];
+        #[cfg(target_arch = "x86_64")]
+        let use_avx2 = std::arch::is_x86_feature_detected!("avx2");
+
+        if row_parallel {
+            let out_addr = out_slice.as_mut_ptr() as usize;
+            let src_addr = src.as_ptr() as usize;
+            (0..height).into_par_iter().for_each(|y| {
+                let out_ptr = out_addr as *mut f32;
+                let src_ptr = src_addr as *const u8;
+                // Safety:
+                // - `y` is unique per parallel iteration, so each worker writes disjoint row ranges.
+                // - `out_ptr` points to a contiguous CHW buffer of size `3 * width * height`.
+                // - `src_ptr` points to a contiguous BGR buffer of size `3 * width * height`.
+                unsafe {
+                    let row_ptr = src_ptr.add(y * row_src_stride);
+                    #[cfg(target_arch = "x86_64")]
+                    if use_avx2 {
+                        write_normalized_row_avx2(
+                            row_ptr,
+                            out_ptr,
+                            y,
+                            width,
+                            plane_stride,
+                            norm_mul,
+                            norm_add,
+                        );
+                    } else {
+                        write_normalized_row_scalar(
+                            row_ptr,
+                            out_ptr,
+                            y,
+                            width,
+                            plane_stride,
+                            norm_mul,
+                            norm_add,
+                        );
+                    }
+                    #[cfg(not(target_arch = "x86_64"))]
+                    write_normalized_row_scalar(
+                        row_ptr,
+                        out_ptr,
+                        y,
+                        width,
+                        plane_stride,
+                        norm_mul,
+                        norm_add,
+                    );
+                }
+            });
+        } else {
+            for y in 0..height {
+                // Safety:
+                // - `y` stays within `[0, height)`.
+                // - Source and destination pointers are derived from validated contiguous buffers.
+                unsafe {
+                    let row_ptr = src.as_ptr().add(y * row_src_stride);
+                    #[cfg(target_arch = "x86_64")]
+                    if use_avx2 {
+                        write_normalized_row_avx2(
+                            row_ptr,
+                            out_slice.as_mut_ptr(),
+                            y,
+                            width,
+                            plane_stride,
+                            norm_mul,
+                            norm_add,
+                        );
+                    } else {
+                        write_normalized_row_scalar(
+                            row_ptr,
+                            out_slice.as_mut_ptr(),
+                            y,
+                            width,
+                            plane_stride,
+                            norm_mul,
+                            norm_add,
+                        );
+                    }
+                    #[cfg(not(target_arch = "x86_64"))]
+                    write_normalized_row_scalar(
+                        row_ptr,
+                        out_slice.as_mut_ptr(),
+                        y,
+                        width,
+                        plane_stride,
+                        norm_mul,
+                        norm_add,
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[inline]
+fn should_parallelize_rows(width: usize, height: usize) -> bool {
+    width
+        .checked_mul(height)
+        .is_some_and(|v| v >= 512 * 512 && rayon::current_num_threads() > 1)
+}
+
+#[inline]
+unsafe fn write_normalized_row_scalar(
+    src_row_ptr: *const u8,
+    out_ptr: *mut f32,
+    y: usize,
+    width: usize,
+    plane_stride: usize,
+    norm_mul: [f32; 3],
+    norm_add: [f32; 3],
+) {
+    // Safety:
+    // - Caller guarantees all pointers are valid for the computed row range.
+    // - The row writes target disjoint regions when used in parallel.
+    unsafe {
+        let mut src_px = src_row_ptr;
+        let row_base = y * width;
+        for x in 0..width {
+            let row_offset = row_base + x;
+            let b = (*src_px) as f32 * norm_mul[0] + norm_add[0];
+            let g = (*src_px.add(1)) as f32 * norm_mul[1] + norm_add[1];
+            let r = (*src_px.add(2)) as f32 * norm_mul[2] + norm_add[2];
+
+            *out_ptr.add(row_offset) = b;
+            *out_ptr.add(plane_stride + row_offset) = g;
+            *out_ptr.add(plane_stride * 2 + row_offset) = r;
+            src_px = src_px.add(3);
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn write_normalized_row_avx2(
+    src_row_ptr: *const u8,
+    out_ptr: *mut f32,
+    y: usize,
+    width: usize,
+    plane_stride: usize,
+    norm_mul: [f32; 3],
+    norm_add: [f32; 3],
+) {
+    use std::arch::x86_64::{
+        __m256, __m256i, _mm256_add_ps, _mm256_cvtepi32_ps, _mm256_mul_ps, _mm256_set1_ps,
+        _mm256_setr_epi32, _mm256_storeu_ps,
+    };
+
+    let row_base = y * width;
+    let mut x = 0usize;
+    let b_mul: __m256 = _mm256_set1_ps(norm_mul[0]);
+    let g_mul: __m256 = _mm256_set1_ps(norm_mul[1]);
+    let r_mul: __m256 = _mm256_set1_ps(norm_mul[2]);
+    let b_add: __m256 = _mm256_set1_ps(norm_add[0]);
+    let g_add: __m256 = _mm256_set1_ps(norm_add[1]);
+    let r_add: __m256 = _mm256_set1_ps(norm_add[2]);
+
+    while x + 8 <= width {
+        // De-interleave 8 BGR pixels into channel vectors.
+        let mut b = [0_i32; 8];
+        let mut g = [0_i32; 8];
+        let mut r = [0_i32; 8];
+        for lane in 0..8 {
+            // Safety:
+            // - Caller guarantees `src_row_ptr` is valid for the current row.
+            // - `x + lane < width` and each pixel has 3 channels.
+            unsafe {
+                let p = src_row_ptr.add((x + lane) * 3);
+                b[lane] = *p as i32;
+                g[lane] = *p.add(1) as i32;
+                r[lane] = *p.add(2) as i32;
+            }
+        }
+
+        let b_i32: __m256i = _mm256_setr_epi32(b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+        let g_i32: __m256i = _mm256_setr_epi32(g[0], g[1], g[2], g[3], g[4], g[5], g[6], g[7]);
+        let r_i32: __m256i = _mm256_setr_epi32(r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
+
+        let b_f32 = _mm256_add_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(b_i32), b_mul), b_add);
+        let g_f32 = _mm256_add_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(g_i32), g_mul), g_add);
+        let r_f32 = _mm256_add_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(r_i32), r_mul), r_add);
+
+        let row_offset = row_base + x;
+        // Safety:
+        // - Destination pointer is a contiguous CHW buffer sized for the full image.
+        // - Row offsets are in-bounds for this row and channel planes.
+        unsafe {
+            _mm256_storeu_ps(out_ptr.add(row_offset), b_f32);
+            _mm256_storeu_ps(out_ptr.add(plane_stride + row_offset), g_f32);
+            _mm256_storeu_ps(out_ptr.add(plane_stride * 2 + row_offset), r_f32);
+        }
+        x += 8;
+    }
+
+    if x < width {
+        // Safety:
+        // - Tail starts within current source row; each iteration advances by one pixel.
+        let mut src_px = unsafe { src_row_ptr.add(x * 3) };
+        for px in x..width {
+            let row_offset = row_base + px;
+            // Safety:
+            // - Source and destination pointers remain in-bounds for the tail range.
+            unsafe {
+                let b = (*src_px) as f32 * norm_mul[0] + norm_add[0];
+                let g = (*src_px.add(1)) as f32 * norm_mul[1] + norm_add[1];
+                let r = (*src_px.add(2)) as f32 * norm_mul[2] + norm_add[2];
+                *out_ptr.add(row_offset) = b;
+                *out_ptr.add(plane_stride + row_offset) = g;
+                *out_ptr.add(plane_stride * 2 + row_offset) = r;
+                src_px = src_px.add(3);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod upscale_cap_tests {
+    use super::*;
+
+    /// 按给定上界算 det 输入尺寸。
+    fn resized(w: usize, h: usize, up: f32, side: usize) -> (usize, usize) {
+        let pre = DetPreProcess {
+            limit_side_len: 736,
+            limit_type: "min".to_string(),
+            max_upscale: up,
+            max_input_side: side,
+            mean: [0.5, 0.5, 0.5],
+            std: [0.5, 0.5, 0.5],
+            vision_backend: VisionBackend::PureRust,
+        };
+        let img = RecImage::from_bgr_u8(w, h, vec![0_u8; w * h * 3]).expect("image");
+        pre.compute_resize_hw(&img, 736).expect("resize")
+    }
+
+    /// 复现上游默认行为:`min` 语义下 720x70 会被放大 10 倍以上 —— 内存问题的根源。
+    #[test]
+    fn upstream_default_explodes_on_flat_input() {
+        let (_h, w) = resized(720, 70, 0.0, 0);
+        assert!(w > 7000, "上游默认应把 720 宽撑到 7000+,实际 {w}");
+    }
+
+    /// 倍数闸把爆炸的放大压回来。
+    #[test]
+    fn upscale_cap_tames_flat_input() {
+        let (h, w) = resized(720, 70, 3.0, 0);
+        assert!(w < 2300, "倍数<=3 后宽度应 <2300,实际 {w}");
+        assert!(h <= 736, "高度不应超过目标短边 736,实际 {h}");
+    }
+
+    /// 常规全屏截图(det 输入 960x540,倍数约 1.36)不受两道上闸影响。
+    /// 实测这类图识别结果逐字不变,是"不能碰"的场景。
+    #[test]
+    fn caps_do_not_touch_normal_screenshot() {
+        assert_eq!(resized(960, 540, 0.0, 0), resized(960, 540, 3.0, 2560));
+    }
+
+    /// 横幅类(倍数约 2.45)同样不受影响 —— 实测这类放大对识别**有**收益。
+    #[test]
+    fn caps_do_not_touch_banner_like_input() {
+        assert_eq!(resized(960, 300, 0.0, 0), resized(960, 300, 3.0, 2560));
+    }
+
+    /// 极端宽高比由"最长边"闸兜住,保证像素数有硬上界。
+    #[test]
+    fn side_cap_bounds_extreme_aspect() {
+        let (h, w) = resized(960, 14, 3.0, 2560);
+        assert!(w <= 2560 + 32, "最长边应被闸住,实际 {w}");
+        assert!(h >= 32, "高度不应塌到 0,实际 {h}");
+    }
+
+    /// 两道闸都只削减放大,**绝不引入缩小** —— 大图必须保持原样。
+    #[test]
+    fn caps_never_downscale() {
+        assert_eq!(resized(960, 960, 3.0, 2560), resized(960, 960, 0.0, 0));
+    }
+}

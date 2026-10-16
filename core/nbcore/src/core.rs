@@ -8,9 +8,9 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock, RwLock};
 
 use crate::error::{AppError, AppResult};
-use crate::{settings, store};
 use crate::settings::Settings;
 use crate::store::Db;
+use crate::{settings, store};
 
 /// 通知消息:WM_APP 基址 + 偏移。与 docs/02-migration-core.md §4.3 的表一致。
 pub const WM_APP_CLIP_CHANGED: u32 = 0x8000 + 1;
@@ -113,7 +113,8 @@ impl Core {
 
     /// 取全局核心;未初始化(或已 shutdown)时返回错误,FFI 层转错误码。
     pub fn get() -> AppResult<&'static Core> {
-        CORE.get().ok_or_else(|| AppError::Internal("核心未初始化".into()))
+        CORE.get()
+            .ok_or_else(|| AppError::Internal("核心未初始化".into()))
     }
 
     /// 是否已初始化(测试与 FFI 状态探测用)。
@@ -140,7 +141,8 @@ impl Core {
 
 /// 关闭标志:监听线程每轮检查(事件驱动的 GetMessage 阻塞由 PostThreadMessage 解除,
 /// 简化起见 v1 用短超时轮询标志,代价可忽略)。
-pub(crate) static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub(crate) static SHUTDOWN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// 兼容第一代调用的快捷访问(clip/ffi 内部使用)。
 pub(crate) fn try_core() -> Option<&'static Core> {
@@ -159,6 +161,9 @@ impl Core {
     }
 
     pub fn set_settings(&self, settings: Settings) -> AppResult<()> {
+        // 设置变更后 OCR 引擎的可用性/后端可能变化 → 释放已建 session,下次识别按新设置重建。
+        // (session 空闲销毁见 ocr::rapid,这里是"立即生效"路径。)
+        crate::ocr::rapid::release_session();
         settings::save(&self.default_dir, &settings)?;
         self.settings
             .write()
