@@ -362,6 +362,11 @@ AppDrawer {
         const backendCodes = ocrBackendCombo.backendCodes
         const backendIdx = backendCodes.indexOf(s.ocrBackend)
         ocrBackendCombo.currentIndex = backendIdx < 0 ? 0 : backendIdx
+        // 未知档位/驻留回退默认(与 core 的 normalize 同口径)
+        const profileIdx = ocrProfileCombo.profileCodes.indexOf(s.ocrProfile)
+        ocrProfileCombo.currentIndex = profileIdx < 0 ? 1 : profileIdx
+        const modeIdx = ocrSessionCombo.modeCodes.indexOf(s.ocrSessionMode)
+        ocrSessionCombo.currentIndex = modeIdx < 0 ? 2 : modeIdx
         root.refreshOcrProbe()
         maxImage.value = s.maxImageMb
         monitorCheck.checked = s.monitorEnabled === true
@@ -453,6 +458,8 @@ AppDrawer {
         const s = cur.data
         s.historyLimit = historyLimit.value
         s.ocrBackend = ocrBackendCombo.backendCodes[ocrBackendCombo.currentIndex]
+        s.ocrProfile = ocrProfileCombo.profileCodes[ocrProfileCombo.currentIndex]
+        s.ocrSessionMode = ocrSessionCombo.modeCodes[ocrSessionCombo.currentIndex]
         s.maxImageMb = maxImage.value
         s.monitorEnabled = monitorCheck.checked
         s.regionSkipEditor = skipEditorCheck.checked
@@ -1213,6 +1220,33 @@ AppDrawer {
                     id: ocrBackendHint
                     text: root.ocrBackendHintText
                     color: root.ocrBackendAvailable ? Theme.colors.textSecondary : Theme.colors.danger
+                }
+                FieldLabel { text: "识别偏好(仅 RapidOCR)" }
+                ReadableComboBox {
+                    id: ocrProfileCombo
+                    Layout.fillWidth: true
+                    /// 与 core 的 settings::ocr_profile 同口径(validate 会拒绝其它值)。
+                    readonly property var profileCodes: ["quality", "balanced", "compact"]
+                    model: ["质量优先(小字最准,内存占用最高)",
+                            "均衡(默认,内存与质量折中)",
+                            "内存优先(最省内存,密集小字可能漏行)"]
+                    onActivated: root.scheduleSave()
+                }
+                HintLabel {
+                    // 全屏截图的 det 输入低于所有档位上限(docs/12 §14.2),
+                    // 档位只影响小图/宽扁图 —— 写明以防"选了没效果"的误解。
+                    text: "对全屏截图的内存占用无影响;影响小图与长条截图"
+                    color: Theme.colors.textSecondary
+                }
+                FieldLabel { text: "引擎驻留(仅 RapidOCR)" }
+                ReadableComboBox {
+                    id: ocrSessionCombo
+                    Layout.fillWidth: true
+                    readonly property var modeCodes: ["resident", "idle60", "ephemeral"]
+                    model: ["常驻(识别最快,后台约占 40MB)",
+                            "空闲 1 分钟后释放",
+                            "用完即销毁(最省内存,每次多约 0.3 秒)"]
+                    onActivated: root.scheduleSave()
                 }
                 // ---- 翻译服务 ----
                 SectionDivider {}

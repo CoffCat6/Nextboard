@@ -67,6 +67,8 @@ pub struct RapidOcr {
     loader: LoadImage,
 }
 
+
+
 impl RapidOcr {
     pub fn new(config: EngineConfig) -> Result<Self> {
         Self::new_with_sources(config, PipelineSources::default())

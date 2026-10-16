@@ -110,6 +110,14 @@ pub struct Settings {
     pub ocr_backend: String,
     /// OCR 放大倍数（1~4）：小字号截图放大后再识别可显著提升准确率，默认 2。
     pub ocr_scale: i64,
+    /// RapidOCR 识别偏好：`quality` / `balanced`（默认）/ `compact`。
+    /// 映射到 det 输入的放大上界（见 `ocr_profile` 模块与 docs/12 §14.2 实测）。
+    /// ⚠️ 仅对 RapidOCR 生效 —— Windows 内置引擎走的是 `ocr_scale`，不经此参数。
+    pub ocr_profile: String,
+    /// OCR 引擎驻留策略：`resident`（常驻）/ `idle60`（空闲 60s 销毁）/ `ephemeral`（用完即销毁）。
+    /// 映射见 `ocr_session_mode` 模块。默认 `ephemeral`：最省内存，
+    /// 每次识别多一次引擎构建（实测 ~250ms，相对识别本身耗时可接受）。
+    pub ocr_session_mode: String,
     /// 翻译提供方：`microsoft`（默认，免密钥）/ `openai` / `custom`（Phase 7 F21~F23）。
     /// 默认取微软免授权端点，**开箱即可翻译、无需任何配置**。
     pub translate_provider: String,
@@ -408,6 +416,10 @@ impl Default for Settings {
             ocr_backend: "system".into(),
             // 放大 2 倍：实测对 12px 代码截图明显改善且耗时可控（docs/phase6.md §3.6）
             ocr_scale: 2,
+            // 识别偏好默认「均衡」（docs/12 §14.2：小图内存 215→116M 且指纹不变）
+            ocr_profile: "balanced".into(),
+            // 引擎驻留默认「用完即销毁」：最省内存；重建 ~250ms 相对识别耗时可感知度低
+            ocr_session_mode: "ephemeral".into(),
             translate_provider: "microsoft".into(),
             translate_source_lang: "auto".into(),
             translate_target_lang: "zh-Hans".into(),
@@ -511,6 +523,16 @@ impl Settings {
         if !ocr_backend::is_supported(&self.ocr_backend) {
             return Err(AppError::InvalidInput(
                 "OCR 后端只支持 system（内置离线引擎）或 rapidocr（RapidOCR）".into(),
+            ));
+        }
+        if !ocr_profile::is_supported(&self.ocr_profile) {
+            return Err(AppError::InvalidInput(
+                "OCR 识别偏好只支持 quality / balanced / compact".into(),
+            ));
+        }
+        if !ocr_session_mode::is_supported(&self.ocr_session_mode) {
+            return Err(AppError::InvalidInput(
+                "OCR 引擎驻留只支持 resident / idle60 / ephemeral".into(),
             ));
         }
         let language = self.ocr_language.trim();
@@ -913,6 +935,73 @@ pub mod ocr_backend {
             value.trim().to_ascii_lowercase().as_str(),
             "" | "system" | "windows" | "rapidocr" | "rapid"
         )
+    }
+}
+
+/// 识别偏好档位（单一事实源）。
+///
+/// 模式与 [`ocr_backend`] 完全一致：validate 与加载修复共用 [`is_supported`]，
+/// 避免出现「设置页能选、加载被归零」的双副本漂移（docs/08a §1.2.3 教训）。
+pub mod ocr_profile {
+    /// 质量优先：det 放大上界 3.0 / 最长边 2560（与 docs §7 加固后的默认一致）。
+    pub const QUALITY: &str = "quality";
+    /// 均衡（默认）：2.0 / 2048。实测小图峰值 215→116M 且识别指纹不变。
+    pub const BALANCED: &str = "balanced";
+    /// 内存优先：1.5 / 1600。实测小图峰值 82M；密集小字界面可能漏行。
+    pub const COMPACT: &str = "compact";
+
+    /// 该值是否为受支持的档位（空串等价于默认 `balanced`）。
+    pub fn is_supported(value: &str) -> bool {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "" | "quality" | "balanced" | "compact"
+        )
+    }
+
+    /// 归一（空串 → 默认档）。
+    pub fn normalize(value: &str) -> &'static str {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "quality" => QUALITY,
+            "compact" => COMPACT,
+            _ => BALANCED,
+        }
+    }
+
+    /// 档位 → (det 放大倍数上界, det 输入最长边上界)。
+    /// 实测依据 docs/12 §14.2：三档下 mixed14 指纹不变、内存 215/116/82M。
+    pub fn det_caps(value: &str) -> (f32, usize) {
+        match normalize(value) {
+            QUALITY => (3.0, 2560),
+            COMPACT => (1.5, 1600),
+            _ => (2.0, 2048),
+        }
+    }
+}
+
+/// 引擎驻留策略（单一事实源）。
+pub mod ocr_session_mode {
+    /// 常驻：引擎不销毁，后台常驻约 40MB。
+    pub const RESIDENT: &str = "resident";
+    /// 空闲 60 秒销毁。
+    pub const IDLE60: &str = "idle60";
+    /// 用完即销毁（默认）：最省内存，每次识别多一次引擎构建（~250ms 实测）。
+    pub const EPHEMERAL: &str = "ephemeral";
+
+    /// 该值是否受支持（空串等价于默认 `ephemeral`）。
+    pub fn is_supported(value: &str) -> bool {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "" | "resident" | "idle60" | "ephemeral"
+        )
+    }
+
+    /// 归一（空串 → 默认）。
+    pub fn normalize(value: &str) -> &'static str {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "resident" => RESIDENT,
+            "idle60" => IDLE60,
+            _ => EPHEMERAL,
+        }
     }
 }
 
@@ -1759,6 +1848,7 @@ mod tests {
         for value in ["system", "windows", "rapidocr", "rapid"] {
             assert!(ocr_backend::is_supported(value), "{value} 应被白名单接受");
         }
+
         // 既有别名
         assert_eq!(Backend::parse("system"), Backend::System);
         assert_eq!(Backend::parse("windows"), Backend::System);
@@ -1774,6 +1864,44 @@ mod tests {
             Backend::RapidOcr,
             "大小写不敏感"
         );
+    }
+
+    /// 新设置项:合法值不被 validate 拒绝(单一事实源与字段双份的回归防线)。
+    #[test]
+    fn ocr_profile_and_session_mode_survive_validate() {
+        for profile in ["", "quality", "balanced", "compact"] {
+            let mut s = Settings::default();
+            s.ocr_profile = profile.into();
+            s.ocr_session_mode = "ephemeral".into();
+            assert!(s.validate().is_ok(), "profile={profile:?} 应合法");
+        }
+        for mode in ["", "resident", "idle60", "ephemeral"] {
+            let mut s = Settings::default();
+            s.ocr_profile = "balanced".into();
+            s.ocr_session_mode = mode.into();
+            assert!(s.validate().is_ok(), "mode={mode:?} 应合法");
+        }
+    }
+
+    /// 非法值被 validate 拒绝(而不是静默放行)。
+    #[test]
+    fn ocr_profile_and_session_mode_reject_unknown() {
+        let mut s = Settings::default();
+        s.ocr_profile = "turbo".into();
+        assert!(s.validate().is_err(), "未知档位应被拒绝");
+        let mut s = Settings::default();
+        s.ocr_session_mode = "forever".into();
+        assert!(s.validate().is_err(), "未知驻留应被拒绝");
+    }
+
+    /// 档位映射的口径锁定(改档位值必须意识到这里)。
+    #[test]
+    fn ocr_profile_det_caps_mapping() {
+        use super::ocr_profile::det_caps;
+        assert_eq!(det_caps("quality"), (3.0, 2560));
+        assert_eq!(det_caps("balanced"), (2.0, 2048));
+        assert_eq!(det_caps("compact"), (1.5, 1600));
+        assert_eq!(det_caps(""), (2.0, 2048), "空串=默认均衡");
     }
 
     #[test]

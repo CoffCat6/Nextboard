@@ -153,7 +153,9 @@ pub fn models_dir() -> AppResult<PathBuf> {
 }
 
 /// 构建引擎。
-fn build_engine(models: &Path) -> AppResult<crate::ocr::rapid::RapidOcr> {
+///
+/// `profile`:识别偏好档位(决定 det 放大上界,见 settings::ocr_profile)。
+fn build_engine(models: &Path, profile: &str) -> AppResult<crate::ocr::rapid::RapidOcr> {
     use crate::ocr::rapid::{
         DictionarySource, EngineConfig, ModelSource, PipelineSources, ProviderPreference,
     };
@@ -168,8 +170,10 @@ fn build_engine(models: &Path) -> AppResult<crate::ocr::rapid::RapidOcr> {
     // det 放大上界(两道上闸,见常量说明与 docs/12-ocr-memory-analysis.md)。
     // 这是相对上游的关键加固:上游放大倍数无上界,宽扁截图会把 det 输入
     // 撑到几百万像素,峰值内存 265~340MB。
-    cfg.det.max_upscale = DET_MAX_UPSCALE;
-    cfg.det.max_input_side = DET_MAX_INPUT_SIDE;
+    // 档位决定 det 放大上界(docs/12 §14.2 实测:三档下小图指纹不变,内存 215/116/82M)。
+    let (max_upscale, max_input_side) = crate::settings::ocr_profile::det_caps(profile);
+    cfg.det.max_upscale = max_upscale;
+    cfg.det.max_input_side = max_input_side;
 
     // CPU-only:本项目不引入 CUDA / DirectML。
     cfg.det.runtime.provider_preference = ProviderPreference::Cpu;
@@ -232,13 +236,32 @@ fn with_engine<T>(f: impl FnOnce(&mut crate::ocr::rapid::RapidOcr) -> AppResult<
     }
     ensure_runtime(&install)?;
 
+    // 驻留策略:每档的空闲销毁时限(resident = None 即永不)。
+    let ttl: Option<Duration> = {
+        let settings = crate::core::Core::get()
+            .ok()
+            .and_then(|c| c.settings().ok());
+        match crate::settings::ocr_session_mode::normalize(
+            settings.as_ref().map(|s| s.ocr_session_mode.as_str()).unwrap_or(""),
+        ) {
+            crate::settings::ocr_session_mode::RESIDENT => None,
+            crate::settings::ocr_session_mode::IDLE60 => Some(IDLE_TTL),
+            _ => Some(Duration::ZERO),
+        }
+    };
+    let profile = crate::core::Core::get()
+        .ok()
+        .and_then(|c| c.settings().ok())
+        .map(|s| s.ocr_profile.clone())
+        .unwrap_or_default();
+
     let mut session = SESSION
         .lock()
         .map_err(|_| AppError::Internal("OCR session 锁已污染".into()))?;
 
-    // 空闲超时 → 销毁(session 生命周期唯一出口)。
-    if let Some(last) = session.last_used {
-        if session.engine.is_some() && last.elapsed() >= IDLE_TTL {
+    // 空闲超时 → 销毁(session 生命周期唯一出口之一)。
+    if let (Some(last), Some(ttl)) = (session.last_used, ttl) {
+        if session.engine.is_some() && last.elapsed() >= ttl {
             info!("OCR session 空闲超过 {:?},销毁", last.elapsed());
             session.engine = None;
         }
@@ -246,7 +269,7 @@ fn with_engine<T>(f: impl FnOnce(&mut crate::ocr::rapid::RapidOcr) -> AppResult<
 
     if session.engine.is_none() {
         let started = Instant::now();
-        session.engine = Some(build_engine(&models)?);
+        session.engine = Some(build_engine(&models, &profile)?);
         info!("OCR 引擎已构建({:?})", started.elapsed());
     }
 
@@ -256,6 +279,11 @@ fn with_engine<T>(f: impl FnOnce(&mut crate::ocr::rapid::RapidOcr) -> AppResult<
         .ok_or_else(|| AppError::Internal("OCR 引擎不可用".into()))?;
     let out = f(engine);
     session.last_used = Some(Instant::now());
+    // 用完即销毁:识别完立刻释放,不留给空闲期(docs/12 §14.3 档位 ephemeral)。
+    if ttl == Some(Duration::ZERO) {
+        session.engine = None;
+        session.last_used = None;
+    }
     out
 }
 

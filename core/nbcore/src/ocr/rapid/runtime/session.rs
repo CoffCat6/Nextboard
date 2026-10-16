@@ -54,8 +54,15 @@ impl OrtSession {
         let resolved_provider = provider_chain.resolution.resolved;
 
         let mut builder = Session::builder()?;
+        // 图优化级别用 **Level1**,而非 ORT 默认的 Level3(本项目相对上游的一处调整)。
+        //
+        // 依据(docs/12-ocr-memory-analysis.md §8):Level3 的算子融合会把多个算子的
+        // 中间结果合并成大块临时缓冲,实测 det 单次推理的**瞬时峰值**因此多 18~27MB
+        // (mixed14 243→216M,screen 215→197M);而识别耗时**基本不变**。
+        // 更激进的"关 memory pattern"能再省 ~50MB,但 det 推理耗时涨 4 倍
+        // (screen 4.1s→18.2s),不可接受 —— 内存与速度的平衡点在 Level1。
         builder = builder
-            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .with_optimization_level(GraphOptimizationLevel::Level1)
             .map_err(ort::Error::from)?;
 
         if resolved_provider == ResolvedExecutionProvider::DirectMl {
