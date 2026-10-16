@@ -370,8 +370,12 @@ AppDrawer {
         root.refreshOcrProbe()
         maxImage.value = s.maxImageMb
         monitorCheck.checked = s.monitorEnabled === true
-        skipEditorCheck.checked = s.regionSkipEditor === true
-        autoConfirmCheck.checked = s.regionAutoConfirm === true
+        // 单一出口(§18.4):由 regionAutoConfirm 推导 ——
+        //   true  = direct (松手即入库)
+        //   false = toolbar(浮出工具栏)
+        // 兼容旧配置:旧版 "skipEditor=false"(想进编辑器)的用户,其意图是"要编辑能力",
+        // 在新模型里对应 toolbar(浮条带标注),故只要 autoConfirm=false 就落 toolbar。
+        regionExitCombo.currentIndex = s.regionAutoConfirm === false ? 1 : 0
         rightClickCancelCheck.checked = s.regionRightClickCancel === true
         captureDelay.value = s.captureDelaySecs > 0 ? s.captureDelaySecs : 3
         // 0 = 不自动取消,必须原样保留;缺失时按 core 默认 60 秒
@@ -462,8 +466,9 @@ AppDrawer {
         s.ocrSessionMode = ocrSessionCombo.modeCodes[ocrSessionCombo.currentIndex]
         s.maxImageMb = maxImage.value
         s.monitorEnabled = monitorCheck.checked
-        s.regionSkipEditor = skipEditorCheck.checked
-        s.regionAutoConfirm = autoConfirmCheck.checked
+        // 单一出口 → 回写成 regionAutoConfirm(direct=true / toolbar=false)。
+        // regionSkipEditor 已废弃(§18.5):不写它,让它保持读入时的原值(见 core 注释)。
+        s.regionAutoConfirm = regionExitCombo.currentIndex === 0
         s.regionRightClickCancel = rightClickCancelCheck.checked
         s.captureDelaySecs = captureDelay.value
         s.overlayIdleSecs = overlayIdle.value * 60
@@ -715,17 +720,26 @@ AppDrawer {
                     text: "剪贴板监听"
                     onClicked: root.scheduleSave()
                 }
-                // 取消勾选后,框选截图会先进编辑器标注,「完成」才入库 + 写剪贴板
-                ReadableCheckBox {
-                    id: skipEditorCheck
-                    text: "截图后直接入库(跳过编辑器)"
-                    onClicked: root.scheduleSave()
+                // 框选之后去哪儿(§18.4):**单一出口**取代原先两个复选框。
+                // 原先 autoConfirm × skipEditor 叠出四种组合,其中「松开即确认 + 进编辑器」
+                // 自相矛盾、无法向用户解释;且"框选进编辑器"这条出口已下线(§18.5)——
+                // 编辑器只保留唯一入口 = 右键编辑(主面板条目右键 / 贴图右键)。
+                Label {
+                    text: "框选后"
+                    color: Theme.colors.textSecondary
+                    font.pixelSize: Theme.metrics.fontCaption
                 }
-                // 取消勾选后,选区保留并可拖 8 向手柄微调,Enter 或双击才确认
-                ReadableCheckBox {
-                    id: autoConfirmCheck
-                    text: "框选后松开鼠标即确认"
-                    onClicked: root.scheduleSave()
+                ReadableComboBox {
+                    id: regionExitCombo
+                    objectName: "regionExitCombo"   // 验收钩子
+                    Layout.fillWidth: true
+                    /// 与 model 一一对应的标识:
+                    ///   direct  —— 松手即入库 + 写剪贴板
+                    ///   toolbar —— 选区保留并浮出工具栏(就地标注/OCR/贴图/保存/完成)
+                    readonly property var exitCodes: ["direct", "toolbar"]
+                    model: ["直接入库并复制(松手即完成)",
+                            "浮出工具栏(可标注 / OCR / 贴图 / 保存)"]
+                    onActivated: root.scheduleSave()
                 }
                 ReadableCheckBox {
                     id: rightClickCancelCheck

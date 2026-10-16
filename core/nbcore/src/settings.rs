@@ -80,13 +80,32 @@ pub struct Settings {
     ///   （第一代 clipboard-plus F17 的口径，供"一键贴图 = 贴图"习惯的用户选用）。
     pub pin_prefer_image: bool,
     /// 框选截图是否松开鼠标即自动确认（Phase 5 增强）：关闭时保留手柄微调 + Enter/双击确认。
+    /// 框选松开鼠标后：
+    ///   true（默认）= 直接入库 + 写剪贴板（快，一步到位）；
+    ///   false       = 选区保留并浮出工具栏，就地标注/OCR/贴图/保存/再确认。
+    /// 取代原先 `regionAutoConfirm` 与 `regionSkipEditor` 两个布尔量（§18.4）：
+    /// 两者叠加出四种组合，其中「松开即确认 + 进编辑器」自相矛盾，且无法向用户解释。
     pub region_auto_confirm: bool,
     /// 框选时鼠标右键是否取消本次截图(默认开启;第一代无此项,按用户习惯补)。
     pub region_right_click_cancel: bool,
-    /// 框选确认后是否**跳过编辑器**：默认开启，确认即入库 + 写剪贴板（原 S2 直通行为），
-    /// 与 `region_auto_confirm` 叠加即为"拖拽松手 → 已复制"一步到位；
-    /// 需要标注时关闭本项（框选进编辑器），或走历史图片右键「编辑」。
+    /// ⚠️ **已废弃**（§18.5）：编辑器只保留唯一入口 = 右键编辑，框选链路不再有
+    /// "进编辑器"这条出口（编辑能力由浮条工具栏承担）。此字段**保留仅为兼容旧配置**
+    /// —— 删掉它会让旧 app_config.json 的该键变成未知字段而告警。
+    /// 代码中**不再有任何行为读它**；写入时原样回传，避免旧版本回退时丢配置。
     pub region_skip_editor: bool,
+    /// 框选浮条底板的**不透明度档位**(alpha,0~255;三档 179/217/242,默认 217)。
+    ///
+    /// 动机(用户实测反馈):浮条压在选区底部,原先底板 alpha 硬编码 242(约 95%
+    /// 不透明),会把待截内容整片盖住。三档含义见 docs/17 §17.5:
+    /// 242 = 不透明(底色复杂时用)、217 = 半透(默认)、179 = 极简(尽量不挡原图)。
+    /// 校验限定在这三档内,不接受任意值 —— 浮条上只有三档按钮,存别的值没有意义。
+    pub capture_bar_alpha: i64,
+    /// 编辑器窗口几何(四元组 x,y,w,h;空 = 尚未记录,首次按默认尺寸居中)。
+    ///
+    /// 动机:编辑器此前固定 resize(960,720),用户按自己习惯调过尺寸,下次打开
+    /// 又被重置。记录几何后"上次多大就多大"。宽高需在合理区间;x/y 允许为负
+    /// (多屏时屏可能位于负坐标区)。
+    pub editor_geometry: Vec<i64>,
     /// 延时截图等待秒数（托盘「延时截图」入口用；1~10，默认 3）。
     /// 用途：先按下入口，再去展开菜单/等悬浮提示出现，倒计时结束才开始框选。
     pub capture_delay_secs: i64,
@@ -400,6 +419,8 @@ impl Default for Settings {
             pin_prefer_image: false,
             region_auto_confirm: true,
             region_right_click_cancel: true,
+            capture_bar_alpha: 217,        // 半透档(docs/17 §17.5):默认不挡原图又看得清按钮
+            editor_geometry: Vec::new(),   // 空 = 尚未记录,首次按默认尺寸居中
             // 默认"松手即复制"：截图后立刻可粘贴，不经过编辑器
             region_skip_editor: true,
             capture_delay_secs: 3,
@@ -492,6 +513,28 @@ impl Settings {
             return Err(AppError::InvalidInput(
                 "贴图默认不透明度须在 30 ~ 100 之间".into(),
             ));
+        }
+        // 浮条底板不透明度:只接受三档(179/217/242)。刻意不放开任意值 ——
+        // 浮条上只有三档按钮,存进来的其它值没有对应 UI,会变成"设置对不上界面"。
+        if ![179, 217, 242].contains(&self.capture_bar_alpha) {
+            return Err(AppError::InvalidInput(
+                "浮条不透明度只支持 179 / 217 / 242 三档".into(),
+            ));
+        }
+        // 编辑器几何:空(未记录)合法;非空必须是四个数,且宽高在合理区间。
+        // x/y 不限制符号 —— 多屏时副屏可以位于负坐标区。
+        if !self.editor_geometry.is_empty() {
+            if self.editor_geometry.len() != 4 {
+                return Err(AppError::InvalidInput(
+                    "编辑器几何须为 [x, y, w, h] 四个数".into(),
+                ));
+            }
+            let (w, h) = (self.editor_geometry[2], self.editor_geometry[3]);
+            if !(320..=20000).contains(&w) || !(240..=20000).contains(&h) {
+                return Err(AppError::InvalidInput(
+                    "编辑器窗口尺寸超出合理范围".into(),
+                ));
+            }
         }
         // 文本贴图样式：字号/最大宽度/背景不透明度范围 + 两个颜色须为 #RRGGBB
         if !(8..=96).contains(&self.pin_text_font_size) {
@@ -1449,6 +1492,43 @@ mod tests {
     }
 
     #[test]
+    fn validate_checks_capture_bar_alpha_three_steps() {
+        let with_alpha = |alpha: i64| Settings {
+            capture_bar_alpha: alpha,
+            ..Default::default()
+        };
+        // 三档合法
+        assert!(with_alpha(179).validate().is_ok());
+        assert!(with_alpha(217).validate().is_ok());
+        assert!(with_alpha(242).validate().is_ok());
+        // 其它值一律拒绝:浮条上只有三档按钮,存别的值没有对应 UI
+        assert!(with_alpha(200).validate().is_err());
+        assert!(with_alpha(0).validate().is_err());
+        assert!(with_alpha(255).validate().is_err());
+        // 默认值必须合法(否则老配置一律保存失败)
+        assert!(Settings::default().validate().is_ok());
+    }
+
+    #[test]
+    fn validate_checks_editor_geometry() {
+        let with_geom = |g: Vec<i64>| Settings {
+            editor_geometry: g,
+            ..Default::default()
+        };
+        // 空 = 尚未记录,合法(首次打开按默认尺寸居中)
+        assert!(with_geom(Vec::new()).validate().is_ok());
+        assert!(with_geom(vec![100, 100, 1280, 800]).validate().is_ok());
+        // x/y 可为负:多屏时副屏可能位于负坐标区
+        assert!(with_geom(vec![-1080, 0, 1080, 1920]).validate().is_ok());
+        // 元素个数必须为四
+        assert!(with_geom(vec![100, 100]).validate().is_err());
+        assert!(with_geom(vec![1, 2, 3, 4, 5]).validate().is_err());
+        // 尺寸越界拒绝
+        assert!(with_geom(vec![0, 0, 100, 800]).validate().is_err());
+        assert!(with_geom(vec![0, 0, 1280, 100]).validate().is_err());
+    }
+
+    #[test]
     fn validate_checks_ocr_options() {
         let with = |backend: &str, language: &str, scale: i64| Settings {
             ocr_backend: backend.into(),
@@ -1504,7 +1584,9 @@ mod tests {
         assert_eq!(settings.hotkeys.toggle_main, "Alt+A");
         assert_eq!(settings.hotkeys.pin_latest, "Ctrl+Shift+P");
         assert!(settings.region_auto_confirm, "默认框选即确认");
-        assert!(settings.region_skip_editor, "默认直通剪贴板、不进编辑器");
+        // regionSkipEditor 已废弃(§18.5):字段仍在(兼容旧配置读入),但不再驱动行为。
+        // 这里只断言"能正常读入默认值",不再断言其语义。
+        assert!(settings.region_skip_editor, "已废弃字段仍可读入(默认 true)");
         assert_eq!(settings.capture_delay_secs, 3, "延时截图默认等待 3 秒");
         assert_eq!(
             settings.overlay_idle_secs, 60,

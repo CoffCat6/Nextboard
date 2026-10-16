@@ -381,6 +381,30 @@ fn decode_png_to_rgba(png: &[u8]) -> Result<(Vec<u8>, u32, u32), AppError> {
     })
 }
 
+/// 把 `patch` **合并进** `base`(设置字段级合并,见 save_settings 分支的注释)。
+///
+/// 规则:
+/// - 两边都是**对象**时递归合并(一层一层往下),这样"只改 hotkeys.captureRegion"
+///   不会把同级的其余快捷键清零;
+/// - 其余情况(标量/数组/null)一律**整体替换** —— 数组语义就是整体(如 editorGeometry);
+/// - `patch` 为 null 时保留 base(不把整个设置清空)。
+fn merge_settings(mut base: serde_json::Value, patch: serde_json::Value) -> serde_json::Value {
+    match (base.as_object_mut(), patch) {
+        (Some(base_obj), serde_json::Value::Object(patch_obj)) => {
+            for (key, value) in patch_obj {
+                let merged = match base_obj.remove(&key) {
+                    Some(existing) => merge_settings(existing, value),
+                    None => value,
+                };
+                base_obj.insert(key, merged);
+            }
+            base
+        }
+        (_, serde_json::Value::Null) => base,   // null 视为"未提供"
+        (_, other) => other,
+    }
+}
+
 fn cstr_to_string(ptr: *const c_char) -> Result<String, AppError> {
     if ptr.is_null() {
         return Err(AppError::InvalidInput("C 字符串为空".into()));
@@ -779,14 +803,30 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
         }
         "save_settings" => {
             let core = crate::core::Core::get()?;
-            let settings: crate::settings::Settings = serde_json::from_value(req.clone())
+            // ⚠️ **字段级合并**,而不是"用请求整体替换"。
+            //
+            // 为什么必须合并(实测缺陷):`Settings` 是 `#[serde(default)]`,因此
+            // `from_value(只传了一个键的请求)` 会把**其余全部字段回退默认值** ——
+            // 于是"只改一个键"的部分写入会把用户的所有设置打回出厂值。
+            // 实测(切一次浮条透明度):
+            //     historyLimit 1234→5000、theme dark→system、
+            //     pinDefaultOpacity 55→100、monitorEnabled false→true
+            // 这正是用户报的"设置改了又自己变回去"的**根因**。
+            //
+            // 合并规则:以**当前设置**为底,用请求里出现的键逐个覆盖。
+            // 对象类型(hotkeys/proxy/translateXxx)做**一层深合并**,这样
+            // "只改 hotkeys.captureRegion"不会把同级的其余快捷键清零。
+            let current = serde_json::to_value(core.settings()?)
+                .map_err(|err| AppError::Internal(format!("当前设置序列化失败: {err}")))?;
+            let merged = merge_settings(current, req.clone());
+            let settings: crate::settings::Settings = serde_json::from_value(merged.clone())
                 .map_err(|err| AppError::InvalidInput(format!("设置字段非法: {err}")))?;
             settings.validate()?;
             // 自定义数据目录变更:写待迁移标记,下次启动搬迁 db + blobs 到新目录
             // (settings.rs::take_pending_move;源目录保留,删除旧数据由用户手动做)。
-            let current = core.settings()?;
-            if settings.data_dir.trim() != current.data_dir.trim() {
-                let source = crate::settings::effective_data_dir(&current, &core.default_dir);
+            let previous = core.settings()?;
+            if settings.data_dir.trim() != previous.data_dir.trim() {
+                let source = crate::settings::effective_data_dir(&previous, &core.default_dir);
                 crate::settings::write_pending_move(&core.default_dir, &source)?;
             }
             core.set_settings(settings)?;
@@ -1086,6 +1126,60 @@ fn tags_opt(req: &serde_json::Value) -> AppResult<Option<Vec<String>>> {
                 .filter_map(|x| x.as_str().map(str::to_owned))
                 .collect(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    //! 设置**字段级合并**的回归(save_settings)。
+    //!
+    //! 历史缺陷:save_settings 直接 `from_value(请求)`,而 Settings 是 #[serde(default)]
+    //! —— 只传一个键的请求会把其余字段全部打回默认值。实测"切一次浮条透明度"就导致
+    //! historyLimit/theme/pinDefaultOpacity/monitorEnabled 全被重置。以下断言钉住修复。
+
+    use super::merge_settings;
+    use serde_json::json;
+
+    #[test]
+    fn partial_patch_keeps_untouched_fields() {
+        let base = json!({ "historyLimit": 1234, "theme": "dark", "monitorEnabled": false });
+        let merged = merge_settings(base, json!({ "captureBarAlpha": 179 }));
+        assert_eq!(merged["historyLimit"], 1234, "未提及的字段必须原样保留");
+        assert_eq!(merged["theme"], "dark");
+        assert_eq!(merged["monitorEnabled"], false);
+        assert_eq!(merged["captureBarAlpha"], 179, "请求里的字段要生效");
+    }
+
+    #[test]
+    fn nested_object_merges_one_level_deep() {
+        // 只改 hotkeys 里的一个键,同级其余快捷键不能被清掉
+        let base = json!({ "hotkeys": { "toggleMain": "Alt+A", "captureRegion": "Ctrl+Shift+A" } });
+        let merged = merge_settings(base, json!({ "hotkeys": { "captureRegion": "F1" } }));
+        assert_eq!(merged["hotkeys"]["captureRegion"], "F1");
+        assert_eq!(merged["hotkeys"]["toggleMain"], "Alt+A", "同级字段不得丢失");
+    }
+
+    #[test]
+    fn arrays_replace_wholesale() {
+        // 数组语义是整体(如 editorGeometry 四元组),不做逐元素合并
+        let base = json!({ "editorGeometry": [1, 2, 3, 4] });
+        let merged = merge_settings(base, json!({ "editorGeometry": [10, 20, 30, 40] }));
+        assert_eq!(merged["editorGeometry"], json!([10, 20, 30, 40]));
+    }
+
+    #[test]
+    fn null_patch_does_not_wipe() {
+        let base = json!({ "theme": "dark" });
+        let merged = merge_settings(base, json!(null));
+        assert_eq!(merged["theme"], "dark", "null 视为未提供,不清空");
+    }
+
+    #[test]
+    fn new_key_is_added() {
+        let base = json!({ "theme": "dark" });
+        let merged = merge_settings(base, json!({ "brandNew": 7 }));
+        assert_eq!(merged["brandNew"], 7);
+        assert_eq!(merged["theme"], "dark");
     }
 }
 
