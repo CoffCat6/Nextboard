@@ -139,6 +139,31 @@ add_custom_command(TARGET nextboard POST_BUILD
     COMMENT "Deploy nbcore.dll"
 )
 
+# ---- OCR 运行期资产(RapidOCR 引擎)---------------------------------------------
+# 三样必须与 nextboard.exe / nbcore.dll **同目录**,缺一不可:
+#   1) onnxruntime.dll —— nbcore 内 ocr/rapid.rs 以 exe 同级路径显式加载,
+#      **不走 PATH**(用户机 system32 可能有不兼容的旧版本,实测见过 1.17.1);
+#   2) models/ocr/*    —— PP-OCRv4 mobile 四件(det/cls/rec/keys);
+#   3) 二者版本配对:ORT 需 1.28+(ort 2.0.0-rc.13 的要求)。
+# 资产入仓在 thirdparty/(见 docs/10-plan-b-implementation.md §15)。
+set(NB_THIRDPARTY "${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty")
+
+# ⚠️ 用 add_custom_target(... ALL) 而**不是** POST_BUILD:
+#    POST_BUILD 只在目标被**重新链接**时执行 —— 实测删掉 models/ 后跑增量构建,
+#    ninja 报 "no work to do",资产**不会被恢复**(构建图中没有这条规则)。
+#    而这两个资产是**拷贝进来的输入**(非构建产物),恰恰最容易被误删/过期。
+#    挂在 ALL 上可保证每次构建都校验一次,代价仅一次 copy_if_different。
+add_custom_target(nb_deploy_ocr_assets ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${NB_THIRDPARTY}/ort/onnxruntime.dll" "$<TARGET_FILE_DIR:nextboard>"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:nextboard>/models/ocr"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
+            "${NB_THIRDPARTY}/models/ocr" "$<TARGET_FILE_DIR:nextboard>/models/ocr"
+    COMMENT "Deploy OCR assets (onnxruntime.dll + models/ocr)"
+    VERBATIM
+)
+add_dependencies(nb_deploy_ocr_assets nextboard)
+
 # QML 模块资源的 rcc 输出随 nextboard 目标自动重建;Sciter 时代的 panel HTML
 # 目录拷贝已移除(qt_add_qml_module 直接打进 qrc)。
 

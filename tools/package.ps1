@@ -99,6 +99,11 @@ Ok $Stage
 Step '按白名单拷贝运行期文件'
 Copy-Item (Join-Path $BuildDir 'nextboard.exe') $Stage
 Copy-Item (Join-Path $BuildDir 'nbcore.dll')    $Stage
+# OCR 运行期资产(RapidOCR):ORT 运行库必须与 exe 同级(rapid.rs 显式按 exe 目录加载,
+# 不走 PATH —— 用户机 system32 可能有不兼容旧版);模型四件放 models\ocr\。
+# 这两项由 app/CMakeLists.txt 的 POST_BUILD 拷进 BuildDir。
+Copy-Item (Join-Path $BuildDir 'onnxruntime.dll') $Stage
+Copy-Item (Join-Path $BuildDir 'models') $Stage -Recurse
 $dlls = Get-ChildItem $BuildDir -Filter 'Qt6*.dll' -File
 if (-not $dlls) { Die 'app/build 下没有 Qt6*.dll — windeployqt 未执行' }
 $dlls | ForEach-Object { Copy-Item $_.FullName $Stage }
@@ -151,14 +156,19 @@ if ($forbidden) { $forbidden | ForEach-Object { Die "stage 混入非运行期文
 if (Test-Path (Join-Path $Stage 'qmltooling')) { Die 'stage 不应包含 qmltooling(调试工具)' }
 # 6.2 必选项存在性
 $must = @('nextboard.exe', 'nbcore.dll', 'platforms\qwindows.dll',
-          'imageformats\qico.dll', 'qml\QtQuick', 'qml\QtQuick\Controls')
+          'imageformats\qico.dll', 'qml\QtQuick', 'qml\QtQuick\Controls',
+          # OCR 三件:缺任一则该引擎不可用,不该静默发出去
+          'onnxruntime.dll',
+          'models\ocr\ppocr_keys_v1.txt',
+          'models\ocr\ch_PP-OCRv4_det_infer.onnx')
 foreach ($m in $must) {
     if (-not (Test-Path (Join-Path $Stage $m))) { Die "stage 缺必选项: $m" }
 }
 $fileCount = (Get-ChildItem $Stage -Recurse -File).Count
 $sizeMb = DirSizeMb $Stage
-Ok "文件数 $fileCount / 体积 $sizeMb MB(路线图 6.4 目标 <60MB)"
-if ($sizeMb -ge 60) { Warn "运行期子集 $sizeMb MB 超过 60MB 预算,检查是否混入多余文件" }
+Ok "文件数 $fileCount / 体积 $sizeMb MB(路线图 6.4 目标 <90MB)"
+# 目标由 <60MB 放宽到 <90MB:OCR 引擎(ORT 运行库)+ 模型四件带来约 31MB 硬增量(见 08 §9.4)。
+if ($sizeMb -ge 90) { Warn "运行期子集 $sizeMb MB 超过 90MB 预算,检查是否混入多余文件" }
 
 # ---- 第 7 步:产出 portable.zip 与安装包 ----
 Step '产出便携版 zip'
