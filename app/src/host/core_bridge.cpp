@@ -283,8 +283,37 @@ QString CoreBridge::ocrImage(const QImage& image) {
     // 解析 JSON 本来就要这份内容),随即归还核心缓冲。
     const QByteArray owned(text);
     m_freeString(text);
+    // ⚠️ 返回体是**裸** {"text": …}(core/nbcore/src/ffi.rs 的 nb_ocr_rgba 直接
+    //    report_out_text(json!({"text": text}))),**没有** nb_call 那层 {ok,data} 信封。
+    //    这里曾照抄 nb_call 的解析写成 resp["data"]["text"] —— data 不存在,
+    //    于是**每次 OCR 都"识别成功但取到空串"**:核心日志里明明有
+    //    "RapidOCR 完成:…,62 行",用户却什么都拿不到。
     const QJsonObject resp = QJsonDocument::fromJson(owned).object();
-    return resp.value("data").toObject().value("text").toString();
+    QString result = resp.value("text").toString();
+    if (result.isEmpty() && resp.contains("data")) {
+        // 兼容带信封的形态(核心若统一成 nb_call 风格则无需改宿主)
+        result = resp.value("data").toObject().value("text").toString();
+    }
+    if (result.isEmpty() && !resp.isEmpty()) {
+        // 自诊断:有返回体却取不到文本 = 契约变了,别静默当"没识别到"
+        qWarning() << "OCR 返回体没有 text 字段,契约可能已变:" << owned.left(200);
+    }
+    return result;
+}
+
+bool CoreBridge::copyTextToClipboard(const QString& text) {
+    if (text.isEmpty()) return false;
+    // 走核心的 copy_text_to_clipboard(而非 QGuiApplication::clipboard()->setText):
+    // 核心的 clipboard_win 带**打开重试**(别的进程短暂占用剪贴板是常态,实测日志里
+    // 就有 "Retrying to obtain clipboard" → "Unable to obtain clipboard"),
+    // 宿主直接写 Qt 剪贴板在这种时刻会静默失败 —— 用户看到"取字了却粘不出来"。
+    const QJsonObject resp = call("copy_text_to_clipboard", {{"text", text}});
+    if (!resp.value("ok").toBool()) {
+        qWarning() << "OCR 文本写剪贴板失败:"
+                   << resp.value("error").toObject().value("message").toString();
+        return false;
+    }
+    return true;
 }
 
 QImage CoreBridge::loadEntryImage(const QString& blobPath) {

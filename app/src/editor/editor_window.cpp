@@ -421,7 +421,20 @@ void EditorWindow::ocrTakeText() {
     auto* watcher = new QFutureWatcher<QString>(this);
     connect(watcher, &QFutureWatcher<QString>::finished, this, [this, watcher] {
         watcher->deleteLater();
-        showOcrResult(watcher->result(), {});
+        const QString text = watcher->result();
+        // 「取字」的落点是**系统剪贴板**(与浮条同一语义,对齐第一代:
+        // 见 docs/progress.md「OCR 结果」一条)。此前这里只弹层展示、从不写剪贴板,
+        // 用户点了「OCR取字」再 Ctrl+V 什么都没有。
+        // 经核心写入:核心 clipboard_win 带打开重试,别的进程占用时 Qt 写会静默失败。
+        QString reason;
+        if (text.isEmpty()) {
+            reason = QStringLiteral("未识别到文字(图片可能不含可识别文本)");
+        } else if (CoreBridge::instance().copyTextToClipboard(text)) {
+            reason = QStringLiteral("已识别 %1 个字符并复制到剪贴板").arg(text.size());
+        } else {
+            reason = QStringLiteral("识别成功,但写入剪贴板失败");
+        }
+        showOcrResult(text, reason);
     });
     connect(watcher, &QFutureWatcher<QString>::canceled, watcher, &QObject::deleteLater);
     watcher->setFuture(QtConcurrent::run([image = composed]() -> QString {
@@ -442,6 +455,7 @@ void EditorWindow::showOcrResult(const QString& text, const QString& reason) {
         "QLabel{background:#26272E;color:#DFE1E8;padding:12px;border-radius:8px;"
         "font-size:14px;}"));
     popup->setMaximumWidth(560);
+    popup->setMaximumHeight(qMax(120, height() - 160));   // 长文本不撑出屏幕
     if (text.isEmpty() && !reason.isEmpty()) {
         popup->setText(reason);                    // "识别中…" 或错误原因
     } else if (text.isEmpty()) {
@@ -456,10 +470,13 @@ void EditorWindow::showOcrResult(const QString& text, const QString& reason) {
     popup->move(global);
     popup->show();
     m_ocrPopup = popup;
-    // 决策:OCR 完成后关闭编辑器(与贴图同语义)。识别期间编辑器仍在,
-    // 弹层随编辑器销毁;文本稍后由用户在弹层里自行处理(v1 只展示)。
+    // 决策:OCR 完成后关闭编辑器(与贴图同语义)。
+    // ⚠️ 但要**留出可读时间**:此前是 singleShot(0) 立刻 close,而弹层是编辑器的
+    //    子窗口 —— 窗口一销毁弹层跟着没了,识别结果**一帧都看不到**,用户只看到
+    //    编辑器闪一下就消失(表现为"点了取字,啥也没发生")。
     if (!text.isEmpty() || (reason.isEmpty())) {
-        QTimer::singleShot(0, this, [this] {
+        const bool recognized = !text.isEmpty();
+        QTimer::singleShot(recognized ? 2500 : 1200, this, [this] {
             emit ocrFinished(QString(), {});
             close();
         });

@@ -945,11 +945,23 @@ void OverlayWidget::handleToolbarClick(const QPoint& pos) {
                     [this, watcher] {
                 watcher->deleteLater();
                 const QString text = watcher->result();
-                // 弹层展示(v1 只展示;复制预留)。结束后关闭会话。
+                // 「取字」的落点是**系统剪贴板**:识别到就写进去,用户 Ctrl+V 直接可用。
+                // ⚠️ 此前这里只把文本塞进 QToolTip 展示、**从不写剪贴板** ——
+                //    用户点「OCR取字」后剪贴板里当然什么都没有(docs/14 §16 只写了
+                //    "识别 → 弹层",漏了写剪贴板这一步;参照实现是 CoreFacade::
+                //    processCapture 的 copy_text_to_clipboard)。
+                //    经核心写入而非 Qt:核心的 clipboard_win 带打开重试,别的进程
+                //    短暂占用时 Qt 会静默失败(日志里 "Unable to obtain clipboard" 即此类)。
+                QString notice;
+                if (text.isEmpty()) {
+                    notice = QStringLiteral("未识别到文字(图片可能不含可识别文本)");
+                } else if (CoreBridge::instance().copyTextToClipboard(text)) {
+                    notice = QStringLiteral("已识别 %1 个字符并复制到剪贴板").arg(text.size());
+                } else {
+                    notice = QStringLiteral("识别成功,但写入剪贴板失败");
+                }
                 const QPoint gp = mapToGlobal(QPoint(m_toolbarRect.x(), m_toolbarRect.y() - 8));
-                QToolTip::showText(gp, text.isEmpty()
-                    ? QStringLiteral("未识别到文字(图片可能不含可识别文本)")
-                    : text, this, QRect(), 8000);
+                QToolTip::showText(gp, notice, this, QRect(), 4000);
                 emit cancelled();
             });
             connect(watcher, &QFutureWatcher<QString>::canceled, watcher,

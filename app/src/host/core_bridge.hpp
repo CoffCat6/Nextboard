@@ -89,6 +89,12 @@ public:
     /// 失败/不可用时返回空串(错误文本见 lastError())。
     QString ocrImage(const QImage& image);
 
+    /// 把文本写进系统剪贴板(经核心,与其它复制路径同一通道 —— 核心的
+    /// clipboard_win 带打开重试,宿主直接用 Qt 剪贴板在别的进程占用时会静默失败)。
+    /// 返回是否写入成功。**「OCR 取字」的落点就是这里**:识别结果必须落到剪贴板,
+    /// 否则用户"取了字"却粘不出任何东西。
+    bool copyTextToClipboard(const QString& text);
+
     /// 按条目的 blob 路径加载图片(相对 blobs 目录,兼容历史绝对路径)。失败返回空图。
     static QImage loadEntryImage(const QString& blobPath);
 

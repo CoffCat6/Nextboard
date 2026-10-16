@@ -295,6 +295,14 @@ pub unsafe extern "C" fn nb_capture_monitor_matched(
 /// 而编辑器里的标注合成图还没有条目 —— 走本入口避免"先入库再识别"的绕路。
 /// 内部用 `recognize_configured`,因此**设置项(后端/识别偏好/引擎驻留)全部生效**。
 ///
+/// ⚠️ **出参契约(与 nb_call 不同,改前端务必一起改)**:
+///   本函数交出的是**裸** `{"text": "..."}` —— **没有** `nb_call` 那层
+///   `{"ok":…,"data":…}` 信封。宿主侧曾照抄 nb_call 的解析读
+///   `resp["data"]["text"]`,结果是"核心识别成功、宿主永远拿到空串"
+///   (nbcore.log 里明确有"RapidOCR 完成:…,N 行",用户却什么都取不到)。
+///   此处**刻意不改**成带信封:改了会让旧宿主(以及按裸对象解析的第三方工具)
+///   一起失效;契约的不对称由本注释与宿主 core_bridge.cpp 的对应注释共同固定。
+///
 /// # Safety
 /// `rgba` 由宿主持有,本函数只读;`out_text` 由本 crate 分配,
 /// 宿主成功后须以 `nb_free_string` 释放(与 `nb_call` 的出参同约定)。
@@ -1078,5 +1086,43 @@ fn tags_opt(req: &serde_json::Value) -> AppResult<Option<Vec<String>>> {
                 .filter_map(|x| x.as_str().map(str::to_owned))
                 .collect(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod contract_tests {
+    //! FFI **返回体契约**的回归:契约漂移不会编译报错,只会让功能静默失效 ——
+    //! 所以必须有断言把它钉住。
+    //!
+    //! 历史缺陷:nb_ocr_rgba 交的是**裸** {"text": ...},而宿主侧照抄了
+    //! nb_call 的 {"ok":...,"data":...} 信封去解析,于是"核心识别成功、
+    //! 用户永远取到空串"(nbcore.log 有 "RapidOCR 完成:...,N 行",剪贴板却什么都没有)。
+
+    /// nb_ocr_rgba 自己构造返回体的那段逻辑(与函数体保持同形)。
+    fn ocr_payload(text: &str) -> String {
+        serde_json::json!({ "text": text }).to_string()
+    }
+
+    /// 只有 text 字段 —— **没有** ok/data 信封。宿主若加信封会在此失败。
+    #[test]
+    fn ocr_payload_has_no_envelope() {
+        let raw = ocr_payload("HELLO 12345");
+        let v: serde_json::Value = serde_json::from_str(&raw).expect("必须是合法 JSON");
+        assert_eq!(v.get("text").and_then(|t| t.as_str()), Some("HELLO 12345"));
+        assert!(
+            v.get("data").is_none() && v.get("ok").is_none(),
+            "OCR 返回体不应带 ok/data 信封(宿主按裸对象解析);实际: {raw}"
+        );
+    }
+
+    /// 对照:nb_call **是**带信封的。两者不同是**有意为之**,
+    /// 这条断言用来防止有人"顺手统一"而打穿旧宿主。
+    #[test]
+    fn nb_call_payload_has_envelope() {
+        let body =
+            serde_json::json!({ "ok": true, "data": serde_json::json!({"text": "x"}) }).to_string();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v.get("ok").and_then(|b| b.as_bool()), Some(true));
+        assert!(v.get("data").is_some());
     }
 }
