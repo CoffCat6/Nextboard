@@ -398,7 +398,7 @@ void EditorWindow::buildToolBar() {
     connect(actions->addAction(QStringLiteral("OCR取字")), &QAction::triggered, this,
             &EditorWindow::ocrTakeText);
     actions->addSeparator();
-    connect(actions->addAction(QStringLiteral("完成 (Ctrl+Enter)")), &QAction::triggered, this,
+    connect(actions->addAction(QStringLiteral("完成 (Enter)")), &QAction::triggered, this,
             &EditorWindow::finish);
     connect(actions->addAction(QStringLiteral("取消 (Esc)")), &QAction::triggered, this,
             &EditorWindow::cancel);
@@ -808,11 +808,11 @@ void EditorWindow::keyPressEvent(QKeyEvent* e) {
             break;
         case Qt::Key_Return:
         case Qt::Key_Enter:
-            if (ctrl) {
-                finish();
-                return;
-            }
-            break;
+            // 文字工具编辑态(m_textItem 非空)时 Enter 留给**换行** ——
+            // 此刻图元持有焦点,事件仍会先经过本窗口,不拦截否则标注无法换行。
+            if (m_textItem) break;
+            finish();   // Enter 直接完成(Ctrl+Enter 保留为等价别名)
+            return;
         default:
             break;
     }
