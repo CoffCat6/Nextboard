@@ -470,7 +470,118 @@ void runSettingsFlow(PanelWindow& panel) {
                                                     qInfo() << "SETTINGS STEP12 viewId:"
                                                             << st8.value("viewId").toString()
                                                             << "(期望 todo)";
-                                                    QApplication::quit();
+
+                                                    // ---- D. OCR 后端选择器 ----
+                                                    // 判据两条:① 下拉**真实点击**能改后端并落盘;
+                                                    //           ② 可用性提示反映 core 的 ocr_probe 结果。
+                                                    // 走真实点击而非直调 QML 函数 —— 后者会掩盖
+                                                    // "控件不可见/被遮挡"这类缺陷(抽屉里 OCR 段在下方,
+                                                    // 若滚动或布局有问题,点击会落空)。
+                                                    //
+                                                    // ⚠️ 必须先**重新打开抽屉**:STEP10 已按 Esc 关闭,而
+                                                    //    AppDrawer 是 Drawer(Popup)—— 关闭的 Popup 内容
+                                                    //    不在窗口场景树里,findAccaptanceItem 从 contentItem
+                                                    //    递归**找不到**其中的 objectName(实测:
+                                                    //    "验收:找不到 objectName ocrBackendCombo")。
+                                                    panel.clickByObjectName(
+                                                        QStringLiteral("settingsButton"));
+                                                    QTimer::singleShot(900, &panel, [&panel] {
+                                                    const QVariantMap stOpen =
+                                                        panel.rootProperty("acceptanceState")
+                                                            .toMap();
+                                                    qInfo() << "SETTINGS STEP13 drawerReopened:"
+                                                            << stOpen.value("settingsOpen")
+                                                                   .toBool();
+                                                    // 不能用 acceptanceSettingsToBottom:它滚到**内容底部**,
+                                                    // 会把靠上的 OCR 段滚出视口顶部(实测点击坐标 y=-207,
+                                                    // 落在窗口外)。改为把目标控件本身滚入视口。
+                                                    panel.setRootProperty(
+                                                        "acceptanceScrollTarget",
+                                                        QVariant(QStringLiteral(
+                                                            "ocrBackendCombo")));
+                                                    panel.invokeAcceptance(
+                                                        "acceptanceSettingsScrollToTarget");
+                                                    QTimer::singleShot(700, &panel, [&panel] {
+                                                        const QVariantMap before =
+                                                            CoreFacade::instance()
+                                                                .call("get_settings");
+                                                        const QString beforeBackend =
+                                                            before.value("data")
+                                                                .toMap()
+                                                                .value("ocrBackend")
+                                                                .toString();
+                                                        qInfo() << "SETTINGS STEP13 ocrBackend(before):"
+                                                                << beforeBackend;
+
+                                                        const bool clickedOcr = panel.clickByObjectName(
+                                                            QStringLiteral("ocrBackendCombo"));
+                                                        qInfo() << "SETTINGS STEP13 clickedOcrCombo:"
+                                                                << clickedOcr;
+                                                        QTimer::singleShot(700, &panel, [&panel,
+                                                                                  beforeBackend] {
+                                                            // 下拉已弹出 → 用键盘选中**另一项**并回车
+                                                            // (比点 popup 里的 delegate 稳,后者依赖
+                                                            //  弹窗定位)。
+                                                            panel.sendKey(Qt::Key_Down);
+                                                            panel.sendKey(Qt::Key_Return);
+                                                            qInfo() << "SETTINGS STEP13 chose other"
+                                                                    << "backend";
+                                                            QTimer::singleShot(1500, &panel, [&panel,
+                                                                                      beforeBackend] {
+                                                                const QVariantMap after =
+                                                                    CoreFacade::instance()
+                                                                        .call("get_settings");
+                                                                const QString afterBackend =
+                                                                    after.value("data")
+                                                                        .toMap()
+                                                                        .value("ocrBackend")
+                                                                        .toString();
+                                                                qInfo() << "SETTINGS STEP14"
+                                                                        << "ocrBackend(after):"
+                                                                        << afterBackend
+                                                                        << "changed:"
+                                                                        << (afterBackend !=
+                                                                            beforeBackend);
+
+                                                                // 可用性提示:core 的 ocr_probe
+                                                                // 必须能报出两个后端各自的可用性。
+                                                                const QVariantMap probeSys =
+                                                                    CoreFacade::instance().call(
+                                                                        "ocr_probe",
+                                                                        QVariantMap{
+                                                                            {"backend",
+                                                                             "system"}});
+                                                                const QVariantMap probeRapid =
+                                                                    CoreFacade::instance().call(
+                                                                        "ocr_probe",
+                                                                        QVariantMap{
+                                                                            {"backend",
+                                                                             "rapidocr"}});
+                                                                qInfo() << "SETTINGS STEP15"
+                                                                        << "probe system.available:"
+                                                                        << probeSys.value("data")
+                                                                               .toMap()
+                                                                               .value("available")
+                                                                               .toBool()
+                                                                        << "rapidocr.available:"
+                                                                        << probeRapid.value("data")
+                                                                               .toMap()
+                                                                               .value("available")
+                                                                               .toBool();
+                                                                // 判定:两个后端都必须能被探测
+                                                                // (可用与否取决于本机环境,但"探测接口
+                                                                //  可用"是硬要求)。
+                                                                qInfo() << "SETTINGS STEP15"
+                                                                        << "probeOk:"
+                                                                        << (probeSys.value("ok")
+                                                                                .toBool() &&
+                                                                            probeRapid.value("ok")
+                                                                                .toBool());
+                                                                QApplication::quit();
+                                                            });
+                                                        });
+                                                    });
+                                                    });   // ← 新增:闭合 STEP13 的 drawerReopened 层
                                                 });
                                             });
                                         });

@@ -106,6 +106,45 @@ Rectangle {
         if (settingsDrawerLoader.item) settingsDrawerLoader.item.scrollToBottom()
     }
 
+    /// 验收:把设置抽屉里的某个控件滚入视口(按 objectName 定位)。
+    ///
+    /// 为什么需要:`scrollToBottom()` 会把**靠上**的控件滚出视口顶部,
+    /// 而 QML 的 `isVisible()` 对"被裁到视口外"的项**仍返回 true** ——
+    /// 验收点击会落在窗口外坐标上(实测 y=-207)而静默失败。
+    function acceptanceSettingsScrollTo(objectName) {
+        const drawer = settingsDrawerLoader.item
+        if (!drawer) return false
+        const target = findChildByName(drawer, objectName)
+        return drawer.acceptanceScrollTo(target)
+    }
+
+    /// 在 QML 项树里按 objectName 递归查找(QML 无内置 findChild)。
+    function findChildByName(node, name) {
+        if (!node) return null
+        if (node.objectName === name) return node
+        // Control / Popup 的内容挂在 contentItem 上(Drawer 是 Popup,
+        // 只遍历 children **找不到**其中的控件 —— 实测 target found=false)。
+        const inner = node.contentItem
+        if (inner) {
+            const hitInner = findChildByName(inner, name)
+            if (hitInner) return hitInner
+        }
+        const kids = node.children || []
+        for (let i = 0; i < kids.length; i++) {
+            const hit = findChildByName(kids[i], name)
+            if (hit) return hit
+        }
+        return null
+    }
+
+    /// 验收:由宿主设置要滚入视口的控件 objectName(--settings-flow 用)。
+    property string acceptanceScrollTarget: ""
+
+    /// 验收:无参包装 —— 宿主 invokeAcceptance 只能调无参方法。
+    function acceptanceSettingsScrollToTarget() {
+        return acceptanceSettingsScrollTo(acceptanceScrollTarget)
+    }
+
     /// 验收(--restore-flow):待恢复/导入的备份文件路径。
     /// ⚠️ 产品路径里这个路径来自原生文件对话框 —— 进程内验收无法操作它,
     ///    故由宿主直写属性跳过"选文件"这一步;确认卡 → **真实点击确认按钮**

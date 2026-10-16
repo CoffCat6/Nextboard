@@ -31,6 +31,11 @@ AppDrawer {
     /// 渲染后端是否被改过(同样重启生效;与数据目录分开提示,便于合并文案)。
     property bool renderDirty: false
 
+    /// OCR 当前后端是否可用(由 core 的 ocr_probe 回填)。
+    /// 不可用时 HintLabel 转成警示色并给出可读原因(缺模型 / 缺 DLL / 缺语言包)。
+    property bool ocrBackendAvailable: true
+    property string ocrBackendHintText: ""
+
     /// 备份/导出进行中标志:按钮置灰 + 文案切换(结果经 backupFinished/exportFinished 回投)。
     property bool backupRunning: false
     property bool exportRunning: false
@@ -302,6 +307,46 @@ AppDrawer {
     /// 验收专用:读回滚动位置(>0 = 确实滚过了)。
     readonly property real acceptanceScrollY: flick.contentY
 
+    /// 验收专用:把某个控件滚入视口。
+    ///
+    /// 为什么需要它:`scrollToBottom()` 会把**靠上**的控件滚出视口顶部,
+    /// 而 QML 的 `isVisible()` 对"被裁到视口外"的项**仍返回 true** ——
+    /// 于是验收点击会落在一个窗口外的坐标上(实测 y=-207)而静默失败。
+    /// 这里把目标项的上边缘对齐到视口顶部,保证它落在可见区内。
+    function acceptanceScrollTo(item) {
+        if (!item) return false
+        const pos = item.mapToItem(flick.contentItem, 0, 0)
+        flick.contentY = Math.max(0, Math.min(pos.y - 8,
+                                    flick.contentHeight - flick.height))
+        return true
+    }
+
+    /// 查询当前所选 OCR 后端的可用性,回填提示文案。
+    ///
+    /// 同步调用:core 侧 `ocr_probe` 只做**文件存在性**检查(不建 session、不加载模型),
+    /// 耗时在微秒级,不需要异步。
+    /// 注意 `reason` 字段仅在**不可用**时由 core 下发(可用时省略)。
+    function refreshOcrProbe() {
+        const code = ocrBackendCombo.backendCodes[ocrBackendCombo.currentIndex]
+        const resp = Core.call("ocr_probe", { "backend": code })
+        if (!resp.ok) {
+            root.ocrBackendAvailable = false
+            root.ocrBackendHintText = "无法探测该引擎:" + errText(resp)
+            return
+        }
+        const d = resp.data
+        root.ocrBackendAvailable = d.available === true
+        if (d.available === true) {
+            // 语言列表仅内置引擎有(RapidOCR 中英混排一体,不按语言标签区分)
+            const langs = d.languages || []
+            root.ocrBackendHintText = langs.length > 0
+                ? "可用 · 语言:" + langs.join("、")
+                : "可用(中英混排一体识别)"
+        } else {
+            root.ocrBackendHintText = d.reason || "该引擎当前不可用"
+        }
+    }
+
     function openAndLoad() {
         open()
         const resp = Core.call("get_settings")
@@ -312,6 +357,12 @@ AppDrawer {
         }
         const s = resp.data
         historyLimit.value = s.historyLimit
+        // OCR 后端:未知值回退 0(与 core 的 Backend::parse 同口径);
+        // 同时触发一次可用性探测,把"为什么不可用"显示出来。
+        const backendCodes = ocrBackendCombo.backendCodes
+        const backendIdx = backendCodes.indexOf(s.ocrBackend)
+        ocrBackendCombo.currentIndex = backendIdx < 0 ? 0 : backendIdx
+        root.refreshOcrProbe()
         maxImage.value = s.maxImageMb
         monitorCheck.checked = s.monitorEnabled === true
         skipEditorCheck.checked = s.regionSkipEditor === true
@@ -401,6 +452,7 @@ AppDrawer {
         }
         const s = cur.data
         s.historyLimit = historyLimit.value
+        s.ocrBackend = ocrBackendCombo.backendCodes[ocrBackendCombo.currentIndex]
         s.maxImageMb = maxImage.value
         s.monitorEnabled = monitorCheck.checked
         s.regionSkipEditor = skipEditorCheck.checked
@@ -1137,6 +1189,31 @@ AppDrawer {
                     }
                 }
 
+                // ---- 文字识别(OCR)----
+                // 引擎由用户显式选择(决策 D6:不做 auto 兜底链)—— 选哪个就是哪个,
+                // 不会出现"我选了内置却跑了 RapidOCR"这种不可预测行为。
+                SectionDivider {}
+                SectionTitle { text: "文字识别" }
+                ReadableComboBox {
+                    id: ocrBackendCombo
+                    objectName: "ocrBackendCombo"   // 验收钩子
+                    Layout.fillWidth: true
+                    /// 与 model 一一对应的后端标识(持久化到 settings.ocrBackend)。
+                    /// ⚠️ 必须与 core 侧 `settings::ocr_backend::is_supported` **同口径**;
+                    /// 值域由该函数的单测交叉锁定,改这里要同步改 core。
+                    readonly property var backendCodes: ["system", "rapidocr"]
+                    model: ["系统内置(开箱即用,需语言包)", "RapidOCR(自带模型,中英混排更准)"]
+                    onActivated: {
+                        root.scheduleSave()
+                        root.refreshOcrProbe()
+                    }
+                }
+                // 可用性与不可用原因:core 的 ocr_probe 聚合两路后端(命中缓存,无需防抖)。
+                HintLabel {
+                    id: ocrBackendHint
+                    text: root.ocrBackendHintText
+                    color: root.ocrBackendAvailable ? Theme.colors.textSecondary : Theme.colors.danger
+                }
                 // ---- 翻译服务 ----
                 SectionDivider {}
                 SectionTitle { text: "翻译服务" }
