@@ -17,15 +17,20 @@
 #include <QWidget>
 
 class QActionGroup;
+class QCloseEvent;
 class QGraphicsView;
 class QLabel;
 class QResizeEvent;
 class QToolBar;
-class AnnotationEngine;
 
 #include "annotation_engine.hpp"
 
 namespace nb {
+
+// 前置声明必须**在命名空间内**:放在全局作用域会声明出一个 ::AnnotationToolbar,
+// 与本项目真正的 nb::AnnotationToolbar 是两个类型 —— 表现为
+// "无法从 nb::AnnotationToolbar* 转换为 AnnotationToolbar*"。
+class AnnotationToolbar;
 
 /// 编辑器窗口。完成时发 committed(合成图),取消时发 cancelled。
 class EditorWindow : public QWidget {
@@ -51,7 +56,9 @@ signals:
 
 protected:
     void resizeEvent(QResizeEvent* e) override;
+    void closeEvent(QCloseEvent* e) override;
     void keyPressEvent(QKeyEvent* e) override;
+    void keyReleaseEvent(QKeyEvent* e) override;
 
 private slots:
     void onCanvasPressed(const QPointF& scenePos);
@@ -61,7 +68,13 @@ private slots:
 private:
     void buildToolBar();
     void fitCanvas();
-    void setTool(EditorTool tool);
+    /// 缩放:**明确入口**(原先只能滚轮缩、缩了回不去)
+    ///  fit = 适应窗口(并清掉"用户已手动缩放"标记);original = 1:1 实际大小。
+    void zoomToFit();
+    void zoomToOriginal();
+    /// 窗口几何记忆(§17.3 D):关窗时写回,开窗时恢复(不可见则回退默认尺寸)。
+    void saveGeometryToSettings() const;
+    void restoreGeometryFromSettings();
     void bakeTextItem();
     void saveToFile();
     void finish();
@@ -69,8 +82,8 @@ private:
     void pinToScreen();
     void ocrTakeText();
     void showOcrResult(const QString& text, const QString& reason);
-    void syncColorSwatch();
-    void syncToolAction();
+    /// 把 OCR 文本落成画布上的文字标注(落点取当前可见区域中心)。
+    void insertOcrAsText(const QString& text);
     /// 画布的光标形状与"穿透态"和当前状态对齐(当前工具 / 是否文字编辑中)。
     /// **单一入口**:任何会改变这两者的地方都调它 —— 否则两处状态各走各的
     /// (此前 passthrough 只置 true 不复位,文字确认后画布再也画不上东西)。
@@ -80,10 +93,17 @@ private:
 
     QImage m_base;
     QGraphicsView* m_view = nullptr;
-        QList<QToolBar*> m_toolBars;   // 两行工具栏(工具+颜色 / 粗细字号+操作)
-    QActionGroup* m_toolGroup = nullptr;
-    QActionGroup* m_colorGroup = nullptr;    // 色块动作组(取色器需同步选中态)
-    QLabel* m_ocrPopup = nullptr;            // OCR 结果弹层(自适应大小,随编辑器销毁)
+    /// 标注工具条(工具/颜色/粗细/字号/撤销重做)—— 与遮罩浮条**同一个类**。
+    /// 工具/颜色等状态都在引擎里,这里不再各存一份选中态(原先的
+    /// m_toolGroup/m_colorGroup + syncToolAction/syncColorSwatch 已随之删除)。
+    AnnotationToolbar* m_annotationBar = nullptr;
+    /// 是否已选中绘图工具:true = 画布可绘制;false = 默认抓手(§18.1)。
+    /// 初始 false —— 打开编辑器先能看/能拖,点工具后才进入绘制。
+    bool m_drawingTool = false;
+
+    // OCR 弹层:识别中用轻量 QLabel 提示,出结果后换成带按钮的 QFrame 面板,
+    // 故类型取公共基类 QWidget*(用 QLabel* 装 QFrame 会编译不过)。
+    QWidget* m_ocrPopup = nullptr;
 };
 
 } // namespace nb

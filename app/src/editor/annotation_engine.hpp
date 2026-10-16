@@ -15,6 +15,7 @@
 #include <QImage>
 #include <QList>
 #include <QPointF>
+#include <QRectF>
 #include <QPixmap>
 #include <QRect>
 #include <QString>
@@ -42,6 +43,19 @@ QString toolLabel(EditorTool tool);
 ///   - 其余(画笔/箭头/直线/矩形/椭圆/马赛克/模糊/序号)= 十字准星:精确落点。
 Qt::CursorShape toolCursor(EditorTool tool);
 
+// ---- 工具栏元数据:工具顺序 / 调色板 / 粗细 / 字号(**单一来源**)----
+//
+// 为什么要集中:这些是**纯粹的枚举数据**,与宿主(遮罩浮条 / 编辑窗口)无关。
+// 此前两个宿主各写一份平行数组(浮条的 toolOrder()/paletteColors()/penSizes()…
+// 与编辑窗的 kTools[]/kPalette[]/kSizes[]…),改一处忘一处就"两边工具不一样"。
+// 声明在引擎头文件里,是因为它们本就随引擎走 —— 引擎改了工具/档位,这里跟着改。
+//
+// 返回 const 引用:调用方只读遍历,不拷贝(列表都是静态的)。
+const QList<EditorTool>& toolbarTools();      // 工具栏展示顺序
+const QList<QColor>& annotationPalette();     // 调色板(第一代七色)
+const QList<int>& strokeSizes();              // 粗细档位
+const QList<int>& textFontSizes();            // 字号档位
+
 class AnnotationEngine : public QObject {
     Q_OBJECT
 public:
@@ -66,6 +80,12 @@ public:
     void setFontSize(int s) { m_fontSize = s; }
     /// 是否正处文字编辑态(宿主据此把 Enter 留给换行)。
     bool editingText() const { return m_textItem != nullptr; }
+    /// 场景坐标是否落在**正在编辑的文字图元**上(含少量容差)。
+    ///
+    /// 用途(§18.2):文字工具要支持"一次点选、连续落多个"。宿主据此区分
+    /// "点在这段文字里(定位光标/选中)"与"点在文字外(确认这段、就地再落一段)"。
+    /// 容差是必要的:文字图元可能尚无内容(刚落下、还没输入),包围盒为空。
+    bool editingTextContains(const QPointF& scenePos) const;
 
     void setTool(EditorTool tool);
     /// 取色器:从底图采样(不受已画标注影响);返回采到的颜色。

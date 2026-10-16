@@ -127,6 +127,37 @@ Qt::CursorShape toolCursor(EditorTool tool) {
     }
 }
 
+// 工具栏元数据:定义只此一份,遮罩浮条与编辑窗口都引用这里(见头文件注释)。
+// 顺序:绘制类 → 擦除类(马赛克/模糊) → 标注类(序号/文字) → 取色
+const QList<EditorTool>& toolbarTools() {
+    static const QList<EditorTool> kTools = {
+        EditorTool::Pen,     EditorTool::Arrow, EditorTool::Line, EditorTool::Rect,
+        EditorTool::Ellipse, EditorTool::Mosaic, EditorTool::Blur, EditorTool::Number,
+        EditorTool::Text,    EditorTool::Picker,
+    };
+    return kTools;
+}
+
+const QList<QColor>& annotationPalette() {
+    // 第一代 PALETTE 七色(与 docs/phase5.md §3.4 一致)
+    static const QList<QColor> kPalette = {
+        QColor(0xE0, 0x31, 0x31), QColor(0xF7, 0x67, 0x07), QColor(0xFA, 0xB0, 0x05),
+        QColor(0x40, 0xC0, 0x57), QColor(0x1C, 0x7E, 0xD6), QColor(0x21, 0x25, 0x29),
+        QColor(0xFF, 0xFF, 0xFF),
+    };
+    return kPalette;
+}
+
+const QList<int>& strokeSizes() {
+    static const QList<int> kSizes = {2, 4, 8};
+    return kSizes;
+}
+
+const QList<int>& textFontSizes() {
+    static const QList<int> kSizes = {24, 36, 48};
+    return kSizes;
+}
+
 // ---------- AnnotationEngine ----------
 
 AnnotationEngine::AnnotationEngine(QImage base, QObject* parent)
@@ -377,6 +408,20 @@ void AnnotationEngine::addText(const QString& text, const QPointF& topLeft,
     item->setTextInteractionFlags(Qt::NoTextInteraction);
     item->setPos(topLeft);
     pushItem(item, toolLabel(EditorTool::Text));
+}
+
+bool AnnotationEngine::editingTextContains(const QPointF& scenePos) const {
+    if (!m_textItem) return false;
+    const QRectF box = m_textItem->sceneBoundingRect();
+    if (box.isEmpty()) {
+        // 刚落下、还没输入内容:包围盒为空 → 用"落点附近一小块"当命中区,
+        // 否则刚点下去的那次点击会被判成"点在文字外"而立刻又落一个新图元。
+        const QPointF at = m_textItem->pos();
+        const qreal pad = qMax(12.0, m_fontSize * 0.6);
+        return QRectF(at.x() - pad, at.y() - pad, pad * 2, pad * 2).contains(scenePos);
+    }
+    // 容差:文字光标本身有宽度,框边上几像素的点击应仍算"在文字内"
+    return box.adjusted(-4, -4, 4, 4).contains(scenePos);
 }
 
 void AnnotationEngine::bakeTextItem() {

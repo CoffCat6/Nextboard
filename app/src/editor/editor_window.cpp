@@ -1,6 +1,8 @@
 #include "editor_window.hpp"
 
 #include "annotation_engine.hpp"
+#include "annotation_toolbar.hpp"
+#include "tool_icons.hpp"
 
 #include "host/memory_probe.hpp"
 #include "host/core_bridge.hpp"
@@ -22,7 +24,12 @@
 #include <QGraphicsTextItem>
 #include <QGraphicsView>
 #include <QFutureWatcher>
+#include <QCloseEvent>
+#include <QFrame>
 #include <QGuiApplication>
+#include <QHBoxLayout>
+#include <QJsonArray>
+#include <QPushButton>
 #include <QLabel>
 #include <QtConcurrent/QtConcurrentRun>
 #include <QHBoxLayout>
@@ -78,10 +85,12 @@ public:
 
     void setPassthrough(bool on) { m_passthrough = on; }
 
-    /// 当前工具的光标(逻辑像素无关,直接存形状)。
-    void setToolCursor(Qt::CursorShape shape) {
-        m_toolCursor = shape;
-        if (!m_passthrough) viewport()->setCursor(shape);
+    /// 当前工具的光标。**存 QCursor 而不是 Qt::CursorShape** ——
+    /// 绘图工具用的是自定义位图光标(crosshairCursor,见 tool_icons),
+    /// 它没有对应的形状枚举;形状枚举只能表达 Qt 内置那几种(用户觉得不好看的就是它)。
+    void setToolCursor(const QCursor& cursor) {
+        m_toolCursor = cursor;
+        if (!m_passthrough) viewport()->setCursor(cursor);
     }
 
     /// 适配显示:重置为指定缩放,并清除"用户已手动缩放"标记。
@@ -93,6 +102,41 @@ public:
     }
 
     bool userZoomed() const { return m_userZoomed; }
+    /// 清掉"用户已手动缩放"标记 → 恢复随窗口自动适配。
+    void clearUserZoom() { m_userZoomed = false; }
+    /// 标记"用户已手动缩放" → 不再自动适配(显式选定比例后,窗口变化不该覆盖它)。
+    void markUserZoomed() { m_userZoomed = true; }
+
+    /// 抓手平移开关(空格按住 / 中键拖)。
+    /// 动机:画布原先 setDragMode(NoDrag) —— 放大后只能拖滚动条挪画面,
+    /// 左键一按就是在画。平移是"放大看细节"的必要配套。
+    void setPanning(bool on) {
+        if (m_panning == on) return;
+        m_panning = on;
+        setDragMode(on ? QGraphicsView::ScrollHandDrag : QGraphicsView::NoDrag);
+        // 平移用内置"张开的手"(它就是最贴切的表达),绘制用工具光标
+        viewport()->setCursor(on ? QCursor(Qt::OpenHandCursor) : m_toolCursor);
+    }
+    /// 进入"可绘制"状态(选中了绘图工具)。默认是抓手,选中工具后才可画。
+    void enterDrawingMode() { setPanning(false); }
+    /// 回到抓手态(未选工具 / 文字这段已确认)。
+    void enterPanMode() { setPanning(true); }
+    bool panning() const { return m_panning; }
+    /// 空格键:按住临时进平移态(与主流图像编辑器一致)。
+    /// 需 public —— EditorWindow 的 keyPress/keyRelease 会调它。
+    void setSpaceHeld(bool held) {
+        m_spaceHeld = held;
+        setPanning(held);
+    }
+
+    /// 文字点击探针(§18.2):返回 true = 这次按下落在"正在编辑的文字**之外**",
+    /// 应当结束这一段、并就地再落一段。
+    ///
+    /// 用注入式回调而不是让画布直接引用引擎:画布只管"问一下",状态判断与烘焙
+    /// 都在 EditorWindow 一侧(与 setToolCursor/passthrough 同一分工)。
+    void setTextClickProbe(std::function<bool(const QPointF&)> probe) {
+        m_textProbe = std::move(probe);
+    }
 
 signals:
     void canvasPressed(const QPointF& scenePos);
@@ -122,6 +166,20 @@ protected:
     }
 
     void mousePressEvent(QMouseEvent* e) override {
+        // ① 文字编辑态:点在"这段文字之外" → 先请宿主收尾(烘焙本段),再按普通
+        //    按下继续 → 引擎用当前工具(仍是「文字」)就地落下一段。
+        //    这是"一次点选、连续落多个文字"(§18.2)的实现点。
+        //    点在文字**内**则不进这里,交给下面的 QGraphicsView 定位光标/选中。
+        if (m_passthrough && e->button() == Qt::LeftButton && m_textProbe
+            && m_textProbe(mapToScene(e->pos()))) {
+            m_passthrough = false;   // 宿主已烘焙;下面按普通按下走
+        }
+        // ② 平移态(或中键)交给 QGraphicsView 自己拖画面,不发画笔事件
+        if (m_panning || e->button() == Qt::MiddleButton) {
+            setPanning(true);
+            QGraphicsView::mousePressEvent(e);
+            return;
+        }
         if (m_passthrough || e->button() != Qt::LeftButton) {
             QGraphicsView::mousePressEvent(e);
             return;
@@ -138,6 +196,12 @@ protected:
         if (!m_passthrough) viewport()->setCursor(m_toolCursor);
     }
     void mouseReleaseEvent(QMouseEvent* e) override {
+        if (m_panning || e->button() == Qt::MiddleButton) {
+            QGraphicsView::mouseReleaseEvent(e);
+            // 空格松开前保持平移态;由 keyRelease 收尾(见 EditorWindow::keyReleaseEvent)
+            if (e->button() == Qt::MiddleButton && !m_spaceHeld) setPanning(false);
+            return;
+        }
         if (m_passthrough || e->button() != Qt::LeftButton) {
             QGraphicsView::mouseReleaseEvent(e);
             return;
@@ -153,7 +217,10 @@ private:
     qreal m_zoom = 1.0;
     bool m_userZoomed = false;
     bool m_passthrough = false;
-    Qt::CursorShape m_toolCursor = Qt::CrossCursor;   // 见 setToolCursor
+    bool m_panning = false;      // 见 setPanning
+    bool m_spaceHeld = false;    // 空格是否按住(决定松手后是否退出平移态)
+    std::function<bool(const QPointF&)> m_textProbe;   // 见 setTextClickProbe
+    QCursor m_toolCursor = Qt::CrossCursor;   // 见 setToolCursor(默认值会被立即覆盖)
 };
 
 // ---------- EditorWindow ----------
@@ -161,7 +228,10 @@ private:
 EditorWindow::EditorWindow(QImage base, QWidget* parent) : QWidget(parent), m_base(std::move(base)) {
     setWindowTitle(QStringLiteral("Nextboard 截图编辑"));
     setAttribute(Qt::WA_DeleteOnClose);
-    resize(960, 720);
+    // 窗口几何记忆(§17.3 D):用户按习惯调过尺寸,下次打开不该被重置。
+    // 没有记录时按默认尺寸;有记录且仍在某块屏幕可见区域内才采用
+    // (外接屏拔掉后,记录里的坐标可能已经在可见区之外)。
+    restoreGeometryFromSettings();
 
     // 标注引擎:scene/undo/图元/纹理全在此(docs/14 §16.2,与遮罩浮条共用)
     m_engine = new AnnotationEngine(m_base, this);
@@ -175,6 +245,17 @@ EditorWindow::EditorWindow(QImage base, QWidget* parent) : QWidget(parent), m_ba
     canvas->setAlignment(Qt::AlignCenter);
     canvas->setMouseTracking(true);
     m_view = canvas;
+    canvas->enterPanMode();   // 默认抓手(§18.1):选工具前先能拖动画面
+    // 文字"连续落多个"的判据(§18.2):点在当前文字之外 → 烘焙本段,继续落下一段。
+    // 判断在窗口侧(引擎状态在这里),画布只负责问一句。
+    canvas->setTextClickProbe([this](const QPointF& scenePos) -> bool {
+        if (!m_engine || !m_engine->editingText()) return false;
+        if (m_engine->editingTextContains(scenePos)) return false;   // 点在文字内:交给文本控件
+        // 点在文字外:确认这一段 —— 烘焙后 editingText() 变假,画布随之退出穿透态,
+        // 紧接着的同一次按下会以「文字」工具落到新位置(见 EditorCanvas::mousePressEvent)
+        bakeTextItem();
+        return true;
+    });
     syncCanvasState();   // 初值:光标 = 当前工具(真正保持靠 onCanvasMoved)
 
     connect(canvas, &EditorCanvas::canvasPressed, this, &EditorWindow::onCanvasPressed);
@@ -192,7 +273,9 @@ EditorWindow::EditorWindow(QImage base, QWidget* parent) : QWidget(parent), m_ba
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
     layout->addWidget(m_view, 1);
-    for (QToolBar* bar : m_toolBars) layout->addWidget(bar);
+    // 共享标注工具条(与浮条同类)。宿主的动作按钮(另存/贴图/OCR/缩放/完成/取消)
+    // 作为**尾部控件**挂进它的参数行右侧 —— 工具在左、动作在右(用户反馈的布局要求)。
+    layout->addWidget(m_annotationBar);
 
     // 初始落在光标所在屏中央(与贴图窗口同一落点语义)
     const QPoint cursor = QCursor::pos();
@@ -225,113 +308,72 @@ EditorWindow::~EditorWindow() {
     QTimer::singleShot(0, qApp, [] { logMemory("editor-closed"); });
 }
 
+namespace {
+/// 工具条图标边长(逻辑像素)。20 在 1.5px 描边下仍清晰,且两行工具条不至于过高。
+constexpr int kIconPx = 20;
+} // namespace
+
 void EditorWindow::buildToolBar() {
-    const auto addTool = [this](QToolBar* bar, const QString& text, bool checked,
-                                const std::function<void()>& onTrigger) {
-        QAction* action = bar->addAction(text);
-        action->setCheckable(true);
-        action->setChecked(checked);
-        connect(action, &QAction::triggered, this, [onTrigger] { onTrigger(); });
-        return action;
-    };
+    // 工具/颜色/粗细/字号/撤销重做 = **共享控件**(§17.3 A):
+    // 遮罩浮条嵌的是同一个类,所以两处 UI 天然一致,不再是"各写一份"。
+    m_annotationBar = new AnnotationToolbar(this);
+    m_annotationBar->setEngine(m_engine);
+    // 工具切换后同步鼠标光标(窗口级状态,控件不该管)
+    connect(m_annotationBar, &AnnotationToolbar::toolChanged, this, [this](EditorTool) {
+        syncCanvasState();
+    });
+    // ⚠️ 画布模式**由工具条驱动**:drawing=true 表示选了绘图工具,false 表示手型。
+    //    原先这里写成"选过工具就永远 m_drawingTool=true",于是**点过工具就回不到抓手**
+    //    (用户反馈:默认手型后点了工具,再也切不回来)。手型按钮使该状态可逆。
+    connect(m_annotationBar, &AnnotationToolbar::drawingModeChanged, this,
+            [this](bool drawing) {
+        m_drawingTool = drawing;
+        syncCanvasState();
+    });
 
-    // ---- 第一行:工具 + 颜色 ----
-    auto* tools = new QToolBar(this);
-    tools->setMovable(false);
-    m_toolGroup = new QActionGroup(this);
-    m_toolGroup->setExclusive(true);
-    // 顺序:绘制类 → 擦除类(马赛克/模糊) → 标注类(序号/文字) → 取色
-    const EditorTool kTools[] = {EditorTool::Pen,  EditorTool::Arrow,  EditorTool::Line,
-                                 EditorTool::Rect, EditorTool::Ellipse, EditorTool::Mosaic,
-                                 EditorTool::Blur, EditorTool::Number,  EditorTool::Text,
-                                 EditorTool::Picker};
-    for (EditorTool tool : kTools) {
-        QAction* action = addTool(tools, toolLabel(tool), tool == m_engine->tool(),
-                                  [this, tool] { setTool(tool); });
-        action->setActionGroup(m_toolGroup);
-        // 存枚举值:程序化切换工具(取色器采样后回退)时据此同步选中态
-        action->setData(int(tool));
-    }
-    tools->addSeparator();
-
-    // 颜色:第一代 PALETTE 七色
-    m_colorGroup = new QActionGroup(this);
-    m_colorGroup->setExclusive(true);
-    const QColor kPalette[] = {QColor(0xE0, 0x31, 0x31), QColor(0xF7, 0x67, 0x07),
-                               QColor(0xFA, 0xB0, 0x05), QColor(0x40, 0xC0, 0x57),
-                               QColor(0x1C, 0x7E, 0xD6), QColor(0x21, 0x25, 0x29),
-                               QColor(0xFF, 0xFF, 0xFF)};
-    for (const QColor& color : kPalette) {
-        QAction* action = tools->addAction(swatchIcon(color), color.name());
-        action->setCheckable(true);
-        action->setActionGroup(m_colorGroup);
-        action->setChecked(color == m_engine->color());
-        // 存色值:取色器采到调色板外的颜色时,需要据此把全部色块取消选中
-        action->setData(color);
-        connect(action, &QAction::triggered, this, [this, color] { m_engine->setColor(color); });
-    }
-    m_toolBars.append(tools);
-
-    // ---- 第二行:粗细 / 字号 / 撤销重做 / 另存 / 完成 ----
+    // 动作条(窗口专属:另存 / 贴图 / OCR / 缩放 / 完成 / 取消)—— 不进共享控件。
+    // 挂到共享工具条的**参数行最右侧**(见 setTrailingWidget):工具在左、动作在右。
     auto* actions = new QToolBar(this);
     actions->setMovable(false);
-
-    auto* sizeGroup = new QActionGroup(this);
-    sizeGroup->setExclusive(true);
-    const int kSizes[] = {2, 4, 8};
-    for (int size : kSizes) {
-        QAction* action =
-            addTool(actions, QStringLiteral("粗细 %1").arg(size), size == m_engine->strokeWidth(),
-                    [this, size] { m_engine->setStrokeWidth(size); });
-        action->setActionGroup(sizeGroup);
-    }
+    actions->setIconSize(QSize(AnnotationToolbar::kIconPx, AnnotationToolbar::kIconPx));
+    actions->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    const QColor ink = iconInkFor(palette());
+    const auto addAction = [&](BarIcon icon, const QString& tip, auto slot) {
+        QAction* action = actions->addAction(barIcon(icon, AnnotationToolbar::kIconPx, ink), tip);
+        action->setToolTip(tip);
+        connect(action, &QAction::triggered, this, slot);
+        return action;
+    };
+    addAction(BarIcon::SaveAs, QStringLiteral("另存为… (Ctrl+S)"), &EditorWindow::saveToFile);
+    addAction(BarIcon::Pin, QStringLiteral("贴图"), &EditorWindow::pinToScreen);
+    addAction(BarIcon::Ocr, QStringLiteral("OCR 取字"), &EditorWindow::ocrTakeText);
+    addAction(BarIcon::ZoomFit, QStringLiteral("适应窗口 (Ctrl+0)"), &EditorWindow::zoomToFit);
+    addAction(BarIcon::ZoomOriginal, QStringLiteral("实际大小 (Ctrl+1)"), &EditorWindow::zoomToOriginal);
     actions->addSeparator();
+    addAction(BarIcon::Done, QStringLiteral("完成 (Enter):入库并写剪贴板"), &EditorWindow::finish);
+    addAction(BarIcon::Cancel, QStringLiteral("取消 (Esc)"), &EditorWindow::cancel);
 
-    auto* fontGroup = new QActionGroup(this);
-    fontGroup->setExclusive(true);
-    const int kFontSizes[] = {24, 36, 48};
-    for (int size : kFontSizes) {
-        QAction* action =
-            addTool(actions, QStringLiteral("字号 %1").arg(size), size == m_engine->fontSize(),
-                    [this, size] { m_engine->setFontSize(size); });
-        action->setActionGroup(fontGroup);
-    }
-    actions->addSeparator();
-
-    connect(actions->addAction(QStringLiteral("撤销")), &QAction::triggered, this, [this] { m_engine->undoStack()->undo(); });
-    connect(actions->addAction(QStringLiteral("重做")), &QAction::triggered, this, [this] { m_engine->undoStack()->redo(); });
-    connect(actions->addAction(QStringLiteral("另存为 (Ctrl+S)")), &QAction::triggered, this,
-            &EditorWindow::saveToFile);
-    connect(actions->addAction(QStringLiteral("贴图")), &QAction::triggered, this,
-            &EditorWindow::pinToScreen);
-    connect(actions->addAction(QStringLiteral("OCR取字")), &QAction::triggered, this,
-            &EditorWindow::ocrTakeText);
-    actions->addSeparator();
-    connect(actions->addAction(QStringLiteral("完成 (Enter)")), &QAction::triggered, this,
-            &EditorWindow::finish);
-    connect(actions->addAction(QStringLiteral("取消 (Esc)")), &QAction::triggered, this,
-            &EditorWindow::cancel);
-    m_toolBars.append(actions);
+    // 交给共享工具条放到参数行右侧(不再自己占一整行)。
+    // 所有权随 addWidget 转给参数行 → 随窗口析构,这里不留指针。
+    m_annotationBar->setTrailingWidget(actions);
 }
 
-void EditorWindow::syncToolAction() {
-    if (!m_toolGroup) return;
-    for (QAction* action : m_toolGroup->actions()) {
-        if (action->data().toInt() == int(m_engine->tool())) {
-            action->setChecked(true);   // 互斥组:选中一个会自动取消其余
-            return;
-        }
-    }
+void EditorWindow::zoomToFit() {
+    // ⚠️ 必须**先清掉**"用户已手动缩放"标记再适配:fitCanvas 见到 userZoomed()
+    //    会直接返回,否则用户点了「适应窗口」却毫无反应 —— 这正是原先
+    //    "滚轮缩过一次就再也回不去"的成因。
+    auto* canvas = qobject_cast<EditorCanvas*>(m_view);
+    if (!canvas) return;
+    canvas->clearUserZoom();
+    fitCanvas();
 }
 
-void EditorWindow::syncColorSwatch() {
-    if (!m_colorGroup) return;
-    // 互斥组无法直接取消选中:临时关掉互斥再逐项设置,最后恢复
-    const bool exclusive = m_colorGroup->isExclusive();
-    m_colorGroup->setExclusive(false);
-    for (QAction* action : m_colorGroup->actions())
-        action->setChecked(action->data().value<QColor>() == m_engine->color());
-    m_colorGroup->setExclusive(exclusive);
+void EditorWindow::zoomToOriginal() {
+    // 1:1(实际大小):底图物理像素直接对应屏幕像素,便于逐像素看细节。
+    auto* canvas = qobject_cast<EditorCanvas*>(m_view);
+    if (!canvas) return;
+    canvas->resetZoom(1.0);
+    canvas->markUserZoomed();   // 不再自动适配(用户显式选了比例)
 }
 
 void EditorWindow::fitCanvas() {
@@ -359,12 +401,20 @@ void EditorWindow::resizeEvent(QResizeEvent* e) {
     fitCanvas();
 }
 
-void EditorWindow::setTool(EditorTool tool) {
-    // ⚠️ 引擎的 setTool 内部会**自己**把进行中的文字图元烘焙掉,不走本窗口的
-    //    bakeTextItem —— 所以这里必须显式 sync,否则切工具后画布仍留在穿透态。
-    m_engine->setTool(tool);
-    syncCanvasState();   // 切工具立刻换光标(不必等鼠标先动一下)
-    syncColorSwatch();
+void EditorWindow::closeEvent(QCloseEvent* e) {
+    // 所有关闭路径(完成/取消/贴图/OCR/Esc/✕)都经过这里 → 几何只在此写回一次,
+    // 不必在每个出口各写一遍(写多了必然漏一处)。
+    saveGeometryToSettings();
+    QWidget::closeEvent(e);
+}
+
+void EditorWindow::keyReleaseEvent(QKeyEvent* e) {
+    // 空格松开 → 退出平移态(按下在 keyPressEvent,见 EditorCanvas::setSpaceHeld)
+    if (e->key() == Qt::Key_Space && !e->isAutoRepeat()) {
+        if (auto* canvas = qobject_cast<EditorCanvas*>(m_view)) canvas->setSpaceHeld(false);
+        return;
+    }
+    QWidget::keyReleaseEvent(e);
 }
 
 void EditorWindow::syncCanvasState() {
@@ -374,15 +424,37 @@ void EditorWindow::syncCanvasState() {
     // 文字编辑期间穿透:把鼠标事件还给 QGraphicsView/QGraphicsTextItem,
     // 文本才能正常框选/点选;其余时候必须关掉,否则画布收不到画笔事件。
     canvas->setPassthrough(editing);
+    // ⚠️ 默认抓手(§18.1):没选绘图工具时画布就是"可拖动"的,左键拖动平移画面;
+    //    一旦选了绘图工具(含文字)才切成可绘制 —— 否则用户左键一按就是一笔,
+    //    想挪画面只能拖滚动条(这正是"放大后移不动"的由来)。
+    //    文字编辑中保持穿透(事件交给文本控件),由上面的 passthrough 负责。
+    if (m_drawingTool) canvas->enterDrawingMode();
+    else canvas->enterPanMode();
     // 光标**只由画布拥有**:形状存在画布上,由它在每次移动处理之后统一应用 ——
     // QGraphicsView 自己会按"鼠标下的图元"重设视口光标,只有压在其后才能生效
     // (文字态它不碰,交给文本控件给 IBeam)。
-    canvas->setToolCursor(toolCursor(m_engine->tool()));
+    // 光标选择:文字保留系统竖线(文本控件本就该是 IBeam)、取色用系统手型
+    // (Qt 无吸管形状);**其余绘图工具**换成自定义准星(内置十字不好看,见 tool_icons)。
+    const EditorTool tool = m_engine->tool();
+    if (tool == EditorTool::Text) {
+        canvas->setToolCursor(QCursor(Qt::IBeamCursor));
+    } else if (tool == EditorTool::Picker) {
+        canvas->setToolCursor(QCursor(Qt::PointingHandCursor));
+    } else {
+        // 深浅主题由**当前调色板**判定(与 iconInkFor 同一依据),不额外存状态:
+        // 窗口底色暗 → 准星取浅色描边,反之取深色 —— 保证在任何主题下都看得清。
+        const QColor bg = palette().color(QPalette::Window);
+        const bool dark = bg.lightness() < 128;
+        canvas->setToolCursor(crosshairCursor(dark, devicePixelRatioF()));
+    }
 }
 
 void EditorWindow::onCanvasPressed(const QPointF& scenePos) {
     m_engine->onCanvasPressed(scenePos);
     if (m_engine->editingText()) m_view->setFocus();   // 焦点交给文字图元
+    // ⚠️ 取色器采样后引擎会**自行**把工具切回上一个绘图工具(见引擎 onCanvasPressed),
+    //    工具条不刷新就会停在"取色"高亮上,与引擎实际工具不符。这里统一回正。
+    if (m_annotationBar) m_annotationBar->refresh();
     syncCanvasState();
 }
 
@@ -432,6 +504,34 @@ void EditorWindow::cancel() {
     close();
 }
 
+void EditorWindow::saveGeometryToSettings() const {
+    const QRect g = geometry();
+    // 只存四元组;合法性由设置校验兜底(宽高区间),x/y 允许为负(多屏在负坐标区)
+    CoreBridge::instance().call(
+        "save_settings",
+        {{"editorGeometry", QJsonArray{g.x(), g.y(), g.width(), g.height()}}});
+}
+
+void EditorWindow::restoreGeometryFromSettings() {
+    const QJsonObject resp = CoreBridge::instance().call("get_settings");
+    const QJsonArray arr =
+        resp.value("ok").toBool()
+            ? resp.value("data").toObject().value("editorGeometry").toArray()
+            : QJsonArray{};
+    if (arr.size() == 4) {
+        const QRect want(arr.at(0).toInt(), arr.at(1).toInt(), arr.at(2).toInt(),
+                         arr.at(3).toInt());
+        // 仍在某块屏幕(含可用区域)内才采用:否则用户会把窗口"打开在看不见的地方"
+        for (QScreen* screen : QGuiApplication::screens()) {
+            if (screen && screen->availableGeometry().intersects(want)) {
+                setGeometry(want);
+                return;
+            }
+        }
+    }
+    resize(960, 720);   // 默认尺寸(原先的行为)
+}
+
 void EditorWindow::pinToScreen() {
     bakeTextItem();
     const QImage composed = compose();
@@ -475,48 +575,134 @@ void EditorWindow::ocrTakeText() {
 }
 
 void EditorWindow::showOcrResult(const QString& text, const QString& reason) {
-    // OCR 结果弹层(docs/14 §15.6-2):可复制预留(后期),本期只展示。
+    // OCR 结果面板(§17.3 D6)。
+    //
+    // 原实现两点不好用:①文本只"展示",用户看完就没了(虽然已进剪贴板却看不出);
+    // ②面板是编辑器子窗口,而识别完成后 singleShot(0) 立刻 close → 面板一帧都
+    // 看不到(表现为"点了取字,啥也没发生")。
+    // 现改为:面板**驻留**并给出两个去处 ——「插入为标注文字」(把识别结果直接落到
+    // 画布,这是标注场景真正想要的动作)与「关闭」(文本已在剪贴板,可 Ctrl+V)。
     if (m_ocrPopup) { m_ocrPopup->deleteLater(); m_ocrPopup = nullptr; }
-    auto* popup = new QLabel(this, Qt::Popup | Qt::FramelessWindowHint);
-    popup->setObjectName("ocrResultPopup");
-    popup->setWordWrap(true);
-    popup->setTextFormat(Qt::PlainText);
-    popup->setStyleSheet(QStringLiteral(
-        "QLabel{background:#26272E;color:#DFE1E8;padding:12px;border-radius:8px;"
-        "font-size:14px;}"));
-    popup->setMaximumWidth(560);
-    popup->setMaximumHeight(qMax(120, height() - 160));   // 长文本不撑出屏幕
-    if (text.isEmpty() && !reason.isEmpty()) {
-        popup->setText(reason);                    // "识别中…" 或错误原因
-    } else if (text.isEmpty()) {
-        popup->setText(QStringLiteral("未识别到文字(图片可能不含可识别文本)"));
-    } else {
-        popup->setText(text);
+
+    // "识别中…" 仍用轻量提示(此时没有可操作的文本)
+    if (text.isEmpty() && !reason.isEmpty() && reason.endsWith(QStringLiteral("…"))) {
+        if (m_ocrPopup) { m_ocrPopup->deleteLater(); m_ocrPopup = nullptr; }
+        auto* popup = new QLabel(this, Qt::ToolTip);
+        popup->setText(reason);
+        popup->setStyleSheet(QStringLiteral(
+            "QLabel{background:#26272E;color:#DFE1E8;padding:8px 12px;border-radius:6px;}"));
+        popup->adjustSize();
+        popup->move(mapToGlobal(QPoint(width() - popup->width() - 24,
+                                       height() - popup->height() - 72)));
+        popup->show();
+        m_ocrPopup = popup;
+        return;
     }
-    popup->adjustSize();
-    // 弹层贴工具栏上方右侧,不遮画布中心
-    const QPoint global = mapToGlobal(QPoint(width() - popup->width() - 24,
-                                             height() - popup->height() - 72));
-    popup->move(global);
-    popup->show();
-    m_ocrPopup = popup;
-    // 决策:OCR 完成后关闭编辑器(与贴图同语义)。
-    // ⚠️ 但要**留出可读时间**:此前是 singleShot(0) 立刻 close,而弹层是编辑器的
-    //    子窗口 —— 窗口一销毁弹层跟着没了,识别结果**一帧都看不到**,用户只看到
-    //    编辑器闪一下就消失(表现为"点了取字,啥也没发生")。
-    if (!text.isEmpty() || (reason.isEmpty())) {
-        const bool recognized = !text.isEmpty();
-        QTimer::singleShot(recognized ? 2500 : 1200, this, [this] {
-            emit ocrFinished(QString(), {});
-            close();
+
+    auto* panel = new QFrame(this, Qt::Popup | Qt::FramelessWindowHint);
+    panel->setObjectName("ocrResultPanel");
+    panel->setFrameShape(QFrame::NoFrame);
+    panel->setStyleSheet(QStringLiteral(
+        "QFrame#ocrResultPanel{background:#26272E;border:1px solid #3A3D46;"
+        "border-radius:8px;} "
+        "QLabel#ocrText{color:#DFE1E8;font-size:13px;} "
+        "QLabel#ocrStatus{color:#8FA0B4;font-size:12px;} "
+        "QPushButton{background:#33363F;color:#DFE1E8;border:none;border-radius:5px;"
+        "padding:6px 12px;font-size:13px;} "
+        "QPushButton:hover{background:#3E424D;} "
+        "QPushButton#ocrPrimary{background:#1C7ED6;color:#FFFFFF;} "
+        "QPushButton#ocrPrimary:hover{background:#2A8FE8;}"));
+
+    auto* layout = new QVBoxLayout(panel);
+    layout->setContentsMargins(12, 10, 12, 10);
+    layout->setSpacing(8);
+
+    auto* body = new QLabel(panel);
+    body->setObjectName("ocrText");
+    body->setWordWrap(true);
+    body->setTextFormat(Qt::PlainText);
+    body->setTextInteractionFlags(Qt::TextSelectableByMouse);   // 允许手动选取部分文本
+    body->setMaximumWidth(520);
+    body->setMaximumHeight(qMax(120, height() - 200));
+    body->setText(text.isEmpty() ? reason : text);
+    layout->addWidget(body);
+
+    if (!reason.isEmpty() && !text.isEmpty()) {
+        // 成功时提示"已进剪贴板";失败时显示原因
+        auto* status = new QLabel(reason, panel);
+        status->setObjectName("ocrStatus");
+        layout->addWidget(status);
+    }
+
+    auto* buttons = new QHBoxLayout();
+    buttons->addStretch(1);
+    if (!text.isEmpty()) {
+        // 「插入为标注文字」:OCR 在标注场景里最常用的去向 —— 把识别结果直接
+        // 落成画布上的文字标注(落点取画布中心),省掉"复制→切工具→手打"。
+        auto* insert = new QPushButton(QStringLiteral("插入为标注文字"), panel);
+        insert->setObjectName("ocrPrimary");
+        insert->setCursor(Qt::PointingHandCursor);
+        connect(insert, &QPushButton::clicked, this, [this, text] {
+            insertOcrAsText(text);
+            if (m_ocrPopup) { m_ocrPopup->hide(); }
         });
+        buttons->addWidget(insert);
     }
+    auto* closeBtn = new QPushButton(
+        text.isEmpty() ? QStringLiteral("关闭") : QStringLiteral("关闭(已在剪贴板)"), panel);
+    closeBtn->setCursor(Qt::PointingHandCursor);
+    connect(closeBtn, &QPushButton::clicked, this, [this] {
+        if (m_ocrPopup) m_ocrPopup->hide();
+    });
+    buttons->addWidget(closeBtn);
+    layout->addLayout(buttons);
+
+    panel->adjustSize();
+    panel->move(mapToGlobal(QPoint(qMax(8, width() - panel->width() - 24),
+                                   qMax(8, height() - panel->height() - 72))));
+    panel->show();
+    m_ocrPopup = panel;
+
+    // ⚠️ 不再自动关编辑器:面板要留给用户操作(插入/阅读)。
+    //    关闭由用户点按钮(或直接关编辑器)完成 —— 原先 singleShot 关窗会把
+    //    面板连同结果一起销毁。
+    emit ocrFinished(text, reason);
+}
+
+void EditorWindow::insertOcrAsText(const QString& text) {
+    if (!m_engine || text.isEmpty()) return;
+    // 落点取**画布可见区域中心**(用户此刻正看着的地方),而不是场景原点 ——
+    // 否则图被缩放/平移到别处时,文字会落在看不见的角落。
+    const QPointF center = m_view ? m_view->mapToScene(m_view->viewport()->rect().center())
+                                  : QPointF(0, 0);
+    // 多行文本:逐行落,行高按当前字号估算(引擎里文字图元不支持换行编辑,
+    // 但落成多个单行图元视觉上等价,且每行仍可单独撤销)。
+    const QStringList lines = text.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    const int fontPx = m_engine->fontSize();
+    qreal y = center.y();
+    for (const QString& line : lines) {
+        m_engine->addText(line, QPointF(center.x(), y), m_engine->color(), fontPx);
+        y += fontPx * 1.35;   // 行距 1.35 倍字号
+    }
+    // 落完即刷新画布(文字是烘焙图元,不经过画笔路径)
+    if (m_view && m_view->viewport()) m_view->viewport()->update();
 }
 
 void EditorWindow::keyPressEvent(QKeyEvent* e) {
     const bool ctrl = e->modifiers() & Qt::ControlModifier;
+    // 空格按住 = 抓手平移(放大看细节的配套;原先画布 NoDrag,放大后移不动)
+    if (e->key() == Qt::Key_Space && !e->isAutoRepeat()) {
+        if (auto* canvas = qobject_cast<EditorCanvas*>(m_view)) canvas->setSpaceHeld(true);
+        return;
+    }
     switch (e->key()) {
         case Qt::Key_Escape:
+            // ⚠️ 文字编辑态下 Esc 只**确认当前文字**,不关整个编辑器 ——
+            //    原先无条件 cancel(),用户写一半按 Esc 会把字和编辑器一起丢掉。
+            if (m_engine->editingText()) {
+                bakeTextItem();
+                return;
+            }
             cancel();
             return;
         case Qt::Key_S:
@@ -535,6 +721,19 @@ void EditorWindow::keyPressEvent(QKeyEvent* e) {
         case Qt::Key_Y:
             if (ctrl) {
                 m_engine->undoStack()->redo();
+                return;
+            }
+            break;
+        // 缩放入口(原先只能滚轮缩、且缩了回不去,见 zoomToFit 注释)
+        case Qt::Key_0:
+            if (ctrl) {
+                zoomToFit();
+                return;
+            }
+            break;
+        case Qt::Key_1:
+            if (ctrl) {
+                zoomToOriginal();
                 return;
             }
             break;

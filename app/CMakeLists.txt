@@ -48,6 +48,8 @@ add_executable(nextboard WIN32
     src/capture/capture_session.cpp
     src/capture/overlay_geometry.cpp
     src/editor/annotation_engine.cpp
+    src/editor/annotation_toolbar.cpp
+    src/editor/tool_icons.cpp
     src/editor/editor_window.cpp
     src/pin/pin_window.cpp
 )
