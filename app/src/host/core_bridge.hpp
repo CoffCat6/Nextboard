@@ -28,6 +28,9 @@ using NbCaptureMonitorMatched = int(__cdecl*)(const char*, int, int, unsigned, u
 using NbCaptureCrop = int(__cdecl*)(const unsigned char*, unsigned long long,
                                     unsigned, unsigned, int, int, unsigned, unsigned,
                                     unsigned char**, unsigned*, unsigned*);
+/// OCR(RGBA 直入):出参为 JSON 字符串,宿主以 nb_free_string 释放。
+using NbOcrRgba = int(__cdecl*)(const unsigned char*, unsigned long long,
+                                unsigned, unsigned, char**);
 
 namespace nb {
 
@@ -81,6 +84,11 @@ public:
     /// (越界部分由核心钳制)。失败返回空图。
     QImage captureCrop(const QImage& screen, const QRect& rect);
 
+    /// 对任意 QImage 直接 OCR(编辑器「取字」):不走落库通道,设置项全生效。
+    /// ⚠️ 阻塞调用 —— det 推理 0.4~5s,**必须在非 UI 线程调用**。
+    /// 失败/不可用时返回空串(错误文本见 lastError())。
+    QString ocrImage(const QImage& image);
+
     /// 按条目的 blob 路径加载图片(相对 blobs 目录,兼容历史绝对路径)。失败返回空图。
     static QImage loadEntryImage(const QString& blobPath);
 
@@ -115,6 +123,7 @@ private:
     NbCaptureMonitor m_captureMonitor = nullptr;
     NbCaptureMonitorMatched m_captureMonitorMatched = nullptr;
     NbCaptureCrop m_captureCrop = nullptr;
+    NbOcrRgba m_ocrRgba = nullptr;
     bool m_initialized = false;
     QString m_dataDir;
     /// 生效数据目录(设置里启用自定义目录时与 m_dataDir 不同;blobs 定位用)。

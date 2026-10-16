@@ -1,6 +1,7 @@
 #include "capture_session.hpp"
 #include "editor/editor_window.hpp"
 #include "host/core_bridge.hpp"
+#include "panel/core_facade.hpp"
 #include "host/memory_probe.hpp"
 
 #include <QBuffer>
@@ -342,6 +343,20 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured, bool allo
                 });
                 QObject::connect(editor, &EditorWindow::cancelled, editor,
                                  [] { qInfo() << "截图编辑已取消"; });
+                // 「贴图」:编辑器只发合成图;贴图窗口归宿主(软上限/淘汰/设置读取
+                // 都在 pinComposedImage 一条通道,不在编辑器里绕过)。
+                // 决策(docs/14 §15.6-4):贴图后编辑器自己关闭 —— 信号在 close()
+                // 之前发出,这里等析构完再贴,避免编辑器底图陪跑。
+                QObject::connect(editor, &EditorWindow::pinRequested, editor,
+                        [editor](const QImage& composed) {
+                    runAfterDestroyed(editor, [composed] { pinComposedImage(composed); });
+                });
+                // 「OCR 取字」:识别与弹层都在编辑器内;宿主只记日志。
+                // 不入库、不写剪贴板(复制能力预留,docs/14 §15.6-2)。
+                QObject::connect(editor, &EditorWindow::ocrFinished, editor,
+                                 [](const QString&, const QString&) {
+                    qInfo() << "截图 OCR 取字完成";
+                });
                 editor->show();
                 editor->raise();
                 editor->activateWindow();

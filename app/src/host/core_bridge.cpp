@@ -62,6 +62,7 @@ bool CoreBridge::init(bool /*startHidden*/, QString* error) {
     m_captureMonitorMatched =
         reinterpret_cast<NbCaptureMonitorMatched>(resolve("nb_capture_monitor_matched"));
     m_captureCrop = reinterpret_cast<NbCaptureCrop>(resolve("nb_capture_crop"));
+    m_ocrRgba = reinterpret_cast<NbOcrRgba>(resolve("nb_ocr_rgba"));
     if (!m_init || !m_callFn || !m_freeString || !m_shutdown || !m_abi) {
         if (error) *error = QStringLiteral("nbcore.dll 导出缺失");
         return false;
@@ -262,6 +263,28 @@ QImage CoreBridge::captureCrop(const QImage& screen, const QRect& rect) {
     auto* buffer = new CoreBuffer{rgba, static_cast<unsigned long long>(w) * h * 4, m_freeBuffer};
     return QImage(rgba, static_cast<int>(w), static_cast<int>(h), QImage::Format_RGBA8888,
                   &releaseCoreBuffer, buffer);
+}
+
+QString CoreBridge::ocrImage(const QImage& image) {
+    if (!m_ocrRgba || !m_freeString || image.isNull()) return {};
+    // 核心按 RGBA8888 紧凑排布读取(与 captureCrop 同口径)
+    const QImage src = image.convertToFormat(QImage::Format_RGBA8888);
+    char* text = nullptr;
+    const int rc = m_ocrRgba(
+        src.constBits(),
+        static_cast<unsigned long long>(src.sizeInBytes()),
+        static_cast<unsigned>(src.width()), static_cast<unsigned>(src.height()),
+        &text);
+    if (rc != 0 || !text) {
+        if (text) m_freeString(text);
+        return {};
+    }
+    // nb_call 同款生命周期:由此接管并立刻转 QString(拷贝不可避免 ——
+    // 解析 JSON 本来就要这份内容),随即归还核心缓冲。
+    const QByteArray owned(text);
+    m_freeString(text);
+    const QJsonObject resp = QJsonDocument::fromJson(owned).object();
+    return resp.value("data").toObject().value("text").toString();
 }
 
 QImage CoreBridge::loadEntryImage(const QString& blobPath) {

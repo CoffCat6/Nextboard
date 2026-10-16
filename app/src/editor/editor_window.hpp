@@ -21,6 +21,7 @@ class QGraphicsItem;
 class QGraphicsScene;
 class QGraphicsTextItem;
 class QGraphicsView;
+class QLabel;
 class QPainterPath;
 class QResizeEvent;
 class QToolBar;
@@ -48,6 +49,11 @@ signals:
     void committed(const QImage& composed);
     /// 「取消」或 Esc。
     void cancelled();
+    /// 「贴图」:把合成图贴成置顶窗口(宿主负责 showPinWindow)。
+    /// 贴图/OCR 都会结束本次编辑(决策:操作后工具栏关闭)。
+    void pinRequested(const QImage& composed);
+    /// 「OCR 取字」完成:text 为识别文本;失败时为空串(reason 给原因)。
+    void ocrFinished(const QString& text, const QString& reason);
 
 protected:
     void resizeEvent(QResizeEvent* e) override;
@@ -67,6 +73,9 @@ private:
     void saveToFile();
     void finish();
     void cancel();
+    void pinToScreen();
+    void ocrTakeText();
+    void showOcrResult(const QString& text, const QString& reason);
     /// 把色块选中态同步到 m_color(取色器采到调色板外的颜色时全部取消选中)。
     void syncColorSwatch();
     /// 把工具选中态同步到 m_tool(取色器采样后程序化切回上一个工具时用)。
@@ -104,6 +113,7 @@ private:
     QPixmap m_mosaicSource;                  // 像素化底图(马赛克纹理,首次用马赛克工具时惰性生成)
     QPixmap m_blurSource;                    // 模糊纹理(首次用模糊工具时惰性生成)
     QActionGroup* m_colorGroup = nullptr;    // 色块动作组(取色器需同步选中态)
+    QLabel* m_ocrPopup = nullptr;            // OCR 结果弹层(自适应大小,随编辑器销毁)
 
     EditorTool m_prevTool = EditorTool::Pen; // 取色器采样后回退到的工具
     int m_nextNumber = 1;                    // 序号标注的下一个编号

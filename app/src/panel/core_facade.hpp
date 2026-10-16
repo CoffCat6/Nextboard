@@ -214,4 +214,9 @@ private:
     bool m_darkTheme = true;
 };
 
+/// 把一张**已合成**的图片贴成置顶窗口(截图编辑器「贴图」用)。
+/// 与条目贴图走同一套软上限/淘汰/设置读取,避免两套语义漂移。
+/// 在 nb 命名空间公开 —— 编辑器(editor_window.cpp)与截图会话都可直接调。
+void pinComposedImage(const QImage& image);
+
 } // namespace nb

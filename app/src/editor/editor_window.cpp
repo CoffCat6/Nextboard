@@ -1,6 +1,7 @@
 #include "editor_window.hpp"
 
 #include "host/memory_probe.hpp"
+#include "host/core_bridge.hpp"
 
 #include <QAction>
 #include <QActionGroup>
@@ -18,7 +19,10 @@
 #include <QGraphicsScene>
 #include <QGraphicsTextItem>
 #include <QGraphicsView>
+#include <QFutureWatcher>
 #include <QGuiApplication>
+#include <QLabel>
+#include <QtConcurrent/QtConcurrentRun>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QKeyEvent>
@@ -270,11 +274,13 @@ EditorWindow::EditorWindow(QImage base, QWidget* parent) : QWidget(parent), m_ba
 
     buildToolBar();
 
+    // 工具栏放**底部**(形态 B,docs/14 §15.1):贴图/OCR 等"完成动作"靠近拇指,
+    // 且与主流截图工具一致;标注画布保持最大可视面积。
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
-    for (QToolBar* bar : m_toolBars) layout->addWidget(bar);
     layout->addWidget(m_view, 1);
+    for (QToolBar* bar : m_toolBars) layout->addWidget(bar);
 
     // 初始落在光标所在屏中央(与贴图窗口同一落点语义)
     const QPoint cursor = QCursor::pos();
@@ -387,6 +393,10 @@ void EditorWindow::buildToolBar() {
             &QUndoStack::redo);
     connect(actions->addAction(QStringLiteral("另存为 (Ctrl+S)")), &QAction::triggered, this,
             &EditorWindow::saveToFile);
+    connect(actions->addAction(QStringLiteral("贴图")), &QAction::triggered, this,
+            &EditorWindow::pinToScreen);
+    connect(actions->addAction(QStringLiteral("OCR取字")), &QAction::triggered, this,
+            &EditorWindow::ocrTakeText);
     actions->addSeparator();
     connect(actions->addAction(QStringLiteral("完成 (Ctrl+Enter)")), &QAction::triggered, this,
             &EditorWindow::finish);
@@ -706,6 +716,70 @@ void EditorWindow::finish() {
 void EditorWindow::cancel() {
     emit cancelled();
     close();
+}
+
+void EditorWindow::pinToScreen() {
+    bakeTextItem();
+    const QImage composed = compose();
+    if (composed.isNull()) return;
+    // 决策(docs/14 §15.6-4):贴图后关闭编辑器 —— 贴图窗口接管后续(编辑回写走
+    // PinWindow::editRequested 的既有闭环),编辑器不再驻留占内存(实测 ~98MB)。
+    emit pinRequested(composed);
+    close();
+}
+
+void EditorWindow::ocrTakeText() {
+    bakeTextItem();
+    const QImage composed = compose();
+    if (composed.isNull()) return;
+    // OCR 必须**异步**:det 推理 0.4~5s(全屏),UI 线程跑会冻结工具栏。
+    // 模式照抄 CoreFacade::ocrEntry(QThreadPool + 结果回 UI 线程)。
+    auto* watcher = new QFutureWatcher<QString>(this);
+    connect(watcher, &QFutureWatcher<QString>::finished, this, [this, watcher] {
+        watcher->deleteLater();
+        showOcrResult(watcher->result(), {});
+    });
+    connect(watcher, &QFutureWatcher<QString>::canceled, watcher, &QObject::deleteLater);
+    watcher->setFuture(QtConcurrent::run([image = composed]() -> QString {
+        return CoreBridge::instance().ocrImage(image);
+    }));
+    // 弹层先以"识别中"占位,完成后由 showOcrResult 填充(全屏 4~5s 不能没反馈)
+    showOcrResult(QString(), QStringLiteral("识别中…"));
+}
+
+void EditorWindow::showOcrResult(const QString& text, const QString& reason) {
+    // OCR 结果弹层(docs/14 §15.6-2):可复制预留(后期),本期只展示。
+    if (m_ocrPopup) { m_ocrPopup->deleteLater(); m_ocrPopup = nullptr; }
+    auto* popup = new QLabel(this, Qt::Popup | Qt::FramelessWindowHint);
+    popup->setObjectName("ocrResultPopup");
+    popup->setWordWrap(true);
+    popup->setTextFormat(Qt::PlainText);
+    popup->setStyleSheet(QStringLiteral(
+        "QLabel{background:#26272E;color:#DFE1E8;padding:12px;border-radius:8px;"
+        "font-size:14px;}"));
+    popup->setMaximumWidth(560);
+    if (text.isEmpty() && !reason.isEmpty()) {
+        popup->setText(reason);                    // "识别中…" 或错误原因
+    } else if (text.isEmpty()) {
+        popup->setText(QStringLiteral("未识别到文字(图片可能不含可识别文本)"));
+    } else {
+        popup->setText(text);
+    }
+    popup->adjustSize();
+    // 弹层贴工具栏上方右侧,不遮画布中心
+    const QPoint global = mapToGlobal(QPoint(width() - popup->width() - 24,
+                                             height() - popup->height() - 72));
+    popup->move(global);
+    popup->show();
+    m_ocrPopup = popup;
+    // 决策:OCR 完成后关闭编辑器(与贴图同语义)。识别期间编辑器仍在,
+    // 弹层随编辑器销毁;文本稍后由用户在弹层里自行处理(v1 只展示)。
+    if (!text.isEmpty() || (reason.isEmpty())) {
+        QTimer::singleShot(0, this, [this] {
+            emit ocrFinished(QString(), {});
+            close();
+        });
+    }
 }
 
 void EditorWindow::keyPressEvent(QKeyEvent* e) {

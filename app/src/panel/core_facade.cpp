@@ -694,4 +694,9 @@ void CoreFacade::openEntry(const QString& id) {
     emit toastMessage(QStringLiteral("已用系统默认程序打开"));
 }
 
+
+void pinComposedImage(const QImage& image) {
+    showPinWindow(PinContent{image, {}, {}});
+}
+
 } // namespace nb

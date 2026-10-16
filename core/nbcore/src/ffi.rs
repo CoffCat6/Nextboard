@@ -289,6 +289,36 @@ pub unsafe extern "C" fn nb_capture_monitor_matched(
     report(result)
 }
 
+/// 对**任意 RGBA** 直接做 OCR(编辑器「取字」:合成图无需先入库)。
+///
+/// 与 `nb_call("ocr_entry")` 的差异:`ocr_entry` 从落库 PNG 读图,
+/// 而编辑器里的标注合成图还没有条目 —— 走本入口避免"先入库再识别"的绕路。
+/// 内部用 `recognize_configured`,因此**设置项(后端/识别偏好/引擎驻留)全部生效**。
+///
+/// # Safety
+/// `rgba` 由宿主持有,本函数只读;`out_text` 由本 crate 分配,
+/// 宿主成功后须以 `nb_free_string` 释放(与 `nb_call` 的出参同约定)。
+#[no_mangle]
+pub unsafe extern "C" fn nb_ocr_rgba(
+    rgba: *const u8,
+    len: usize,
+    width: u32,
+    height: u32,
+    out_text: *mut *mut i8,
+) -> i32 {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if rgba.is_null() || len == 0 {
+            return Err(AppError::InvalidInput("OCR 输入为空".into()));
+        }
+        let bytes = std::slice::from_raw_parts(rgba, len);
+        let settings = crate::core::Core::get()?.settings()?;
+        let options = crate::ocr::OcrOptions::from_settings(&settings);
+        let text = crate::ocr::recognize_configured(bytes.to_vec(), width, height, &options)?;
+        Ok(serde_json::json!({ "text": text }).to_string())
+    }))
+    .unwrap_or_else(|_| Err(AppError::Panicked("nb_ocr_rgba panic".into())));
+    report_out_text(result, out_text)
+}
 /// 裁剪整屏 RGBA 的子区域(框选确认)。
 ///
 /// # Safety
@@ -350,6 +380,29 @@ fn cstr_to_string(ptr: *const c_char) -> Result<String, AppError> {
     // SAFETY: 契约要求调用方传入合法 NUL 结尾 UTF-8 串
     let cstr = unsafe { CStr::from_ptr(ptr) };
     Ok(cstr.to_string_lossy().into_owned())
+}
+
+/// 把 `Result<String, AppError>` 写入宿主的字符串出参并给返回码。
+///
+/// 出参生命周期与 `nb_call` 相同:由本 crate `CString::into_raw` 分配,
+/// 宿主成功后以 `nb_free_string` 释放。失败时不写出参(宿主只看返回码)。
+fn report_out_text(result: Result<String, AppError>, out_text: *mut *mut i8) -> i32 {
+    match result {
+        Ok(text) => match CString::new(text) {
+            Ok(c) => {
+                if !out_text.is_null() {
+                    // SAFETY: out_text 指向宿主提供的合法指针槽位(契约见上)
+                    unsafe { *out_text = c.into_raw() };
+                }
+                NB_OK
+            }
+            Err(_) => NB_ERR,
+        },
+        Err(err) => {
+            log::warn!("FFI 调用失败: {err}");
+            NB_ERR
+        }
+    }
 }
 
 fn report(result: Result<(), AppError>) -> i32 {
