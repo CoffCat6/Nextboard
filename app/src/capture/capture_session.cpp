@@ -14,6 +14,14 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPointer>
+#include <QToolTip>
+#include <QtConcurrent/QtConcurrentRun>
+#include <QFutureWatcher>
+#include <QFileDialog>
+#include <QDateTime>
+#include <QDir>
+#include <QStandardPaths>
+#include <QMessageBox>
 #include <QScreen>
 #include <QTimer>
 
@@ -585,12 +593,15 @@ void OverlayWidget::paintEvent(QPaintEvent*) {
         painter.setPen(QColor(255, 255, 255));
         painter.drawText(QPoint(sel.x(), sel.y() - 6),
                          QStringLiteral("%1 × %2").arg(src.width()).arg(src.height()));
+
+        // 浮条最后画(压在手柄/选区之上)
+        drawToolbar(painter);
     } else if (!m_selecting) {
         painter.setPen(QColor(255, 255, 255, 200));
         painter.drawText(rect(), Qt::AlignHCenter | Qt::AlignTop,
                          m_autoConfirm
                              ? QStringLiteral("拖拽框选,Esc 取消(屏 %1)").arg(m_screenIndex)
-                             : QStringLiteral("拖拽框选;可拖手柄微调,Enter 或双击确认,Esc 取消(屏 %1)")
+                             : QStringLiteral("拖拽框选;可拖手柄微调,Enter/双击/完成按钮确认,Esc 取消(屏 %1)")
                                    .arg(m_screenIndex));
     }
 }
@@ -603,6 +614,15 @@ void OverlayWidget::mousePressEvent(QMouseEvent* e) {
         return;
     }
     if (e->button() != Qt::LeftButton) return;
+
+    // 浮条命中:**先于一切** —— 点按钮走动作,点浮条空白不当作重新框选
+    if (toolbarContains(e->pos())) {
+        m_toolbarAction = true;
+        handleToolbarClick(e->pos());
+        return;
+    }
+    // 点到浮条外:收起浮条(允许直接重新框选),见下方起新选区逻辑
+    if (toolbarVisible()) hideToolbar();
 
     // 微调模式:已有选区时,按在手柄/内部上就进入调整,而不是重新框选
     if (!m_autoConfirm && !m_selection.isNull()) {
@@ -635,6 +655,7 @@ void OverlayWidget::mouseMoveEvent(QMouseEvent* e) {
         update();
         return;
     }
+    if (toolbarVisible() && m_selection.isNull()) hideToolbar();
     // 悬停时给出光标反馈(仅微调模式有意义)
     if (!m_autoConfirm && !m_selection.isNull()) {
         setCursor(cursorForHandle(handleAt(e->pos())));
@@ -648,6 +669,7 @@ void OverlayWidget::mouseReleaseEvent(QMouseEvent* e) {
     if (m_adjusting) {
         m_adjusting = false;
         m_activeHandle = Handle::None;
+        if (toolbarVisible()) showToolbar();   // 选区变了,浮条跟随
         return;   // 微调结束不触发确认
     }
     if (!m_selecting) return;
@@ -661,8 +683,12 @@ void OverlayWidget::mouseReleaseEvent(QMouseEvent* e) {
         if (m_autoConfirm) emit cancelled();   // 直通模式保持"点空即取消"的原有手感
         return;
     }
-    // 直通模式:松开即确认;微调模式:保留选区,等 Enter/双击
-    if (m_autoConfirm) emit regionConfirmed(selectionPhysical());
+    // 直通模式:松开即确认;微调模式:保留选区 → 浮出工具栏(docs/14 §16)
+    if (m_autoConfirm) {
+        emit regionConfirmed(selectionPhysical());
+    } else {
+        showToolbar();
+    }
     update();
 }
 
@@ -681,6 +707,157 @@ void OverlayWidget::keyPressEvent(QKeyEvent* e) {
     if (e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter) {
         if (!m_autoConfirm && selectionUsable()) emit regionConfirmed(selectionPhysical());
     }
+}
+
+// ---- 框选后浮出工具栏(docs/14 §16;仅 autoConfirm=false 生效)----
+
+namespace {
+
+constexpr int kTbHeight = 44;          // 浮条高(逻辑像素)
+constexpr int kTbMargin = 8;           // 离选区底边的间距
+constexpr int kBtnCount = 6;           // 标注/OCR/贴图/保存/完成/取消
+
+/// 按钮文案与索引一一对应;宽度按文字自适应由 draw 时计算,这里给最小宽。
+QString toolbarButtonText(int index) {
+    switch (index) {
+        case 0: return QStringLiteral("标注");
+        case 1: return QStringLiteral("OCR取字");
+        case 2: return QStringLiteral("贴图");
+        case 3: return QStringLiteral("保存");
+        case 4: return QStringLiteral("完成");
+        default: return QStringLiteral("取消");
+    }
+}
+
+} // namespace
+
+bool OverlayWidget::toolbarVisible() const {
+    return !m_autoConfirm && selectionUsable();
+}
+
+QRect OverlayWidget::toolbarRect() const {
+    const QRect sel = m_selection.normalized();
+    const int w = 92 * kBtnCount;      // 均分按钮宽(文字短,固定宽最省事且不跳动)
+    const int h = kTbHeight;
+    int x = sel.center().x() - w / 2;
+    int y = sel.bottom() + kTbMargin;
+    // 越出屏幕底部 → 翻到选区上方
+    if (y + h > height() - 4) y = sel.top() - kTbMargin - h;
+    // 左右夹在屏内
+    x = qBound(4, x, width() - w - 4);
+    return QRect(x, y, w, h);
+}
+
+void OverlayWidget::showToolbar() {
+    m_toolbarRect = toolbarRect();
+    update();
+}
+
+void OverlayWidget::hideToolbar() {
+    m_toolbarRect = QRect();
+    update();
+}
+
+bool OverlayWidget::toolbarContains(const QPoint& pos) const {
+    return toolbarVisible() && m_toolbarRect.contains(pos);
+}
+
+void OverlayWidget::drawToolbar(QPainter& painter) const {
+    if (!toolbarVisible()) return;
+    const QRect rc = m_toolbarRect;
+    // 底板
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(0x26, 0x27, 0x2E, 242));
+    painter.drawRoundedRect(rc, 8, 8);
+    // 按钮均分;完成/取消给强调/弱化色,其余普通
+    const int bw = rc.width() / kBtnCount;
+    for (int i = 0; i < kBtnCount; ++i) {
+        const QRect btn(rc.x() + i * bw, rc.y(), bw, rc.height());
+        QColor fg = QColor(0xDF, 0xE1, 0xE8);
+        if (i == 4) fg = QColor(0x40, 0xC0, 0x57);   // 完成:绿
+        if (i == 5) fg = QColor(0xE0, 0x31, 0x31);   // 取消:红
+        painter.setPen(fg);
+        painter.drawText(btn, Qt::AlignCenter, toolbarButtonText(i));
+        if (i < kBtnCount - 1) {
+            painter.setPen(QColor(255, 255, 255, 28));
+            painter.drawLine(btn.topRight() + QPoint(0, 8),
+                             btn.bottomRight() - QPoint(0, 8));
+        }
+    }
+}
+
+void OverlayWidget::handleToolbarClick(const QPoint& pos) {
+    if (!toolbarContains(pos)) return;
+    const QRect rc = m_toolbarRect;
+    const int bw = rc.width() / kBtnCount;
+    const int index = qBound(0, (pos.x() - rc.x()) / bw, kBtnCount - 1);
+    m_toolbarAction = false;
+    switch (index) {
+        case 4:   // 完成:走既有确认通道(入库+剪贴板)
+            emit regionConfirmed(selectionPhysical());
+            return;
+        case 5:   // 取消
+            emit cancelled();
+            return;
+        case 0:   // 标注:S3 接 AnnotationEngine;本期按下不动作
+            return;
+        default:
+            break;
+    }
+    // OCR/贴图/保存:输入 = 选区图(未标注时零 compose 开销,docs/14 §16.3-6)
+    const QImage cropped = m_frozen.copy(selectionPhysical());
+    if (cropped.isNull()) return;
+    // 决策:三者在弹层/贴图/另存完成后**结束会话** —— 与形态 B 一致。
+    switch (index) {
+        case 1: {  // OCR取字:异步(0.4~5s),弹层先占位
+            emit activity();
+            auto* watcher = new QFutureWatcher<QString>(this);
+            connect(watcher, &QFutureWatcher<QString>::finished, this,
+                    [this, watcher] {
+                watcher->deleteLater();
+                const QString text = watcher->result();
+                // 弹层展示(v1 只展示;复制预留)。结束后关闭会话。
+                const QPoint gp = mapToGlobal(QPoint(m_toolbarRect.x(), m_toolbarRect.y() - 8));
+                QToolTip::showText(gp, text.isEmpty()
+                    ? QStringLiteral("未识别到文字(图片可能不含可识别文本)")
+                    : text, this, QRect(), 8000);
+                emit cancelled();
+            });
+            connect(watcher, &QFutureWatcher<QString>::canceled, watcher,
+                    &QObject::deleteLater);
+            watcher->setFuture(QtConcurrent::run([cropped]() -> QString {
+                return CoreBridge::instance().ocrImage(cropped);
+            }));
+            QToolTip::showText(mapToGlobal(m_toolbarRect.topLeft()),
+                               QStringLiteral("识别中…"), this, QRect(), 2500);
+            return;
+        }
+        case 2:    // 贴图
+            pinComposedImage(cropped);
+            emit cancelled();
+            return;
+        case 3: {  // 保存
+            bakeSaveDialog(cropped);
+            emit cancelled();
+            return;
+        }
+        default:
+            return;
+    }
+}
+
+void OverlayWidget::bakeSaveDialog(const QImage& image) {
+    const QString suggested =
+        QDir(QStandardPaths::writableLocation(QStandardPaths::PicturesLocation))
+            .filePath(QStringLiteral("Nextboard-%1.png")
+                          .arg(QDateTime::currentDateTime().toString(
+                              QStringLiteral("yyyyMMdd-HHmmss"))));
+    const QString path = QFileDialog::getSaveFileName(
+        this, QStringLiteral("另存为"), suggested, QStringLiteral("PNG 图片 (*.png)"));
+    if (path.isEmpty()) return;
+    if (!image.save(path, "PNG"))
+        QMessageBox::warning(this, QStringLiteral("另存为"),
+                             QStringLiteral("写入失败:%1").arg(path));
 }
 
 } // namespace nb

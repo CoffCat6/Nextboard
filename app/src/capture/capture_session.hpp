@@ -108,6 +108,21 @@ private:
     Handle m_activeHandle = Handle::None;
     QRect m_adjustStartRect;  // 微调开始时的选区
     QPoint m_adjustStartPos;  // 微调起始光标位置
+
+    // ---- 框选后浮出工具栏(docs/14 §16;仅 autoConfirm=false 生效)----
+    // 内嵌于遮罩窗口(不新建窗口),挂在选区底部;按钮走既有信号通道。
+    bool toolbarVisible() const;
+    QRect toolbarRect() const;              // 局部逻辑坐标(跟随选区/翻转)
+    void showToolbar();
+    void hideToolbar();
+    bool toolbarContains(const QPoint& pos) const;   // mousePress 命中判定
+    void handleToolbarClick(const QPoint& pos);      // 分发按钮动作
+    void drawToolbar(QPainter& painter) const;       // paintEvent 内绘制
+    void bakeSaveDialog(const QImage& image);        // 另存对话框(保存按钮)
+
+    QRect m_toolbarRect;        // 当前浮条几何(缓存,翻转后更新)
+    QString m_ocrPending;       // 非空 = OCR 进行中(浮条按钮置灰语义)
+    bool m_toolbarAction = false; // 本次 mousePress 落在浮条上(抑制"重新框选")
 };
 
 } // namespace nb
