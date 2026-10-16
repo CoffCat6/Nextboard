@@ -15,6 +15,7 @@
 
 #include "editor/annotation_engine.hpp"
 
+class QLineEdit;
 class QScreen;
 
 namespace nb {
@@ -78,6 +79,8 @@ protected:
     void mouseReleaseEvent(QMouseEvent* e) override;
     void mouseDoubleClickEvent(QMouseEvent* e) override;
     void keyPressEvent(QKeyEvent* e) override;
+    /// 文字工具的宿主内联输入框:Enter/失焦提交,Esc 取消。
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     /// 8 向手柄 + 选区内部(整体拖动);仅微调模式使用。
@@ -88,8 +91,11 @@ private:
     };
 
     qreal dpr() const;
-    /// 选区(局部逻辑坐标)按 DPR 换算为物理像素;越界由核心钳制。
+    /// 选区(局部逻辑坐标)按 DPR 换算为物理像素(桌面**全局**物理坐标);越界由核心钳制。
     QRect selectionPhysical() const;
+    /// 引擎场景矩形 = 选区**局部**物理像素(原点在选区左上)。
+    /// ⚠️ 二者不是一回事:前者给核心裁剪用,后者给引擎用;混用就是"标注画不准"的根因。
+    QRect annotationSceneRect() const;
     /// 命中测试:pos 落在哪个手柄/内部(局部逻辑坐标)。
     Handle handleAt(const QPoint& pos) const;
     /// 8 个手柄中心点(局部逻辑坐标)。
@@ -119,7 +125,9 @@ private:
     bool toolbarVisible() const;
     QRect toolbarRect() const;              // 局部逻辑坐标(跟随选区/翻转)
     void showToolbar();
-    void hideToolbar();
+    /// 确认选区:标注态走**含标注**的合成图(annotatedConfirmed),否则走原裁剪通道。
+    /// Enter/双击/「完成」三条确认路径共用 —— 否则"Enter 确认"会把标注丢掉。
+    void confirmSelection();
     bool toolbarContains(const QPoint& pos) const;   // mousePress 命中判定
     void handleToolbarClick(const QPoint& pos);      // 分发按钮动作
     void drawToolbar(QPainter& painter) const;       // paintEvent 内绘制
@@ -136,9 +144,28 @@ private:
     bool subbarContains(const QPoint& pos) const;
     void handleSubbarClick(const QPoint& pos);
     void drawSubbar(QPainter& painter) const;
-    /// 浮条/二级条绘制辅助:色块与当前选中态。
-    void drawSwatches(QPainter& painter, const QRect& rc,
-                      const QList<QColor>& palette, const QColor& current) const;
+
+    /// 二级条的单元格几何:**一次算好,绘制与命中测试共用**。
+    /// (此前两边各写一份布局算式,一旦漂移就表现为"看得见、点不中"。)
+    struct SubbarCells {
+        QRect undo;
+        QRect redo;
+        QList<QRect> tools;     // 与 toolOrder() 一一对应
+        QList<QRect> colors;    // 与 palette() 一一对应
+        QList<QRect> widths;    // 与 penSizes() 一一对应
+        QList<QRect> fonts;     // 与 fontSizes() 一一对应(仅文字工具非空)
+    };
+    SubbarCells subbarCells() const;
+    /// 切标注工具(含取色器采完自动回退的同步)。
+    void setAnnoTool(EditorTool tool);
+
+    // ---- 文字工具的内联输入(浮条没有 QGraphicsView,引擎的 QGraphicsTextItem
+    //      收不到键盘事件;文本由宿主 QLineEdit 收,确认后烧成图元)----
+    void beginInlineText(const QPoint& widgetPos);
+    void commitInlineText();
+    void cancelInlineText();
+    QLineEdit* m_textEdit = nullptr;         // 正在输入的文本框(空 = 没在输入)
+    QPoint m_textAnchor;                     // 落点(局部逻辑坐标)
 
     AnnotationEngine* m_engine = nullptr;    // 进入标注态才建(平时零开销)
     bool m_subbarVisible = false;
@@ -151,7 +178,6 @@ private:
 
     QRect m_toolbarRect;        // 当前浮条几何(缓存,翻转后更新)
     QString m_ocrPending;       // 非空 = OCR 进行中(浮条按钮置灰语义)
-    bool m_toolbarAction = false; // 本次 mousePress 落在浮条上(抑制"重新框选")
 };
 
 } // namespace nb

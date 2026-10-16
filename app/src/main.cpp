@@ -121,7 +121,8 @@ int main(int argc, char* argv[]) {
                 || arg == QLatin1String("--restore-flow")
                 || arg == QLatin1String("--clear-all-flow")
                 || arg == QLatin1String("--update-flow")
-                || arg == QLatin1String("--dump-monitors")) {
+                || arg == QLatin1String("--dump-monitors")
+                || arg == QLatin1String("--capture-toolbar-flow")) {
                 const QString dir = QDir(QCoreApplication::applicationDirPath())
                                         .filePath(QStringLiteral("acceptance-data"));
                 const bool created = QDir().mkpath(dir);
@@ -238,6 +239,7 @@ int main(int argc, char* argv[]) {
     bool updateFlow = false;
     bool todoGroups = false;
     bool dumpMonitors = false;
+    bool captureToolbarFlow = false;
     for (int i = 1; i < argc; ++i) {
         const QString arg = QString::fromLocal8Bit(argv[i]);
         if (arg == QLatin1String("--screenshot") && i + 1 < argc)
@@ -276,6 +278,10 @@ int main(int argc, char* argv[]) {
         // 多屏配对自检:打印两端显示器清单并核对按名配对/底图自洽性。
         else if (arg == QLatin1String("--dump-monitors"))
             dumpMonitors = true;
+        // 框选浮条 + 标注态验收:真遮罩 + 真鼠标事件,断言标注落点与合成图
+        // (见 host/capture_toolbar_flow.cpp)。不写库,故不进 --data-dir 门禁。
+        else if (arg == QLatin1String("--capture-toolbar-flow"))
+            captureToolbarFlow = true;
     }
     // 待办交互验收(--todo-flow):真实点击驱动整条链路,逻辑见 host/acceptance.cpp
     if (todoFlow) nb::runTodoAcceptanceFlow(panel);
@@ -291,6 +297,7 @@ int main(int argc, char* argv[]) {
     }
     if (todoGroups) nb::reportTodoGroups(panel);
     if (dumpMonitors) nb::reportMonitors();
+    if (captureToolbarFlow) nb::runCaptureToolbarFlow();
     if (!shotPath.isEmpty()) {
         QTimer::singleShot(5000, &panel, [path = shotPath, queryText, openSettings,
                                           translateText, &panel] {

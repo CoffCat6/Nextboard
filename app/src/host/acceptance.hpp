@@ -65,6 +65,12 @@ void runRestoreFlow(PanelWindow& panel);
 /// 不建数据、不改状态,纯读回,故可反复运行。
 void reportTodoGroups(PanelWindow& panel);
 
+/// 框选浮条 + 标注态验收(--capture-toolbar-flow):真实建一块遮罩窗口、真投鼠标事件,
+/// 断言"标注画在哪儿"与"落在哪儿"一致 + 「完成」交出的合成图含标注且图幅正确
+/// —— 回归两代"标注画不准"缺陷(都是逻辑/物理/局部三套坐标系换算出错)。
+/// 纯本机几何与渲染断言,不写库、不联网,无需 --data-dir。
+void runCaptureToolbarFlow();
+
 /// 多屏配对自检:并排打印 Qt 侧(`QScreen::name()/geometry/DPR`)与核心侧
 /// (`list_monitors` 的 name/几何)的显示器清单,并逐屏核对**名字能否配上**、
 /// 配上后取到的底图尺寸是否与该屏几何自洽。用于验证/回归"多屏位置与分辨率

@@ -32,6 +32,7 @@ enum class EditorTool { Pen, Arrow, Line, Rect, Ellipse, Mosaic, Blur, Number, T
 /// 工具的中文显示名(编辑窗与遮罩浮条共用)。
 QString toolLabel(EditorTool tool);
 
+
 class AnnotationEngine : public QObject {
     Q_OBJECT
 public:
@@ -41,6 +42,9 @@ public:
 
     QGraphicsScene* scene() const { return m_scene; }
     QUndoStack* undoStack() const { return m_undo; }
+    /// 场景首项(底图)。遮罩画布已经画过同一张冻结底图,渲染标注层时可临时隐藏它
+    /// —— 省掉每次鼠标移动都重合成一遍整图。
+    QGraphicsItem* backgroundItem() const { return m_background; }
 
     EditorTool tool() const { return m_tool; }
     QColor color() const { return m_color; }
@@ -68,6 +72,12 @@ public:
     /// 烘焙进行中的文字图元(切换工具/完成前必须调)。
     void bakeTextItem();
 
+    /// 落一条**已烘焙**的文字标注。遮罩浮条没有 QGraphicsView,而 QGraphicsTextItem
+    /// 的内联编辑要靠视图转发键盘事件(遮罩是把场景 render 进画布的),所以在浮条上
+    /// 文字由宿主控件输入、确认后交到这里入场景,不进编辑态。
+    void addText(const QString& text, const QPointF& topLeft, const QColor& color,
+                 int pixelSize);
+
     /// 合成底图 + 全部标注,按物理像素输出。
     QImage compose() const;
     /// 只合成某个子区域(物理像素,遮罩浮条用:选区外不重画)。
@@ -89,6 +99,7 @@ private:
     void clearPreview();
 
     QImage m_base;
+    QGraphicsItem* m_background = nullptr;   // 场景首项(底图),见 backgroundItem()
     QGraphicsScene* m_scene = nullptr;
     QUndoStack* m_undo = nullptr;
 

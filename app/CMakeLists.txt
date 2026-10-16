@@ -38,6 +38,7 @@ add_executable(nextboard WIN32
     src/host/tray.cpp
     src/host/hotkeys.cpp
     src/host/acceptance.cpp
+    src/host/capture_toolbar_flow.cpp
     src/host/core_bridge.cpp
     src/host/memory_probe.cpp
     src/panel/panel_window.cpp
@@ -45,6 +46,7 @@ add_executable(nextboard WIN32
     src/panel/core_facade.cpp
     src/panel/clip_entry_model.cpp
     src/capture/capture_session.cpp
+    src/capture/overlay_geometry.cpp
     src/editor/annotation_engine.cpp
     src/editor/editor_window.cpp
     src/pin/pin_window.cpp

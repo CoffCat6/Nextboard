@@ -128,6 +128,7 @@ AnnotationEngine::AnnotationEngine(QImage base, QObject* parent)
     auto* bg = new ImageBackgroundItem(m_base);
     bg->setZValue(-1);
     m_scene->addItem(bg);
+    m_background = bg;
     m_undo = new QUndoStack(this);
 }
 
@@ -353,6 +354,21 @@ void AnnotationEngine::onCanvasReleased(const QPointF& scenePos) {
     if (isStroke ? m_stroke.size() < 2 : QLineF(m_start, m_current).length() < 3.0) return;
 
     if (QGraphicsItem* item = buildFinalItem()) pushItem(item, toolLabel(m_tool));
+}
+
+void AnnotationEngine::addText(const QString& text, const QPointF& topLeft,
+                               const QColor& color, int pixelSize) {
+    if (text.trimmed().isEmpty()) return;
+    auto* item = new QGraphicsTextItem;
+    item->setPlainText(text);
+    item->setDefaultTextColor(color);
+    QFont font = item->font();
+    font.setPixelSize(qMax(8, pixelSize));
+    item->setFont(font);
+    // 已烘焙:不再进入编辑态(浮条没有视图,进编辑态没人能输入)
+    item->setTextInteractionFlags(Qt::NoTextInteraction);
+    item->setPos(topLeft);
+    pushItem(item, toolLabel(EditorTool::Text));
 }
 
 void AnnotationEngine::bakeTextItem() {
