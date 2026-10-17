@@ -29,6 +29,7 @@
 #include <QPointer>
 #include <QTimer>
 #include <functional>
+#include <memory>
 #include <QDebug>
 
 namespace nb {
@@ -504,6 +505,47 @@ QList<QPointer<PinWindow>>& pinRegistry() {
     return list;
 }
 
+/// 正在被编辑器"暂隐让位"的贴图(方案 A):编辑期间窗口 hide() 但**不 close()**,
+/// 编辑会话结束后按结果放回屏幕。
+///
+/// ⚠️ 必须与"已关闭"严格区分:淘汰前的可见性过滤会把隐藏窗口当已关闭踢出注册表,
+///    那张贴图从此既不计数、也不再回表(张数上限与字节预算永久少算一张),
+///    而它其实还会回到屏幕上。
+QList<QPointer<PinWindow>>& parkedPinRegistry() {
+    static QList<QPointer<PinWindow>> list;
+    return list;
+}
+
+/// 该贴图是否处于"编辑中暂隐"状态(顺带清理已销毁的空指针)。
+bool isParkedForEdit(const PinWindow* pin) {
+    QList<QPointer<PinWindow>>& parked = parkedPinRegistry();
+    parked.removeIf([](const QPointer<PinWindow>& p) { return p.isNull(); });
+    if (!pin) return false;
+    for (const QPointer<PinWindow>& p : parked)
+        if (p.data() == pin) return true;
+    return false;
+}
+
+/// 编辑会话开始:登记为"暂隐"并隐藏窗口。
+/// 用 hide() 而不是 close():位置/缩放/不透明度/当前画面全部保留;close() 会因
+/// WA_DeleteOnClose 直接销毁窗口 —— 那是"用户关闭"的语义,不是"让位"。
+void parkPinForEdit(PinWindow* pin) {
+    if (!pin) return;
+    if (!isParkedForEdit(pin)) parkedPinRegistry().append(pin);
+    pin->hide();
+}
+
+/// 编辑会话结束:把暂隐的贴图放回屏幕(方案 A 的**单一恢复点**)。
+/// notice 非空时在贴图上打一条瞬时提示 —— 编辑入口下主面板往往是隐藏的,
+/// 应用级 toast 看不见,贴图自身才是可靠的反馈载体。
+void unparkPinAfterEdit(const QPointer<PinWindow>& pin, const QString& notice) {
+    parkedPinRegistry().removeIf(
+        [&pin](const QPointer<PinWindow>& p) { return p.isNull() || p.data() == pin.data(); });
+    if (!pin) return;   // 贴图已被关闭/淘汰:内容仍已入库 + 写剪贴板,无需恢复
+    if (!pin->isVisible()) pin->show();   // showEvent 自带取焦(ESC/双击/滚轮随后可用)
+    if (!notice.isEmpty()) pin->showNotice(notice);
+}
+
 /// 把内容贴成置顶窗口;初始透明度/双击关闭取自设置。
 /// 超出软上限(张数或字节)时关闭最旧的一张,并在新贴图上提示(架构 §3.1 内存预算)。
 void showPinWindow(const PinContent& content) {
@@ -519,8 +561,11 @@ void showPinWindow(const PinContent& content) {
 
     // 先剔除已销毁/已关闭的窗口,再按"最旧"淘汰到上限之内。
     // 字节口径用 memoryBytes()(图片 + 窗口 backing store),只算图片会低估近一半。
+    // ⚠️ "编辑中暂隐"的贴图不算已关闭(否则会被永久踢出注册表,见 parkedPinRegistry)。
     QList<QPointer<PinWindow>>& pins = pinRegistry();
-    pins.removeIf([](const QPointer<PinWindow>& p) { return p.isNull() || !p->isVisible(); });
+    pins.removeIf([](const QPointer<PinWindow>& p) {
+        return p.isNull() || (!p->isVisible() && !isParkedForEdit(p.data()));
+    });
     qint64 totalBytes = 0;
     for (const QPointer<PinWindow>& pin : pins) totalBytes += pin->memoryBytes();
     // 待贴的窗口还没创建、拿不到真实窗口尺寸;贴图窗口尺寸 ≈ 图片尺寸 + 阴影留白
@@ -531,8 +576,19 @@ void showPinWindow(const PinContent& content) {
     // 张数或字节任一超限就继续淘汰最旧的一张;至少保留 1 张(否则永远贴不出来)
     while (!pins.isEmpty() &&
            (pins.size() >= kPinSoftLimit || totalBytes + incoming > kPinByteBudget)) {
-        QPointer<PinWindow> victim = pins.takeFirst();
-        if (!victim) continue;
+        // 挑最旧一张**非编辑中**的贴图:编辑中的贴图是用户当前的操作对象,
+        // 淘汰掉它,编辑器完成时会静默不回写(guard 变空),用户只看到贴图消失。
+        // ⚠️ 必须"先查表再删",不能 takeFirst 后 append 回尾 —— 全部都是编辑中时
+        //    那种写法会一直转圈(死循环);查不到就直接放弃本次淘汰。
+        int victimIndex = -1;
+        for (int i = 0; i < pins.size(); ++i) {
+            if (pins.at(i) && !isParkedForEdit(pins.at(i).data())) {
+                victimIndex = i;
+                break;
+            }
+        }
+        if (victimIndex < 0) break;   // 只剩编辑中的贴图:允许暂时超出上限/预算
+        QPointer<PinWindow> victim = pins.takeAt(victimIndex);
         totalBytes -= victim->memoryBytes();
         victim->close();
         evicted = true;
@@ -544,34 +600,61 @@ void showPinWindow(const PinContent& content) {
     // 工具条「编辑」:用贴图**当前**内容(含已做的旋转)开编辑器;「完成」后走与
     // 历史条目编辑同一条通道(入库 + 写剪贴板),并把合成结果回写贴图 ——
     // 否则贴图会停留在编辑前的画面。
+    //
+    // 方案 A(2026-10-17 用户拍板):编辑期间贴图**暂隐让位**(hide,不 close)。
+    //   为什么必须让位:①贴图是 WindowStaysOnTopHint|Tool、编辑器是普通窗口,
+    //   同时存在时贴图永远压在编辑器之上且点不透,被盖住的画布区域没法编辑;
+    //   ②同一内容两份可见呈现,用户分不清哪份最新;③贴图在编辑期间仍是活的可
+    //   交互对象(滚轮缩放/拖动/双击关闭/ESC),误操作会直接毁掉正在编辑的宿主。
     QObject::connect(pin, &PinWindow::editRequested, pin, [pin](const QImage& image) {
-        auto* editor = new EditorWindow(image);
         QPointer<PinWindow> guard(pin);   // 贴图可能先被关闭
+        // 恢复时要打的提示(「已更新贴图」等)。结果分支与恢复不在同一时刻发生,
+        // 故用共享字符串传过去(恢复只在编辑器析构时做,见下)。
+        auto notice = std::make_shared<QString>();
+        parkPinForEdit(pin);
+        auto* editor = new EditorWindow(image);
+        // 恢复用**单一恢复点**(编辑器 destroyed):完成/取消/✕/Alt+F4/「贴图」
+        // 以及两个"入库失败"分支最后都会 close() → WA_DeleteOnClose 销毁编辑器,
+        // 所以必然经过这里。逐出口补 show() 必漏(✕ 与失败分支原本就是漏点),
+        // 而贴图是 Tool 窗口、没有任务栏入口 —— 漏一次用户就再也找不回来。
+        // ⚠️ 这条依赖 EditorWindow 的 WA_DeleteOnClose(去掉它就不再触发)。
+        QObject::connect(editor, &QObject::destroyed, &CoreFacade::instance(),
+                         [guard, notice] { unparkPinAfterEdit(guard, *notice); });
         QObject::connect(editor, &EditorWindow::committed, editor,
-                         [guard](const QImage& composed) {
+                         [guard, notice](const QImage& composed) {
             CoreFacade& facade = CoreFacade::instance();
             if (ingestImageAndCopy(composed).isEmpty()) {
                 facade.showToast(QStringLiteral("编辑结果未入库(可能超过图片大小上限)"));
+                // 主面板隐藏时 toast 看不见,恢复时由贴图自己说一句
+                *notice = QStringLiteral("保存失败");
                 return;
             }
             facade.showToast(QStringLiteral("已保存编辑结果"));
             facade.notifyClipChanged();   // 让主面板列表刷新出新图
-            if (guard) guard->setImage(composed);
+            if (guard) {
+                guard->setImage(composed);
+                *notice = QStringLiteral("已更新贴图");
+            }
         });
         // ⚠️ 编辑器里的「贴图」按钮:此前**无人连接 pinRequested** —— 点了按钮
         //    编辑器 close(),贴图窗口却没建(信号飘在空中)。这个入口是框选链路
         //    下线后仅存的两个编辑器入口之一,必须接上。
-        //    贴图产物同样入库 + 回写本贴图(与 committed 同口径,只是不关贴图)。
+        //    决策(2026-10-17,方案 A):本入口下宿主贴图只是**暂隐**,所以「贴图」
+        //    = 回写原贴图 + 放回屏幕,**不再新建** —— 旧行为"新建 + 回写"会在屏幕上
+        //    留下两张内容相同的贴图,而新建那张还会挤占预算、可能顺手淘汰掉别的贴图。
         QObject::connect(editor, &EditorWindow::pinRequested, editor,
-                         [guard](const QImage& composed) {
+                         [guard, notice](const QImage& composed) {
             CoreFacade& facade = CoreFacade::instance();
             if (ingestImageAndCopy(composed).isEmpty()) {
                 facade.showToast(QStringLiteral("贴图失败(可能超过图片大小上限)"));
+                *notice = QStringLiteral("贴图失败");
                 return;
             }
             facade.notifyClipChanged();
-            pinComposedImage(composed);      // 新建贴图窗口
-            if (guard) guard->setImage(composed);   // 原贴图同步为新画面
+            if (guard) {
+                guard->setImage(composed);   // 原贴图同步为新画面(不再新建第二张)
+                *notice = QStringLiteral("已更新贴图");
+            }
         });
         editor->show();
         editor->raise();
