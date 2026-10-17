@@ -800,6 +800,81 @@ void reportMonitors() {    // 多屏配对自检:把两端清单并排打出来,
     QApplication::quit();
 }
 
+void runStitchSettingsFlow() {
+    // 长截图设置与热键的**往返**验收(docs/19 §6)。
+    //
+    // 只验"能否存进去、能否读回来、非法值是否被拒",不验 QML 控件像素 ——
+    // 控件本身由 --screenshot --settings 的人工/自截覆盖。
+    //
+    // 为什么值得单开一条:设置字段的典型故障是"QML 写了但 core 不认"(名字拼错/
+    // 大小写不符/serde 重命名漏了),表现是**用户改了不生效且没有任何提示**。
+    // core_facade 的 save_settings 走字段级合并,拼错的名字会被静默忽略。
+    CoreFacade& core = CoreFacade::instance();
+    int failures = 0;
+    const auto check = [&failures](bool ok, const char* what) {
+        if (!ok) { ++failures; qWarning() << "STITCH-SETTINGS ⚠️ 失败:" << what; }
+        else qInfo() << "STITCH-SETTINGS   ok:" << what;
+    };
+
+    const QVariantMap before = core.call("get_settings").value("data").toMap();
+    const QVariantMap beforeHotkeys = before.value("hotkeys").toMap();
+    qInfo() << "STITCH-SETTINGS STEP0 maxHeight:" << before.value("stitchMaxHeight").toInt()
+            << "overlap:" << before.value("stitchOverlapRatio").toInt()
+            << "hotkey:" << beforeHotkeys.value("captureScrolling").toString();
+
+    // ① 默认值:上限 30000、门槛 3、热键 Ctrl+Shift+L
+    check(before.value("stitchMaxHeight").toInt() == 30000,
+          "默认上限 = 30000px(docs/19 §9 Q4)");
+    check(before.value("stitchOverlapRatio").toInt() == 3, "默认重叠门槛 = 3%");
+    check(beforeHotkeys.value("captureScrolling").toString() == QStringLiteral("Ctrl+Shift+L"),
+          "默认热键 = Ctrl+Shift+L(Q3 要求预置)");
+
+    // ② 写入新值 → 读回(字段级合并必须认这些名字)
+    const bool saved = core.call("save_settings", QVariantMap{
+        {"stitchMaxHeight", 45000},
+        {"stitchOverlapRatio", 7},
+        {"hotkeys", QVariantMap{{"captureScrolling", QStringLiteral("Ctrl+Shift+U")}}},
+    }).value("ok").toBool();
+    const QVariantMap after = core.call("get_settings").value("data").toMap();
+    const QVariantMap afterHotkeys = after.value("hotkeys").toMap();
+    qInfo() << "STITCH-SETTINGS STEP1 saved:" << saved
+            << "maxHeight:" << after.value("stitchMaxHeight").toInt()
+            << "overlap:" << after.value("stitchOverlapRatio").toInt()
+            << "hotkey:" << afterHotkeys.value("captureScrolling").toString();
+    check(saved, "save_settings 成功");
+    check(after.value("stitchMaxHeight").toInt() == 45000, "上限读回 45000");
+    check(after.value("stitchOverlapRatio").toInt() == 7, "门槛读回 7");
+    check(afterHotkeys.value("captureScrolling").toString() == QStringLiteral("Ctrl+Shift+U"),
+          "热键读回 Ctrl+Shift+U");
+    // 合并不能把同级其余快捷键清零
+    check(afterHotkeys.value("toggleMain").toString()
+              == beforeHotkeys.value("toggleMain").toString(),
+          "写长截图热键**没有**清掉其它快捷键(字段级合并生效)");
+
+    // ③ 非法值必须被拒(而不是静默存进去)
+    const bool badHigh = core.call("save_settings",
+                                   QVariantMap{{"stitchMaxHeight", 999999}}).value("ok").toBool();
+    const bool badRatio = core.call("save_settings",
+                                    QVariantMap{{"stitchOverlapRatio", 99}}).value("ok").toBool();
+    qInfo() << "STITCH-SETTINGS STEP2 reject high:" << !badHigh
+            << "reject ratio:" << !badRatio;
+    check(!badHigh, "上限 999999 被拒绝(超出 2k~100k)");
+    check(!badRatio, "门槛 99% 被拒绝(超出 1~20)");
+    // 被拒后原值必须保持不变(不能出现"半个设置写进去了")
+    const QVariantMap afterBad = core.call("get_settings").value("data").toMap();
+    check(afterBad.value("stitchMaxHeight").toInt() == 45000, "被拒后上限保持 45000");
+
+    // ④ 还原(验收不污染用户配置)
+    core.call("save_settings", QVariantMap{
+        {"stitchMaxHeight", before.value("stitchMaxHeight").toInt()},
+        {"stitchOverlapRatio", before.value("stitchOverlapRatio").toInt()},
+        {"hotkeys", QVariantMap{{"captureScrolling",
+                                 beforeHotkeys.value("captureScrolling").toString()}}},
+    });
+    qInfo() << "STITCH-SETTINGS DONE failures=" << failures;
+    QApplication::quit();
+}
+
 void runAutoStartFlow() {
     // 自启注册表自检:核心断言是"应用内开关写的命令行带 --hidden",与安装器
     // (tools/installer.nsi SecAutoStart)同形态。这条缺陷在真机上的唯一可观测后果

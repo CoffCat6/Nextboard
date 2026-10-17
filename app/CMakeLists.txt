@@ -39,6 +39,8 @@ add_executable(nextboard WIN32
     src/host/hotkeys.cpp
     src/host/acceptance.cpp
     src/host/capture_toolbar_flow.cpp
+    src/host/stitch_flow.cpp
+    src/host/stitch_live_flow.cpp
     src/host/core_bridge.cpp
     src/host/memory_probe.cpp
     src/panel/panel_window.cpp

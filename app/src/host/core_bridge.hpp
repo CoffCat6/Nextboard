@@ -31,6 +31,13 @@ using NbCaptureCrop = int(__cdecl*)(const unsigned char*, unsigned long long,
 /// OCR(RGBA 直入):出参为 JSON 字符串,宿主以 nb_free_string 释放。
 using NbOcrRgba = int(__cdecl*)(const unsigned char*, unsigned long long,
                                 unsigned, unsigned, char**);
+/// 长截图吸收一帧(RGBA 直入,不走 base64):出参为小 JSON(位移/总高/结论)。
+using NbStitchAppend = int(__cdecl*)(const char*, const unsigned char*, unsigned long long,
+                                     unsigned, unsigned, int, char**);
+/// 长截图取回结果:out_png 走 nb_free_buffer,out_meta 走 nb_free_string。
+using NbStitchFinish = int(__cdecl*)(const char*, unsigned char**, unsigned long long*, char**);
+/// 长截图丢弃会话(幂等)。
+using NbStitchAbort = int(__cdecl*)(const char*);
 
 namespace nb {
 
@@ -84,6 +91,33 @@ public:
     /// (越界部分由核心钳制)。失败返回空图。
     QImage captureCrop(const QImage& screen, const QRect& rect);
 
+    // ---- 滚动长截图(docs/19) ----
+    //
+    // ⚠️ 这三个走**原生 RGBA 通道**,不是 `call("stitch_*")`:
+    //    逐帧是一整张选区图(1080p ~8MB),走 JSON 门面要 base64(膨胀 1.33 倍)+
+    //    核心侧解回来,一次三份峰值拷贝。docs/06 §10 已把"截图 base64 往返"
+    //    列为待改项头一条,长截图更是高频路径。
+
+    /// 核心是否提供长截图导出(旧 nbcore.dll 没有)。
+    bool hasStitch() const {
+        return m_stitchAppend && m_stitchFinish && m_stitchAbort;
+    }
+
+    /// 吸收一帧。`session` 由宿主生成(建议 UUID);`reset` = 丢弃该会话已有内容。
+    /// 返回核心给出的小 JSON(含 matched/shiftPx/totalHeight/reason/gaps);
+    /// 失败返回空对象(失败原因由核心写 nbcore.log,与既有 captureCrop 同口径)。
+    ///
+    /// ⚠️ 阻塞调用(帧比对 + 拷贝):大帧上 ~几毫秒到几十毫秒,**别在 UI 线程高频调用**。
+    QJsonObject stitchAppend(const QString& session, const QImage& frame, bool reset);
+
+    /// 结束并取回拼接结果。`ok` 为 false 时 outMeta 亦为空。
+    /// 成功时 *outPng 为独立 QImage(核心缓冲已在内部转为 PNG 解码后的自有数据,
+    /// 无需额外归还),*outMeta 为小 JSON。
+    bool stitchFinish(const QString& session, QImage* outPng, QJsonObject* outMeta);
+
+    /// 丢弃会话(幂等)。
+    void stitchAbort(const QString& session);
+
     /// 对任意 QImage 直接 OCR(编辑器「取字」):不走落库通道,设置项全生效。
     /// ⚠️ 阻塞调用 —— det 推理 0.4~5s,**必须在非 UI 线程调用**。
     /// 失败/不可用时返回空串(错误文本见 lastError())。
@@ -130,6 +164,9 @@ private:
     NbCaptureMonitorMatched m_captureMonitorMatched = nullptr;
     NbCaptureCrop m_captureCrop = nullptr;
     NbOcrRgba m_ocrRgba = nullptr;
+    NbStitchAppend m_stitchAppend = nullptr;
+    NbStitchFinish m_stitchFinish = nullptr;
+    NbStitchAbort m_stitchAbort = nullptr;
     bool m_initialized = false;
     QString m_dataDir;
     /// 生效数据目录(设置里启用自定义目录时与 m_dataDir 不同;blobs 定位用)。

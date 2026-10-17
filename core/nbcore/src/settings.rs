@@ -109,6 +109,21 @@ pub struct Settings {
     /// 延时截图等待秒数（托盘「延时截图」入口用；1~10，默认 3）。
     /// 用途：先按下入口，再去展开菜单/等悬浮提示出现，倒计时结束才开始框选。
     pub capture_delay_secs: i64,
+    /// 滚动长截图的**拼接高度上限**(px,默认 30000)。
+    ///
+    /// 动机(docs/19 §4.4 / §7 R3):入库走 ingest_capture_png(PNG + base64),
+    /// 30000px × 1200 宽 RGBA 原始约 137MB、base64 后再膨胀 1.33×,PNG 压缩后
+    /// 仍可能几十 MB。撞上 max_image_mb(默认 20MB)就会**静默只写剪贴板、不入库**,
+    /// 用户以为存下来了其实没有。故上限必须可调,且超限时宿主给出明确提示。
+    ///
+    /// 取值 2000~100000(stitch::MIN_MAX_HEIGHT / MAX_MAX_HEIGHT)。
+    pub stitch_max_height: i64,
+    /// 判定「两帧重叠」所需的最少连续相等行占比(百分比,默认 3)。
+    ///
+    /// 门槛过低会把重复图案(表格线、纯色段)误认成重叠 → 长期拼图**缺行**;
+    /// 过高则对"一行动态内容(时间戳/光标)"过于敏感。3% 配合 12 行的绝对下限
+    /// (见 stitch::MIN_OVERLAP_ROWS)覆盖 200~4000 行的常见选区高度。
+    pub stitch_overlap_ratio: i64,
     /// 截图遮罩的**空闲超时**秒数（默认 60 秒；0 = 不自动取消）。
     ///
     /// 动机（内存）：框选遮罩持有该屏的整屏冻结底图（4K 约 33MB），会话期常驻。
@@ -327,11 +342,17 @@ pub enum HotkeyAction {
     CaptureDelayed,
     /// 截图取字入列表（S5.1 同源）：框选 → OCR → 识别文本**直接存为条目**。
     CaptureOcr,
+    /// 滚动长截图(docs/19):框选 → 逐帧采集 → 纵向拼接 → 入库。
+    ///
+    /// 与 CaptureDelayed / CaptureOcr 不同,本动作**默认预置组合键**:
+    /// 直通模式(regionAutoConfirm=true)下浮条不出现,没有热键就完全够不到该功能
+    /// (docs/19 §9 Q3 的用户裁定)。
+    CaptureScrolling,
 }
 
 impl HotkeyAction {
     /// 全部动作，遍历注册用。
-    pub const ALL: [HotkeyAction; 8] = [
+    pub const ALL: [HotkeyAction; 9] = [
         HotkeyAction::ToggleMain,
         HotkeyAction::CaptureRegion,
         HotkeyAction::CaptureFullscreen,
@@ -340,6 +361,7 @@ impl HotkeyAction {
         HotkeyAction::CaptureTranslate,
         HotkeyAction::CaptureDelayed,
         HotkeyAction::CaptureOcr,
+        HotkeyAction::CaptureScrolling,
     ];
 }
 
@@ -363,6 +385,8 @@ pub struct HotkeyMap {
     pub capture_delayed: String,
     /// 截图取字入列表。**默认留空**，同上。
     pub capture_ocr: String,
+    /// 滚动长截图(docs/19)。默认 Ctrl+Shift+L（L = Long）。
+    pub capture_scrolling: String,
 }
 
 impl Default for HotkeyMap {
@@ -378,6 +402,9 @@ impl Default for HotkeyMap {
             // 新增动作不预置组合键：空串 = 不绑定，用户想用再自己录
             capture_delayed: String::new(),
             capture_ocr: String::new(),
+            // 长截图是**独立入口**:直通模式下浮条不出现,不给默认键就等于没这个功能
+            // (docs/19 §9 Q3)。L = Long,与既有 V/A/Q/P/T/E 均不冲突。
+            capture_scrolling: "Ctrl+Shift+L".into(),
         }
     }
 }
@@ -394,6 +421,7 @@ impl HotkeyMap {
             HotkeyAction::CaptureTranslate => &self.capture_translate,
             HotkeyAction::CaptureDelayed => &self.capture_delayed,
             HotkeyAction::CaptureOcr => &self.capture_ocr,
+            HotkeyAction::CaptureScrolling => &self.capture_scrolling,
         }
     }
 }
@@ -424,6 +452,10 @@ impl Default for Settings {
             // 默认"松手即复制"：截图后立刻可粘贴，不经过编辑器
             region_skip_editor: true,
             capture_delay_secs: 3,
+            // 长截图上限 30000px(用户 2026-10-17 拍板,docs/19 §9 Q4)。
+            // 30000px 已能覆盖"长网页/长聊天记录",再高会让 PNG 撞 max_image_mb。
+            stitch_max_height: 30_000,
+            stitch_overlap_ratio: 3,
             // 实测遮罩会话常驻 +77.5MB(3 屏:冻结底图 + 全屏窗口 backing store + 合成缓冲),
             // 而"误触截图热键后走开"是常见场景。10 分钟太长 —— 60s 足够完成框选,
             // 超时自动取消(与手动 Esc 同语义)即回收。0 = 不自动取消仍受支持。
@@ -481,6 +513,24 @@ impl Settings {
         if !(0..=3600).contains(&self.overlay_idle_secs) {
             return Err(AppError::InvalidInput(
                 "遮罩空闲超时须在 0 ~ 3600 秒之间（0 = 不自动取消）".into(),
+            ));
+        }
+        // 滚动长截图(docs/19 §6):上限范围与 stitch 模块的常量同源,
+        // 这里写死数字会让"设置页能填、核心拒绝"或反之 —— 故用常量引用。
+        if !(crate::stitch::MIN_MAX_HEIGHT..=crate::stitch::MAX_MAX_HEIGHT)
+            .contains(&self.stitch_max_height)
+        {
+            return Err(AppError::InvalidInput(format!(
+                "长截图高度上限须在 {} ~ {} px 之间",
+                crate::stitch::MIN_MAX_HEIGHT,
+                crate::stitch::MAX_MAX_HEIGHT
+            )));
+        }
+        // 重叠门槛 1%~20%:低于 1% 等于没有门槛(重复图案会天天误判),
+        // 高于 20% 则要求近五分之一的画面重叠 —— 用户每次都得小心翼翼地小步滚。
+        if !(1..=20).contains(&self.stitch_overlap_ratio) {
+            return Err(AppError::InvalidInput(
+                "长截图重叠门槛须在 1 ~ 20 之间(百分比)".into(),
             ));
         }
         // 快捷键：**允许留空**（空 = 不绑定该动作，用户可只绑自己需要的几个）；
@@ -1562,6 +1612,8 @@ mod tests {
         // 新增动作默认不绑定（由用户决定是否录）
         assert_eq!(map.get(HotkeyAction::CaptureDelayed), "");
         assert_eq!(map.get(HotkeyAction::CaptureOcr), "");
+        // 长截图例外:**默认预置**(直通模式下浮条不出现,没键就够不到)
+        assert_eq!(map.get(HotkeyAction::CaptureScrolling), "Ctrl+Shift+L");
         // 已绑定的默认键必须两两不同（未绑定的空串不参与比较）
         let mut all: Vec<&str> = HotkeyAction::ALL
             .iter()
@@ -1570,7 +1622,7 @@ mod tests {
             .collect();
         all.sort_unstable();
         all.dedup();
-        assert_eq!(all.len(), 6, "6 个已绑定的默认快捷键不得重复");
+        assert_eq!(all.len(), 7, "7 个已绑定的默认快捷键不得重复");
     }
 
     #[test]
@@ -1588,6 +1640,8 @@ mod tests {
         // 这里只断言"能正常读入默认值",不再断言其语义。
         assert!(settings.region_skip_editor, "已废弃字段仍可读入(默认 true)");
         assert_eq!(settings.capture_delay_secs, 3, "延时截图默认等待 3 秒");
+        assert_eq!(settings.stitch_max_height, 30_000, "长截图默认上限 30000px(docs/19 §9 Q4)");
+        assert_eq!(settings.stitch_overlap_ratio, 3, "长截图重叠门槛默认 3%");
         assert_eq!(
             settings.overlay_idle_secs, 60,
             "遮罩空闲超时默认 1 分钟（0 = 不自动取消）"
@@ -1623,8 +1677,33 @@ mod tests {
     }
 
     #[test]
+    fn stitch_settings_validate() {
+        let mut s = Settings::default();
+        assert!(s.validate().is_ok(), "默认值应合法");
+        // 上限:低于 MIN / 高于 MAX 均拒绝
+        s.stitch_max_height = crate::stitch::MIN_MAX_HEIGHT - 1;
+        assert!(s.validate().is_err(), "上限过小应被拒绝");
+        s.stitch_max_height = crate::stitch::MAX_MAX_HEIGHT + 1;
+        assert!(s.validate().is_err(), "上限过大应被拒绝");
+        s.stitch_max_height = crate::stitch::MIN_MAX_HEIGHT;
+        assert!(s.validate().is_ok());
+        s.stitch_max_height = crate::stitch::MAX_MAX_HEIGHT;
+        assert!(s.validate().is_ok());
+        // 重叠门槛 1~20
+        s.stitch_max_height = 30_000;
+        s.stitch_overlap_ratio = 0;
+        assert!(s.validate().is_err(), "门槛 0 等于没有门槛");
+        s.stitch_overlap_ratio = 21;
+        assert!(s.validate().is_err(), "门槛过高会逼用户小步滚");
+        s.stitch_overlap_ratio = 1;
+        assert!(s.validate().is_ok());
+        s.stitch_overlap_ratio = 20;
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
     fn validate_accepts_six_distinct_hotkeys() {
-        assert!(Settings::default().validate().is_ok(), "六个默认键互不重复");
+        assert!(Settings::default().validate().is_ok(), "默认键互不重复");
         // 翻译相关动作与既有动作重复 → 拒绝
         let mut map = HotkeyMap::default();
         map.open_translate = map.toggle_main.clone();
@@ -2135,6 +2214,7 @@ mod tests {
         all.hotkeys.pin_latest = String::new();
         all.hotkeys.open_translate = String::new();
         all.hotkeys.capture_translate = String::new();
+        all.hotkeys.capture_scrolling = String::new();
         assert!(all.validate().is_ok(), "全部不绑定应合法");
 
         // 非空项仍须合法、且不得重复

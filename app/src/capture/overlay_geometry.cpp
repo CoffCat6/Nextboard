@@ -48,4 +48,31 @@ QRect subbarRectFor(const QRect& toolbarRect, const QSize& barSize, int gap,
     return QRect(x, y, w, h);
 }
 
+QRect stitchPanelRectFor(const QRect& selectionLogical, const QSize& widgetSize,
+                         const QSize& panelSize, int margin) {
+    const QRect sel = selectionLogical.normalized();
+    const int w = panelSize.width();
+    const int h = panelSize.height();
+    // 首选:贴选区右下角(下方)
+    int x = sel.right() - w + 1;
+    int y = sel.bottom() + margin;
+    if (y + h > widgetSize.height() - 4) y = sel.top() - margin - h;   // 翻到上方
+    if (y < 4) y = sel.bottom() - h - margin;                          // 压进选区底部内侧
+    y = qBound(4, y, qMax(4, widgetSize.height() - h - 4));
+    x = qBound(4, x, qMax(4, widgetSize.width() - w - 4));
+    return QRect(x, y, w, h);
+}
+
+QRect stitchProgressRectFor(const QRect& selectionLogical, const QSize& widgetSize,
+                            int height) {
+    const QRect sel = selectionLogical.normalized();
+    const int w = qMin(sel.width(), qMax(0, widgetSize.width() - 8));
+    const int h = qMax(0, height);
+    int x = sel.center().x() - w / 2;
+    int y = sel.bottom() - h + 1;
+    y = qBound(4, y, qMax(4, widgetSize.height() - h - 4));
+    x = qBound(4, x, qMax(4, widgetSize.width() - w - 4));
+    return QRect(x, y, w, h);
+}
+
 } // namespace nb::overlay

@@ -124,7 +124,9 @@ int main(int argc, char* argv[]) {
                 || arg == QLatin1String("--update-flow")
                 || arg == QLatin1String("--dump-monitors")
                 || arg == QLatin1String("--capture-toolbar-flow")
-                || arg == QLatin1String("--autostart-flow")) {
+                || arg == QLatin1String("--autostart-flow")
+                || arg == QLatin1String("--stitch-settings-flow")
+                || arg == QLatin1String("--stitch-live-flow")) {
                 const QString dir = QDir(QCoreApplication::applicationDirPath())
                                         .filePath(QStringLiteral("acceptance-data"));
                 const bool created = QDir().mkpath(dir);
@@ -254,6 +256,9 @@ int main(int argc, char* argv[]) {
     bool dumpMonitors = false;
     bool captureToolbarFlow = false;
     bool autoStartFlow = false;
+    bool stitchFlow = false;
+    bool stitchSettingsFlow = false;
+    bool stitchLiveFlow = false;
     for (int i = 1; i < argc; ++i) {
         const QString arg = QString::fromLocal8Bit(argv[i]);
         if (arg == QLatin1String("--screenshot") && i + 1 < argc)
@@ -300,6 +305,16 @@ int main(int argc, char* argv[]) {
         // (与安装器同形态)。会临时改写用户的 Run 键,结束前必定还原。
         else if (arg == QLatin1String("--autostart-flow"))
             autoStartFlow = true;
+        // 长截图验收:构造帧跑通 append→finish→abort,断言位移/缺口/会话隔离。
+        // 纯内存图像运算,不写库,故不进 --data-dir 门禁。
+        else if (arg == QLatin1String("--stitch-flow"))
+            stitchFlow = true;
+        // 长截图设置往返验收:写读比 + 非法值拒绝。会改设置,**必须**配 --data-dir。
+        else if (arg == QLatin1String("--stitch-settings-flow"))
+            stitchSettingsFlow = true;
+        // 长截图真实采集验收:真窗口 + 真滚动 + 真采屏。会移动鼠标抓屏,故隔离数据目录。
+        else if (arg == QLatin1String("--stitch-live-flow"))
+            stitchLiveFlow = true;
     }
     // 待办交互验收(--todo-flow):真实点击驱动整条链路,逻辑见 host/acceptance.cpp
     if (todoFlow) nb::runTodoAcceptanceFlow(panel);
@@ -317,6 +332,9 @@ int main(int argc, char* argv[]) {
     if (dumpMonitors) nb::reportMonitors();
     if (captureToolbarFlow) nb::runCaptureToolbarFlow();
     if (autoStartFlow) nb::runAutoStartFlow();
+    if (stitchFlow) nb::runStitchFlow();
+    if (stitchSettingsFlow) nb::runStitchSettingsFlow();
+    if (stitchLiveFlow) nb::runStitchLiveFlow();
     if (!shotPath.isEmpty()) {
         QTimer::singleShot(5000, &panel, [path = shotPath, queryText, openSettings,
                                           translateText, &panel] {

@@ -118,6 +118,9 @@ void Tray::buildMenu() {
     };
     m_menu->addAction("矩形截图", [capture] { capture(CaptureIntent::Region); });
     m_menu->addAction("全屏截图", [capture] { capture(CaptureIntent::Fullscreen); });
+    // 滚动长截图(docs/19):与热键 Ctrl+Shift+L 同一条意图 —— 框完直接进长截图就绪态。
+    // 托盘也放一个入口,是因为"有热键但用户不知道"与"没热键"一样够不到功能。
+    m_menu->addAction("滚动长截图", [capture] { capture(CaptureIntent::Scrolling); });
     // 延时截图(F16):按下后先去展开菜单/等悬浮提示,倒计时结束才开始框选。
     // 等待秒数**点击时**才读(改设置即时生效,不必重启);与快捷键入口同一取值口径。
     m_delayAction = m_menu->addAction(QStringLiteral("延时截图"));

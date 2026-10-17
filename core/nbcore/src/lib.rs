@@ -19,6 +19,7 @@ pub mod error;
 pub mod ffi;
 pub mod ocr;
 pub mod settings;
+pub mod stitch;
 pub mod store;
 pub mod todo;
 pub mod translate;

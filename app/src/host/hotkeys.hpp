@@ -26,6 +26,7 @@ public:
         CaptureTranslate,
         CaptureDelayed,   ///< 延时截图(F16):倒计时后再框选
         CaptureOcr,       ///< 截图取字入列表:框选 → OCR → 文本存为条目
+        CaptureScrolling, ///< 滚动长截图:框选 → 逐帧采集 → 纵向拼接 → 入库(docs/19)
     };
 
     Hotkeys(PanelWindow& panel, CoreBridge& core, QObject* parent = nullptr);

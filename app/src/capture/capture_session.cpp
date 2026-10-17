@@ -29,6 +29,7 @@
 #include <QMessageBox>
 #include <QScreen>
 #include <QTimer>
+#include <QUuid>
 
 #include <windows.h>
 
@@ -52,6 +53,30 @@ bool pruneOverlays() {
 /// 会话空闲超时计时器(S6.1)。一次会话只有一组遮罩,共用同一个计时器:
 /// 任一遮罩上报 activity 就重置;超时则自动取消会话。
 QTimer* g_idleTimer = nullptr;
+
+// ---- 滚动长截图(docs/19)的会话状态 ----
+//
+// 一次会话只有一个长截图会话 id(选区一旦锁定就只有一块遮罩在采)。放全局是
+// 因为动作发生在遮罩的 lambda 里,而 id 必须跨帧存活;会话结束(含超时/取消)
+// 统一在 closeAllOverlays 里 abort,避免核心侧缓冲泄漏。
+QString g_stitchSession;
+/// 该遮罩所属屏的索引(采集时按它回退 captureMonitor)。
+QHash<const OverlayWidget*, int> g_stitchScreenOf;
+
+/// 开始(或重置)长截图会话:分配新 id,复位进度。
+QString ensureStitchSession() {
+    if (g_stitchSession.isEmpty())
+        g_stitchSession = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    return g_stitchSession;
+}
+
+/// 丢弃长截图会话(核心侧缓冲一并释放)。幂等。
+void abortStitchSession() {
+    if (g_stitchSession.isEmpty()) return;
+    CoreBridge::instance().stitchAbort(g_stitchSession);
+    g_stitchSession.clear();
+    g_stitchScreenOf.clear();
+}
 
 /// 在 `obj` 真正析构之后再执行 `fn`。
 ///
@@ -79,6 +104,9 @@ void closeAllOverlays(std::function<void()> after = {}) {
     const QList<QPointer<OverlayWidget>> overlays = g_overlays;
     g_overlays.clear();
     g_onCaptured = {};
+    // 长截图会话核在核心侧持有整张结果图,会话结束必须显式丢弃 ——
+    // 否则用户中途 Esc / 空闲超时后,那几百 MB 会一直挂在核心的表里。
+    abortStitchSession();
     // 会话结束即停表:遮罩已释放,不再需要空闲保护
     if (g_idleTimer) g_idleTimer->stop();
     if (overlays.isEmpty()) {
@@ -169,7 +197,9 @@ private:
 ///
 /// 顺序遵循第一代 docs/phase5.md §3.6:**先入库、后写剪贴板**——剪贴板监听线程
 /// 读到同一张图时按 hash 命中去重,只 touch 不新建,不会产生重复条目。
-QString ingestImageAndCopy(const QImage& image) {
+QString ingestImageAndCopy(const QImage& image, bool* outOversize, QString* outNotice) {
+    if (outOversize) *outOversize = false;
+    if (outNotice) outNotice->clear();
     CoreBridge& core = CoreBridge::instance();
     const QString pngBase64 = quickPngBase64(image);
     const QJsonObject resp = core.call("ingest_capture_png", {
@@ -177,8 +207,9 @@ QString ingestImageAndCopy(const QImage& image) {
         {"source", "capture"},
     });
     if (!resp.value("ok").toBool()) {
-        qWarning() << "截图入库失败:"
-                   << resp.value("error").toObject().value("message").toString();
+        const QString err = resp.value("error").toObject().value("message").toString();
+        qWarning() << "截图入库失败:" << err;
+        if (outNotice) *outNotice = QStringLiteral("入库失败:%1").arg(err);
         return {};
     }
     // entry 为 null = 超过图片大小上限被忽略
@@ -187,7 +218,21 @@ QString ingestImageAndCopy(const QImage& image) {
     if (id.isEmpty()) {
         // 未入库,但**仍要写剪贴板**:否则用户按了截图热键却"毫无反应"
         // (第一代同语义:超限时"未入库,仅写剪贴板")。
-        qInfo() << "截图超过大小上限,未入库;仅写入剪贴板";
+        //
+        // ⚠️ 但**必须把"没入库"告诉调用方**:截图(尤其长截图)撞上限时,
+        //    用户会以为存下来了,过后在列表里找不到 —— 静默丢数据比报错更糟。
+        if (outOversize) *outOversize = true;
+        const QJsonObject settings = core.call("get_settings");
+        const int limitMb = settings.value("ok").toBool()
+            ? settings.value("data").toObject().value("maxImageMb").toInt()
+            : 0;
+        const double actualMb = image.sizeInBytes() / (1024.0 * 1024.0);
+        const QString notice = limitMb > 0
+            ? QStringLiteral("图片超过 %1MB 上限,未存入历史(已复制到剪贴板)").arg(limitMb)
+            : QStringLiteral("图片超过大小上限,未存入历史(已复制到剪贴板)");
+        qInfo().nospace() << "截图超过大小上限(" << limitMb << "MB),未入库;仅写剪贴板。"
+                          << " 本次约 " << QString::number(actualMb, 'f', 1) << "MB(RGBA)";
+        if (outNotice) *outNotice = notice;
         const QJsonObject direct = core.call("copy_image_png", {{"png_base64", pngBase64}});
         if (!direct.value("ok").toBool())
             qWarning() << "超限截图写剪贴板失败:"
@@ -210,8 +255,15 @@ namespace {
 /// 入库 + 写剪贴板,成功后接续回调(截图翻译/取字)。
 /// 编辑器是异步窗口,回调必须由调用方显式带过来,不能读会话级的 g_onCaptured。
 void finishCapture(const QImage& image, const CaptureDone& done) {
-    const QString id = ingestImageAndCopy(image);
+    bool oversize = false;
+    QString notice;
+    const QString id = ingestImageAndCopy(image, &oversize, &notice);
     if (!id.isEmpty() && done) done(id);
+    // 超限必须让用户看见(尤其长截图 —— 尺寸大,撞上限是常态而非意外)。
+    // 走 CoreFacade 的 toast:截图会话没有自己的 UI 层,而面板已有统一的提示通道。
+    if (oversize && !notice.isEmpty()) {
+        CoreFacade::instance().showToast(notice);
+    }
 }
 
 /// 框选之后去哪儿(§18.4):**单一出口**取代原先两个布尔量
@@ -274,6 +326,10 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured) {
         return core.captureMonitor(static_cast<unsigned>(index));
     };
 
+    // 长截图意图:必须**有选区**才有采集窗口,故走遮罩框选(不能像全屏那样直通)。
+    // 遮罩上"松手即进长截图就绪态",由 autoStartStitching 承担(见 mouseReleaseEvent)。
+    const bool scrollingIntent = (intent == CaptureIntent::Scrolling);
+
     if (intent == CaptureIntent::Fullscreen) {
         // 直通:捕获 → 入库(source=capture)→ 写剪贴板,同步完成
         // (同样按名配对:光标屏的索引在两端含义不同)
@@ -323,7 +379,10 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured) {
                        << ")捕获失败,跳过该屏遮罩";
             continue;
         }
-        auto* overlay = new OverlayWidget(frozen, i, screen, autoConfirm, rightClickCancel);
+        // 长截图意图下 autoConfirm 只剩"点空是否取消"的作用:松手不再直接入库,
+        // 否则设了 regionAutoConfirm=true 的用户永远进不了长截图(见构造函数注释)。
+        auto* overlay = new OverlayWidget(frozen, i, screen, autoConfirm, rightClickCancel,
+                                          scrollingIntent);
         overlay->setBarAlpha(barAlpha);   // 会话内三档可调,初始取设置
         overlay->setAttribute(Qt::WA_DeleteOnClose);
         g_overlays.append(overlay);
@@ -373,6 +432,112 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured) {
                         finishCapture(composed, done);
                     });
                 });
+
+        // ---- 滚动长截图(docs/19)的会话级接线 ----
+        //
+        // ⚠️ 采集**必须重新捕获该屏再裁选区**,不能用上面捕获的 frozen:
+        //    frozen 是框选那一刻的静止画面,而长截图要的正是"滚动后的新内容"。
+        //    也不能 grab() 遮罩窗口 —— 遮罩是全屏半透明窗口,会把自己也采进去,
+        //    长图上就会出现半透明遮罩与浮条残影(docs/19 §7 R1,本功能最致命的坑)。
+        {
+            QScreen* stitchScreen = screen;
+            const int screenIdx = i;
+            const bool useMatched = matched;
+            // ⚠️ 遮罩指针按值捕获(它不是 lambda 的所有者;上面已 WA_DeleteOnClose,
+            //    但 connect 挂在 overlay 自身,信号发出时它必然还活着)。
+            OverlayWidget* stitchOverlay = overlay;
+            QObject::connect(overlay, &OverlayWidget::stitchFrameRequested, overlay,
+                    [stitchScreen, screenIdx, useMatched, stitchOverlay](
+                        const QRect& physicalRect) {
+                // ⚠️ 这里开始就必须把 m_stitchSampling 复位路径铺全:任何提前 return
+                //    都会让节拍器以为"上一拍还没回来"而**永久停摆**(页面还在滚,
+                //    长图却再也不更新)。所以用一个 RAII 守卫统一复位。
+                struct SampleGuard {
+                    OverlayWidget* w;
+                    ~SampleGuard() { if (w) w->markSampleReturned(); }
+                } guard{stitchOverlay};
+
+                if (physicalRect.isEmpty()) { qWarning() << "长截图:矩形为空,跳过"; return; }
+                // 重新捕获整屏(xcap):配对优先,失败回退按枚举序号
+                QImage fresh;
+                if (useMatched) fresh = CoreBridge::instance().captureMonitorMatched(stitchScreen);
+                if (fresh.isNull())
+                    fresh = CoreBridge::instance().captureMonitor(
+                        static_cast<unsigned>(screenIdx));
+                if (fresh.isNull()) {
+                    qWarning() << "长截图:本帧整屏捕获失败";
+                    return;
+                }
+                const QImage frame = CoreBridge::instance().captureCrop(fresh, physicalRect);
+                if (frame.isNull()) {
+                    qWarning() << "长截图:本帧裁剪失败" << physicalRect;
+                    return;
+                }
+                // 首帧重置(选区已锁定,reset 只在会话内用一次)
+                const bool first = g_stitchSession.isEmpty();
+                const QString session = ensureStitchSession();
+                const QJsonObject r = CoreBridge::instance().stitchAppend(session, frame, first);
+                if (r.isEmpty()) {
+                    qWarning() << "长截图:核心拒绝本帧(会话" << session << ")";
+                    return;
+                }
+                const QString reason = r.value("reason").toString();
+                qInfo().nospace() << "长截图: shift=" << r.value("shiftPx").toInt()
+                                  << " total=" << r.value("totalHeight").toInt()
+                                  << " gaps=" << r.value("gaps").toInt()
+                                  << " reason=" << reason;
+                if (stitchOverlay) {
+                    stitchOverlay->updateStitchProgress(r.value("totalHeight").toInt(),
+                                                        r.value("gaps").toInt(), reason);
+                }
+            });
+
+            // 「结束」:取回长图 → 走与 annotatedConfirmed 相同的入库通道
+            //
+            // ⚠️ **必须转出当前信号栈**:本信号是在 OverlayWidget 的点击处理里发出的,
+            //    而 closeAllOverlays() 会 close() 掉**正在发信号的这块遮罩**。
+            //    虽然 close() 只是 deleteLater,但随后 closeAllOverlays 里的
+            //    destroyed 计数、以及 finishCapture 的整段重活(PNG 编码 + 写库 +
+            //    写剪贴板)都跑在同一个栈上 —— 实测会访问违例
+            //    (0xc0000005,点「结束」后立即崩溃)。
+            //    转一次事件循环既退出该栈,也让"合成中"的画面有机会刷出来。
+            QObject::connect(overlay, &OverlayWidget::stitchFinishRequested, overlay,
+                    [] {
+                QTimer::singleShot(0, qApp, [] {
+                    const QString session = g_stitchSession;
+                    if (session.isEmpty()) {
+                        qWarning() << "长截图:没有可结束的会话";
+                        return;
+                    }
+                    QImage composed;
+                    QJsonObject meta;
+                    const bool ok = CoreBridge::instance().stitchFinish(session, &composed, &meta);
+                    // 无论成败,会话都已在核心侧被取走/销毁 —— 清掉 id 以免二次 finish
+                    g_stitchSession.clear();
+                    if (!ok || composed.isNull()) {
+                        qWarning() << "长截图:合成失败(会话" << session << ")";
+                        return;
+                    }
+                    const int gaps = meta.value("gaps").toInt();
+                    if (gaps > 0) {
+                        qWarning().nospace() << "长截图:有 " << gaps << " 处缺口(滚动过快漏内容)";
+                    }
+                    qInfo().nospace() << "长截图:完成 " << composed.width() << "x"
+                                      << composed.height() << " gaps=" << gaps;
+                    const CaptureDone done = g_onCaptured;
+                    g_onCaptured = {};
+                    closeAllOverlays([composed, done] {
+                        finishCapture(composed, done);
+                    });
+                });
+            });
+
+            // 「取消」:只丢长截图会话,不结束整次截图(选区仍在)
+            QObject::connect(overlay, &OverlayWidget::stitchAborted, overlay, [] {
+                abortStitchSession();
+                qInfo() << "长截图:已取消(选区保留)";
+            });
+        }
 
         // ⚠️ showFullScreen() 只把窗口放到"它当前所在的屏",而新建窗口默认落在主屏:
         // 多屏时若不先定位,所有遮罩会**叠在主屏上**,看到的其实是别屏的底图被拉伸
@@ -429,13 +594,14 @@ constexpr int kMinSelection = 4;
 } // namespace
 
 OverlayWidget::OverlayWidget(QImage frozen, int screenIndex, QScreen* screen, bool autoConfirm,
-                             bool rightClickCancel, QWidget* parent)
+                             bool rightClickCancel, bool autoStartStitching, QWidget* parent)
     : QWidget(parent, Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool),
       m_frozen(std::move(frozen)),
       m_screenIndex(screenIndex),
       m_screen(screen),
       m_autoConfirm(autoConfirm),
-      m_rightClickCancel(rightClickCancel) {
+      m_rightClickCancel(rightClickCancel),
+      m_autoStartStitching(autoStartStitching) {
     setCursor(Qt::CrossCursor);
     setMouseTracking(true);
 }
@@ -600,7 +766,9 @@ void OverlayWidget::paintEvent(QPaintEvent*) {
             painter.restore();
         }
         // 微调模式:画 8 个手柄(提示可拖动调整);有标注时不画(互斥)
-        if (!m_autoConfirm && !m_engine && selectionUsable()) {
+        // ⚠️ 长截图态也**不画**手柄:选区已锁定为采集窗口,让用户以为还能拖
+        //    就会拖出新尺寸,而各帧宽度不一致时拼接必然错位(docs/19 §3.3 I1)。
+        if (!m_autoConfirm && !m_engine && !stitchActive() && selectionUsable()) {
             painter.setPen(QPen(QColor(80, 160, 255), 1));
             painter.setBrush(QColor(255, 255, 255));
             for (const QPoint& point : handlePoints(sel)) {
@@ -614,9 +782,13 @@ void OverlayWidget::paintEvent(QPaintEvent*) {
         painter.drawText(QPoint(sel.x(), sel.y() - 6),
                          QStringLiteral("%1 × %2").arg(src.width()).arg(src.height()));
 
-        // 二级条再浮条(二级条在上层)
-        drawToolbar(painter);
-        drawSubbar(painter);
+        // 二级条再浮条(二级条在上层);长截图态下浮条让位给长截图面板
+        if (!stitchActive()) {
+            drawToolbar(painter);
+            drawSubbar(painter);
+        } else {
+            drawStitchPanel(painter);
+        }
     } else if (!m_selecting) {
         painter.setPen(QColor(255, 255, 255, 200));
         painter.drawText(rect(), Qt::AlignHCenter | Qt::AlignTop,
@@ -638,6 +810,16 @@ void OverlayWidget::mousePressEvent(QMouseEvent* e) {
 
     // 文字输入中:先落字(点别处 = 确认,不再需要第二次点击)
     if (m_textEdit) commitInlineText();
+
+    // 长截图面板命中:**先于一切**(含浮条)。面板激活时浮条已不显示,
+    // 但两者几何可能重叠,顺序写死避免"点了面板却触发了浮条"。
+    if (stitchPanelContains(e->pos())) {
+        handleStitchPanelClick(e->pos());
+        return;
+    }
+    // 长截图态下**禁止重新框选**:选区是采集窗口,拖出新选区会让已采帧与新帧
+    // 宽度不一致,拼接必然错位(docs/19 §3.3 I1)。面板之外的点击一律忽略。
+    if (stitchActive()) return;
 
     // 二级条/浮条命中:**先于一切** —— 点按钮走动作,点条上不当作重新框选。
     // 二级条已是**共享控件**(§17.3 A):按钮是真实子控件,点击根本不会落到这里;
@@ -764,8 +946,16 @@ void OverlayWidget::mouseReleaseEvent(QMouseEvent* e) {
         if (m_autoConfirm) emit cancelled();   // 直通模式保持"点空即取消"的原有手感
         return;
     }
-    // 直通模式:松开即确认;微调模式:保留选区 → 浮出工具栏(docs/14 §16)
-    if (m_autoConfirm) {
+    // 三种出口:
+    //   1) 长截图意图(热键 Ctrl+Shift+L)→ 直接进长截图就绪态;
+    //      与 regionAutoConfirm **无关** —— 用户已经明确要长截图了。
+    //   2) 直通模式 → 松手即确认入库;
+    //   3) 微调模式 → 保留选区 + 浮出工具栏(docs/14 §16)。
+    if (m_autoStartStitching) {
+        // ⚠️ 先 showToolbar() 再进长截图态?不要 —— 长截图态下 toolbarVisible()
+        //    恒为 false,浮条根本不会显示;直接进即可。
+        enterStitching();
+    } else if (m_autoConfirm) {
         emit regionConfirmed(selectionPhysical());
     } else {
         showToolbar();
@@ -784,10 +974,23 @@ void OverlayWidget::mouseDoubleClickEvent(QMouseEvent* e) {
 void OverlayWidget::keyPressEvent(QKeyEvent* e) {
     emit activity();
     if (e->key() == Qt::Key_Escape) {
+        // 长截图态的 Esc 是**分层**的(docs/19 §3.4):
+        //   采集中 → 结束并合成(不丢已采内容;用户常按 Esc 表示"拍到这儿")
+        //   就绪态 → 退出长截图态,回到普通框选(选区仍在)
+        // 只有在普通框选态才取消整次截图。
+        if (stitchCapturing()) {
+            toggleStitchCapture();
+            return;
+        }
+        if (stitchActive()) {
+            exitStitching();
+            return;
+        }
         emit cancelled();
         return;
     }
     if (e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter) {
+        if (stitchActive()) return;   // 长截图态用面板按钮,Enter 不做确认
         if (!m_autoConfirm && selectionUsable()) confirmSelection();
     }
 }
@@ -801,10 +1004,11 @@ QString toolbarButtonText(int index) {
     switch (index) {
         case 0: return QStringLiteral("标注");
         case 1: return QStringLiteral("OCR取字");
-        case 2: return QStringLiteral("贴图");
-        case 3: return QStringLiteral("保存");
-        case 4: return QStringLiteral("透明");   // 底板不透明度三档循环(docs/17 §17.5)
-        case 5: return QStringLiteral("完成");
+        case 2: return QStringLiteral("长截图");
+        case 3: return QStringLiteral("贴图");
+        case 4: return QStringLiteral("保存");
+        case 5: return QStringLiteral("透明");   // 底板不透明度三档循环(docs/17 §17.5)
+        case 6: return QStringLiteral("完成");
         default: return QStringLiteral("取消");
     }
 }
@@ -812,6 +1016,8 @@ QString toolbarButtonText(int index) {
 } // namespace
 
 bool OverlayWidget::toolbarVisible() const {
+    // 长截图态下浮条让位:两套面板叠在一起既挡内容又抢命中
+    if (stitchActive()) return false;
     return !m_autoConfirm && selectionUsable();
 }
 
@@ -868,10 +1074,12 @@ void OverlayWidget::drawToolbar(QPainter& painter) const {
         const QRect btn(rc.x() + i * bw, rc.y(), bw, rc.height());
         QColor fg = baseFg;
         const QColor accent = barNeedsContrastBoost() ? QColor(255, 255, 255) : QColor();
+        // 索引顺序(与 toolbarButtonText 一一对应):
+        // 0 标注 / 1 OCR取字 / 2 长截图 / 3 贴图 / 4 保存 / 5 透明 / 6 完成 / 7 取消
         if (i == 0 && annotating()) fg = accent.isValid() ? accent : QColor(0x1C, 0x7E, 0xD6);
-        if (i == 5) fg = accent.isValid() ? accent : QColor(0x40, 0xC0, 0x57);   // 完成:绿
-        if (i == 6) fg = accent.isValid() ? accent : QColor(0xE0, 0x31, 0x31);   // 取消:红
-        if (i == 4) fg = accent.isValid() ? accent : baseFg;                     // 透明档位
+        if (i == 2 && stitchActive()) fg = accent.isValid() ? accent : QColor(0x1C, 0x7E, 0xD6);
+        if (i == 6) fg = accent.isValid() ? accent : QColor(0x40, 0xC0, 0x57);   // 完成:绿
+        if (i == 7) fg = accent.isValid() ? accent : QColor(0xE0, 0x31, 0x31);   // 取消:红
         painter.setPen(fg);
         painter.drawText(btn, Qt::AlignCenter, toolbarButtonText(i));
         if (i < count - 1) {
@@ -889,13 +1097,13 @@ void OverlayWidget::handleToolbarClick(const QPoint& pos) {
     const int bw = rc.width() / count;
     const int index = qBound(0, (pos.x() - rc.x()) / bw, count - 1);
     switch (index) {
-        case 4:   // 透明:底板不透明度三档循环(即时生效,不结束会话)
+        case 5:   // 透明:底板不透明度三档循环(即时生效,不结束会话)
             cycleBarAlpha();
             return;
-        case 5:   // 完成
+        case 6:   // 完成
             confirmSelection();
             return;
-        case 6:   // 取消
+        case 7:   // 取消
             emit cancelled();
             return;
         case 0:   // 标注:进入/退出标注态(S3)
@@ -903,6 +1111,9 @@ void OverlayWidget::handleToolbarClick(const QPoint& pos) {
             else enterAnnotating();
             m_toolbarRect = toolbarRect();   // 布局可能因二级条显隐变化
             update();
+            return;
+        case 2:   // 长截图:进入长截图态(不结束会话 —— 选区转为采集窗口)
+            enterStitching();
             return;
         default:
             break;
@@ -915,6 +1126,7 @@ void OverlayWidget::handleToolbarClick(const QPoint& pos) {
                                     : m_frozen.copy(selectionPhysical());
     if (cropped.isNull()) return;
     // 决策:三者在弹层/贴图/另存完成后**结束会话** —— 与形态 B 一致。
+    // 索引:1 OCR取字 / 3 贴图 / 4 保存(长截图插在 2,见上)
     switch (index) {
         case 1: {  // OCR取字:异步(0.4~5s),弹层先占位
             emit activity();
@@ -951,17 +1163,320 @@ void OverlayWidget::handleToolbarClick(const QPoint& pos) {
                                QStringLiteral("识别中…"), this, QRect(), 2500);
             return;
         }
-        case 2:    // 贴图
+        case 3:    // 贴图
             pinComposedImage(cropped);
             emit cancelled();
             return;
-        case 3: {  // 保存
+        case 4: {  // 保存
             bakeSaveDialog(cropped);
             emit cancelled();
             return;
         }
         default:
             return;
+    }
+}
+
+
+// ---- 滚动长截图态(docs/19 §3.2)----
+
+void OverlayWidget::enterStitching() {
+    if (m_stitch != StitchState::Off) return;
+    if (!selectionUsable()) return;   // 没有选区就没有采集窗口
+    // 标注与长截图**互斥**:标注锚定在选区上,而长截图的选区是采集窗口。
+    // 两者同时生效会让"画在选区里的笔画"跟着长图一起被滚走,语义混乱。
+    if (m_engine) exitAnnotating();
+    m_stitch = StitchState::Ready;
+    m_stitchTotalHeight = 0;
+    m_stitchGaps = 0;
+    m_stitchNotice = QStringLiteral("点「开始」后滚动页面,内容变化即自动采集");
+    m_stitchPanelRect = stitchPanelRect();
+    update();
+    qInfo() << "长截图:进入就绪态,选区 =" << m_selection.normalized();
+}
+
+void OverlayWidget::exitStitching() {
+    if (m_stitch == StitchState::Off) return;
+    stopStitchSampling();
+    applyStitchHole(false);   // 恢复正常窗口区域
+    m_stitch = StitchState::Off;
+    m_stitchNotice.clear();
+    m_stitchTotalHeight = 0;
+    m_stitchGaps = 0;
+    update();
+}
+
+bool OverlayWidget::toggleStitchCapture() {
+    if (m_stitch == StitchState::Off) return false;
+    if (m_stitch == StitchState::Ready) {
+        m_stitch = StitchState::Capturing;
+        m_stitchNotice = QStringLiteral("采集中…滚动页面;点「结束」或按 Esc 完成");
+        m_stitchTotalHeight = 0;
+        m_stitchGaps = 0;
+        m_stitchPanelRect = stitchPanelRect();
+        // 先挖洞再采首帧:挖洞后页面才可交互,而首帧应当拍"开始之前"的样子
+        // (用户已停在想开始的位置)。顺序反了会把"刚开始那一刻"漏掉。
+        applyStitchHole(true);
+        update();
+        // 首帧立刻采一次(不等第一个 500ms 拍:用户已停在想开始的位置,
+        // 那一屏必须收进去),随后交给节拍器持续采样。
+        m_stitchSampling = true;
+        emit stitchFrameRequested(selectionPhysical());
+        startStitchSampling();
+        return true;
+    }
+    // 采集中 → 结束:交给会话层收尾(它调核心 finish 并入库)
+    // 先把洞补上 —— 否则窗口区域缺口会在"合成中"这段时间里一直露着下层窗口,
+    // 视觉上像遮罩破了一块。
+    m_stitch = StitchState::Ready;
+    stopStitchSampling();
+    applyStitchHole(false);
+    m_stitchNotice = QStringLiteral("正在合成…");
+    update();
+    emit stitchFinishRequested();
+    return false;
+}
+
+QRect OverlayWidget::stitchCaptureRect() const {
+    return selectionPhysical();
+}
+
+QRect OverlayWidget::stitchPanelRect() const {
+    return overlay::stitchPanelRectFor(
+        m_selection.normalized(), size(),
+        QSize(overlay::kStitchPanelWidth, overlay::kStitchPanelHeight),
+        overlay::kBarMargin);
+}
+
+bool OverlayWidget::stitchPanelContains(const QPoint& pos) const {
+    return stitchActive() && m_stitchPanelRect.contains(pos);
+}
+
+void OverlayWidget::handleStitchPanelClick(const QPoint& pos) {
+    if (!stitchPanelContains(pos)) return;
+    const QRect rc = m_stitchPanelRect;
+    const int bw = rc.width() / overlay::kStitchButtons;
+    const int index = qBound(0, (pos.x() - rc.x()) / bw, overlay::kStitchButtons - 1);
+    if (index == 0) {
+        toggleStitchCapture();
+        return;
+    }
+    // 「取消」:丢弃已采集内容并退出长截图态(不结束整次截图,选区仍在)
+    stopStitchSampling();
+    applyStitchHole(false);
+    m_stitch = StitchState::Off;
+    m_stitchNotice.clear();
+    m_stitchTotalHeight = 0;
+    m_stitchGaps = 0;
+    update();
+    emit stitchAborted();
+}
+
+void OverlayWidget::resizeEvent(QResizeEvent* e) {
+    QWidget::resizeEvent(e);
+    // 窗口尺寸变了(多屏 DPI 切换 / 全屏还原),挖洞区域必须按新尺寸重算,
+    // 否则洞会留在旧坐标上 —— 表现为"页面上有一块地方不能滚"
+    if (m_stitchHoleApplied) refreshStitchHole();
+}
+
+void OverlayWidget::updateStitchProgress(int totalHeight, int gaps, const QString& reason) {
+    m_stitchSampling = false;   // 本拍已回来,允许下一拍投递
+    m_stitchTotalHeight = totalHeight;
+    m_stitchGaps = gaps;
+    const qreal k = dpr();
+    const QString heightText = QStringLiteral("已拼接 %1 px")
+        .arg(qRound(totalHeight / (k > 0.01 ? k : 1.0)));
+    if (reason == QLatin1String("no-overlap")) {
+        m_stitchNotice = QStringLiteral("滚动过快,有内容漏掉(缺口 %1)").arg(gaps);
+    } else if (reason == QLatin1String("backward")) {
+        m_stitchNotice = QStringLiteral("已到顶部,无法继续向上拼接");
+    } else if (reason == QLatin1String("limit")) {
+        m_stitchNotice = QStringLiteral("已达高度上限,点「结束」生成");
+    } else if (reason == QLatin1String("duplicate")) {
+        // 未滚动:不打扰,保留上一次文案
+    } else {
+        m_stitchNotice = heightText;
+    }
+    update();
+}
+
+
+// ---- 长截图采集的"挖洞"(docs/19 §7 R2)----
+//
+// 遮罩铺满整屏且置顶,会吞掉所有鼠标事件 —— 用户在选区上滚动时,滚轮被遮罩
+// 接收,底下的浏览器/记事本根本不动,采到的每一帧都是同一张图。
+//
+// 解法:**采集期间把选区从窗口区域里挖掉**(SetWindowRgn)。挖掉的那块没有窗口,
+// 鼠标事件直达下层真实窗口 → 页面真的会滚、且用户**看得见**滚动结果。
+// 遮罩其余部分(黑罩 + 面板 + 进度条)照旧在,所以「结束」「取消」仍点得到。
+//
+// 为什么不用"转发滚轮":那样用户看到的一直是冻结画面,等于盲滚;
+// 也不能整个窗口透明:连按钮都点不到。
+
+void OverlayWidget::applyStitchHole(bool enable) {
+#ifdef Q_OS_WIN
+    const HWND hwnd = reinterpret_cast<HWND>(winId());
+    if (!hwnd) return;
+    if (!enable) {
+        // ⚠️ 补洞**不能**写 SetWindowRgn(hwnd, nullptr, TRUE)。
+        //    实测:那样之后 GetWindowRgn 返回 NULLREGION(0),即"窗口没有任何可见
+        //    区域"—— 遮罩在合成期间整块消失(用户看到桌面闪一下)。
+        //    正确做法是显式设一个覆盖整窗的矩形区域。
+        const QRect win = rect();
+        HRGN full = ::CreateRectRgn(win.left(), win.top(),
+                                    win.right() + 1, win.bottom() + 1);
+        if (full) {
+            if (::SetWindowRgn(hwnd, full, TRUE) == 0) {
+                ::DeleteObject(full);
+                qWarning() << "长截图:恢复整窗区域失败";
+            }
+        }
+        m_stitchHoleApplied = false;
+        return;
+    }
+    refreshStitchHole();
+#else
+    Q_UNUSED(enable);
+#endif
+}
+
+void OverlayWidget::refreshStitchHole() {
+#ifdef Q_OS_WIN
+    if (!stitchCapturing() || !selectionUsable()) {
+        applyStitchHole(false);
+        return;
+    }
+    const HWND hwnd = reinterpret_cast<HWND>(winId());
+    if (!hwnd) return;
+    const QRect win = rect();
+    const QRect hole = m_selection.normalized();
+    if (hole.isEmpty() || !win.contains(hole)) return;
+
+    // 造一个"整屏减去选区"的区域:四个矩形拼成(上/下/左/右)。
+    // 比 Region 差集更可控 —— 差集在 Windows 上要 HRGN 组合,失败时没有可读错误。
+    HRGN rgn = ::CreateRectRgn(0, 0, 0, 0);
+    if (!rgn) return;
+    const auto add = [&rgn](const QRect& r) {
+        if (r.width() <= 0 || r.height() <= 0) return;
+        HRGN piece = ::CreateRectRgn(r.left(), r.top(), r.right() + 1, r.bottom() + 1);
+        if (piece) {
+            ::CombineRgn(rgn, rgn, piece, RGN_OR);
+            ::DeleteObject(piece);
+        }
+    };
+    // 上条
+    add(QRect(win.left(), win.top(), win.width(), hole.top() - win.top()));
+    // 下条
+    add(QRect(win.left(), hole.bottom() + 1, win.width(), win.bottom() - hole.bottom()));
+    // 左条(限于洞的高度)
+    add(QRect(win.left(), hole.top(), hole.left() - win.left(), hole.height()));
+    // 右条(限于洞的高度)
+    add(QRect(hole.right() + 1, hole.top(), win.right() - hole.right(), hole.height()));
+
+    // SetWindowRgn 接管 rgn 的所有权(成功后不得再 DeleteObject)
+    if (::SetWindowRgn(hwnd, rgn, TRUE) == 0) {
+        ::DeleteObject(rgn);
+        qWarning() << "长截图:设置窗口区域失败,页面将无法滚动";
+        return;
+    }
+    m_stitchHoleApplied = true;
+    // ⚠️ 关键:SetWindowRgn **不会**让那块屏幕区域自动重绘。
+    //
+    // Windows 只是把这块从"本窗口的区域"里去掉,屏幕上残留的仍是**上一次绘制
+    // 留下的像素**(半透明黑罩)。于是截图抓到的是遮罩残影,不是下层页面 ——
+    // 表现:每帧都一样 → 核心判 duplicate → 长图只有一屏高,而日志全是 ok。
+    //
+    // 修复:只让**洞那一块**重绘。
+    // ⚠️ 不要用 InvalidateRect(nullptr, nullptr, ...) —— 那是无效化整个桌面,
+    //    在多屏/多窗口下会引发整屏重绘(实测有可见闪烁),而我们需要刷新的
+    //    仅是被挖掉的那块区域。
+    // 洞在窗口坐标里就是 hole;转成屏幕坐标后无效化该矩形,系统会让覆盖它的
+    // 所有窗口(含下层页面)重画该区域。
+    RECT holeScreen{hole.left(), hole.top(), hole.right() + 1, hole.bottom() + 1};
+    // 窗口是屏坐标布局(遮罩铺满整屏,窗口原点 = 屏原点),ClientToScreen 兜底
+    ::ClientToScreen(hwnd, reinterpret_cast<POINT*>(&holeScreen.left));
+    ::ClientToScreen(hwnd, reinterpret_cast<POINT*>(&holeScreen.right));
+    ::InvalidateRect(nullptr, &holeScreen, TRUE);
+    // 自己的可见部分(洞之外)同样要重画:区域变了
+    ::RedrawWindow(hwnd, nullptr, nullptr,
+                   RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+    qInfo().nospace() << "长截图:已在选区挖洞 " << hole << "(滚轮直达下层窗口)";
+#else
+#endif
+}
+
+
+void OverlayWidget::startStitchSampling() {
+    if (!m_stitchTimer) {
+        m_stitchTimer = new QTimer(this);
+        m_stitchTimer->setInterval(overlay::kStitchSampleIntervalMs);
+        // 定时拍:每拍请求一帧。核心按行指纹去重(duplicate 不占预算),
+        // 所以"手停了还在拍"不会让长图膨胀,只是几行整数比对。
+        connect(m_stitchTimer, &QTimer::timeout, this, [this] {
+            if (!stitchCapturing()) return;   // 已结束/已取消:静默停拍
+            // 上一拍投出去的请求若还没回来(核心慢),跳过本拍 —— 不要堆请求
+            if (m_stitchSampling) return;
+            m_stitchSampling = true;
+            emit stitchFrameRequested(selectionPhysical());
+        });
+    }
+    m_stitchSampling = false;
+    m_stitchTimer->start();
+    qInfo() << "长截图:开始采集,间隔" << overlay::kStitchSampleIntervalMs << "ms";
+}
+
+void OverlayWidget::stopStitchSampling() {
+    if (m_stitchTimer) m_stitchTimer->stop();
+    m_stitchSampling = false;
+}
+
+void OverlayWidget::drawStitchPanel(QPainter& painter) const {
+    if (!stitchActive()) return;
+    const QRect rc = m_stitchPanelRect;
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(0x26, 0x27, 0x2E, barAlpha()));
+    painter.drawRoundedRect(rc, 8, 8);
+
+    const int count = overlay::kStitchButtons;
+    const int bw = rc.width() / count;
+    const QColor baseFg = barNeedsContrastBoost() ? QColor(0xFF, 0xFF, 0xFF)
+                                                  : QColor(0xDF, 0xE1, 0xE8);
+    for (int i = 0; i < count; ++i) {
+        const QRect btn(rc.x() + i * bw, rc.y(), bw, rc.height());
+        QColor fg = baseFg;
+        if (i == 0) {
+            // 开始=绿,结束=橙:同一个按钮的两种状态必须一眼可辨
+            fg = stitchCapturing() ? QColor(0xE8, 0x9B, 0x2B) : QColor(0x40, 0xC0, 0x57);
+        } else {
+            fg = QColor(0xE0, 0x31, 0x31);
+        }
+        painter.setPen(fg);
+        const QString label = (i == 0) ? (stitchCapturing() ? QStringLiteral("结束")
+                                                            : QStringLiteral("开始"))
+                                       : QStringLiteral("取消");
+        painter.drawText(btn, Qt::AlignCenter, label);
+        if (i < count - 1) {
+            painter.setPen(QColor(255, 255, 255, 28));
+            painter.drawLine(btn.topRight() + QPoint(0, 8),
+                             btn.bottomRight() - QPoint(0, 8));
+        }
+    }
+
+    // 采集中:选区底部进度条 + 状态文案
+    if (stitchCapturing()) {
+        const QRect bar = overlay::stitchProgressRectFor(
+            m_selection.normalized(), size(), overlay::kStitchProgressHeight);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(0x26, 0x27, 0x2E, qMin(255, barAlpha() + 20)));
+        painter.drawRoundedRect(bar, 6, 6);
+        painter.setPen(barNeedsContrastBoost() ? QColor(255, 255, 255) : baseFg);
+        painter.drawText(bar.adjusted(10, 0, -10, 0), Qt::AlignVCenter | Qt::AlignLeft,
+                         m_stitchNotice);
+    } else if (!m_stitchNotice.isEmpty()) {
+        // 就绪态:文案挂在面板下方
+        painter.setPen(QColor(255, 255, 255, 210));
+        painter.drawText(QRect(rc.x() - 60, rc.bottom() + 6, rc.width() + 120, 20),
+                         Qt::AlignCenter, m_stitchNotice);
     }
 }
 

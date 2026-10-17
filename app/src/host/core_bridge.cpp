@@ -3,9 +3,11 @@
 #include "app_paths.hpp"
 
 #include <QDateTime>
+#include <QDebug>
 #include <QDir>
 #include <QFileInfo>
 #include <QImage>
+#include <QJsonDocument>
 #include <QScreen>
 
 #include <windows.h>
@@ -63,6 +65,11 @@ bool CoreBridge::init(bool /*startHidden*/, QString* error) {
         reinterpret_cast<NbCaptureMonitorMatched>(resolve("nb_capture_monitor_matched"));
     m_captureCrop = reinterpret_cast<NbCaptureCrop>(resolve("nb_capture_crop"));
     m_ocrRgba = reinterpret_cast<NbOcrRgba>(resolve("nb_ocr_rgba"));
+    // 长截图导出:同样是**可选**导出(旧核心没有)→ 不进"致命缺失"检查。
+    // 功能侧用 hasStitch() 判断是否可用,不可用时热键给出可读提示而非静默无反应。
+    m_stitchAppend = reinterpret_cast<NbStitchAppend>(resolve("nb_stitch_append"));
+    m_stitchFinish = reinterpret_cast<NbStitchFinish>(resolve("nb_stitch_finish"));
+    m_stitchAbort = reinterpret_cast<NbStitchAbort>(resolve("nb_stitch_abort"));
     if (!m_init || !m_callFn || !m_freeString || !m_shutdown || !m_abi) {
         if (error) *error = QStringLiteral("nbcore.dll 导出缺失");
         return false;
@@ -263,6 +270,69 @@ QImage CoreBridge::captureCrop(const QImage& screen, const QRect& rect) {
     auto* buffer = new CoreBuffer{rgba, static_cast<unsigned long long>(w) * h * 4, m_freeBuffer};
     return QImage(rgba, static_cast<int>(w), static_cast<int>(h), QImage::Format_RGBA8888,
                   &releaseCoreBuffer, buffer);
+}
+
+// ---- 滚动长截图(docs/19) ----
+
+QJsonObject CoreBridge::stitchAppend(const QString& session, const QImage& frame, bool reset) {
+    if (!m_stitchAppend || !m_freeString || frame.isNull()) return {};
+    if (session.isEmpty()) return {};
+    // 核心按 RGBA8888 紧凑排布读(与 captureCrop / ocrImage 同口径)
+    const QImage src = frame.convertToFormat(QImage::Format_RGBA8888);
+    const QByteArray sessionUtf8 = session.toUtf8();
+    char* out = nullptr;
+    const int rc = m_stitchAppend(
+        sessionUtf8.constData(),
+        src.constBits(),
+        static_cast<unsigned long long>(src.sizeInBytes()),
+        static_cast<unsigned>(src.width()), static_cast<unsigned>(src.height()),
+        reset ? 1 : 0,
+        &out);
+    if (rc != 0 || !out) {
+        if (out) m_freeString(out);
+        return {};
+    }
+    // 与 nb_call 同款生命周期:立即转 QString,随即归还核心缓冲
+    const QByteArray owned(out);
+    m_freeString(out);
+    const QJsonObject obj = QJsonDocument::fromJson(owned).object();
+    return obj;
+}
+
+bool CoreBridge::stitchFinish(const QString& session, QImage* outPng, QJsonObject* outMeta) {
+    if (!m_stitchFinish || !m_freeString || !m_freeBuffer || !outPng || !outMeta) return false;
+    if (session.isEmpty()) return false;
+    const QByteArray sessionUtf8 = session.toUtf8();
+    unsigned char* png = nullptr;
+    unsigned long long pngLen = 0;
+    char* meta = nullptr;
+    const int rc = m_stitchFinish(sessionUtf8.constData(), &png, &pngLen, &meta);
+    if (rc != 0 || !png || pngLen == 0 || !meta) {
+        if (png) m_freeBuffer(png, pngLen);
+        if (meta) m_freeString(meta);
+        return false;
+    }
+    const QByteArray metaJson(meta);
+    m_freeString(meta);
+
+    // PNG 字节 → QImage:loadFromData 会解码出**自有**的像素数据,
+    // 之后即可归还核心缓冲(不跨 FFI 共享生命周期,比零拷贝更简单可靠 ——
+    // 长截图只有一次,不是逐帧高频路径,多一次解码换取无所有权纠葛是划算的)。
+    const QImage decoded = QImage::fromData(png, static_cast<int>(pngLen), "PNG");
+    m_freeBuffer(png, pngLen);
+    if (decoded.isNull()) {
+        qWarning() << "stitch finish: 核心产物 PNG 解码失败,长度 =" << pngLen;
+        return false;
+    }
+    *outPng = decoded;
+    *outMeta = QJsonDocument::fromJson(metaJson).object();
+    return true;
+}
+
+void CoreBridge::stitchAbort(const QString& session) {
+    if (!m_stitchAbort || session.isEmpty()) return;
+    const QByteArray sessionUtf8 = session.toUtf8();
+    m_stitchAbort(sessionUtf8.constData());
 }
 
 QString CoreBridge::ocrImage(const QImage& image) {

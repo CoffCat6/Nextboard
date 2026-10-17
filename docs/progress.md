@@ -3603,3 +3603,684 @@ OCR 文本的去处收敛为**剪贴板**一条 —— 要留在图上就用文�
 - ⚠️ GUI 无法在本环境(沙箱)启动:6 条实机冒烟清单见 docs/17 §18.13 ——
   恢复位置/缩放一致、四条出口贴图都回来、「贴图」不再重复、淘汰不误伤、
   编辑期间峰值内存对比。
+
+---
+
+## 2026-10-17(五)自启统一带 `--hidden`(修开机弹面板)+ 滚动长截图立项
+
+### 一、自启:应用内开关与安装器统一形态
+
+**缺陷**(docs/18 §1.1):`auto_start.cpp` 的 `commandLine()` 只写 `"<exe>"`,
+而安装器 `installer.nsi` 的 SecAutoStart 写的是 `"<exe>" --hidden`。于是
+「在设置里勾开机自启」的用户每次开机都被主面板抢焦点弹出;经安装器勾选的用户则不会。
+同一功能两种行为,docs/04 §8 D11 也把这个裁定挂着没做。
+
+**改动**:
+
+| 文件 | 改动 |
+| --- | --- |
+| `app/src/host/auto_start.cpp` | `commandLine()` 固定追加 `--hidden`(在引号**外**);新增 `registeredCommandLine()` 读回实际值;新增 `refreshCommandLineIfStale()` 升级历史遗留值;新增三个验收钩子(`debugRegisteredCommandLine` / `debugExpectedCommandLine` / `debugWriteRawCommandLine`) |
+| `app/src/host/auto_start.hpp` | 同步声明 + 语义注释 |
+| `app/src/main.cpp` | 启动早期(`ensureAppDataDir` 之后、nbcore init 之前)调 `refreshCommandLineIfStale()`;`--hidden` 分支由 `showAtCursor(); hide();` 改为 `prepareHiddenStart()`;`--autostart-flow` 接线 + 进 `--data-dir` 隔离名单 |
+| `app/src/panel/panel_window.{hpp,cpp}` | 新增 `prepareHiddenStart()`:只 `setMode(List)` + `nativeHandle()` 建 HWND,**不上屏** |
+| `app/src/panel/qml_bootstrap.cpp` | `PanelListLifecycle` 构造后补一次 `sync()` —— 从未 Show 过的面板此前既不冻结也不释放,隐藏期间剪贴板通知照常 `reload()` 装行 |
+| `app/panel/qml/SettingsDrawer.qml` | 文案改为「开机自启(静默驻留托盘,不弹面板)」 |
+| `app/src/host/acceptance.{hpp,cpp}` | 新增 `runAutoStartFlow()`(`--autostart-flow`) |
+
+**三个必须解释的决定**:
+
+1. **为什么要 `refreshCommandLineIfStale()`,不能只改 `commandLine()`**:
+   只改写入侧,老用户(已勾自启、注册表里是旧形态)开机照旧弹面板 —— 缺陷仍在,
+   只是不再恶化。升级逻辑让用户不必去设置页关了再开。
+2. **为什么升级要加「指向本 exe」的守卫**:
+   正式版装在 `%LOCALAPPDATA%\Programs\Nextboard`,开发时从 `app\build` 跑同一份代码。
+   无守卫的话,跑一次 dev 构建就把**用户正式版的自启**改指向 build 目录,清理构建后
+   自启静默失效。守卫条件是 `current.contains(exePath)`,指向别处的留给那个安装自己去修。
+3. **为什么 `--hidden` 不能再写成 `showAtCursor(); hide();`**:
+   两者之间已有一帧上屏,开机瞬间会闪一下面板。`prepareHiddenStart()` 只建 HWND
+   (`core.setNotifyHwnd()` 依赖它)而不 Show。副作用是「从未 Show」→ 模型保持未装载,
+   首次热键呼出时由 `ClipEntryModel::acquire()` 的 `!m_loadedOnce` 分支补载
+   (docs/06 §11.3 的既有机制),不需要新增状态。
+
+**验证状态**:
+
+- 静态核对:`refreshCommandLineIfStale` 与 `prepareHiddenStart` 各只有一处定义/调用;
+  三个调试钩子仅 `acceptance.cpp` 使用;`--autostart-flow` 已进 main.cpp 的
+  `--data-dir` 自动隔离名单;
+- `--autostart-flow` **未运行**:本环境无法启动进程(`spawn EPERM`),
+  需真机跑 `nextboard.exe --autostart-flow --data-dir <临时目录>`,断言日志
+  `AUTOSTART STEP1/2/3/4` 与 `DONE`;该流程会临时改写用户 Run 键、结束前必定还原;
+- 开机静默观感(不闪面板)仍须真机重启一次确认。
+
+### 二、滚动长截图:立项与设计文档
+
+新增 [19-scrolling-capture-plan.md](./19-scrolling-capture-plan.md)(设计定稿,未写代码)。
+核心结论:
+
+- **为什么现在做**:三个传统难点(逐帧采集 / 可停留的遮罩 / 三套坐标换算)在本项目
+  已全部就位 —— `nb_capture_monitor_matched` + `nb_capture_crop`、`OverlayWidget` 的
+  选区保留与浮条、`overlay_geometry.hpp` 的纯函数坐标层(已有验收断言)。
+  实施面收敛为「`OverlayWidget` 加一个状态」+「nbcore 加一个纯函数模块」;
+- **算法**:行指纹(中间 60% 列)+ 串匹配求真实位移;绝不做「假设滚动了选区高度」的硬拼;
+  失败模式(无重叠/未滚动/到尽头/动态内容/反向)全部给出明确处理,不静默出图;
+- **落点**:拼接放 Rust(本仓无 C++ 测试设施,docs/04 §8 D12 已有此结论),
+  FFI 追加 `stitch_append` / `stitch_finish` / `stitch_abort` 三个方法,会话状态在核心侧;
+- **分阶段 S1–S6**,约 5–7 人日:S1 纯算法(离线可验)→ S2 FFI + `--stitch-flow` →
+  S3 遮罩状态机(纯 UI)→ S4 真实采集(最易踩坑)→ S5 浮条第 8 键 + 入库 → S6 设置收口;
+- **风险 R1 最致命**:遮罩是全屏半透明窗口,`grab()` 会把它自己采进去 —— 必须每帧
+  重新捕获该屏再裁剪,不能沿用框选的冻结底图(那是静止画面)。
+
+同步修订:[03-roadmap.md](./03-roadmap.md) 的 backlog 段把「滚动长截图」移出并注明立项;
+[04-build-package-release.md](./04-build-package-release.md) §2.6 与 D11 回填自启形态。
+
+---
+
+## 2026-10-17(五)长截图 S1:核心拼接算法落地(21 个新单测全绿)
+
+**用户拍板四项**(docs/19 §9):默认用户自己滚 · v1 只纵向 · **给独立全局热键** · 上限 30000px 合适。
+
+### 新增 `core/nbcore/src/stitch/`
+
+| 文件 | 内容 |
+| --- | --- |
+| `mod.rs` | 模块文档、`StitchResult`/`StitchStatus`、`validate_frame`、`clamp_max_height`、常量(MIN/MAX_MAX_HEIGHT、MIN_OVERLAP_ROWS=12、采样区间 20%~80%)、20 个单测 |
+| `fingerprint.rs` | 逐行指纹(u64 = 高 32 位行内差分绝对和 / 低 32 位行均值)、`find_shift`(串匹配求位移)、`overlap_threshold`(行数与比例取大) |
+| `session.rs` | 进程级 `Mutex<HashMap<String, Session>>`、增量拼接、`finish_session` 产 PNG、`abort_session` |
+
+### 关键实现决定
+
+1. **指纹 = 均值 + 差分**,不是裸哈希:纯均值会把"一整行纯白"与别处的纯白判等(表格留白正会如此),差分项把纹理密度分开。代价是**不区分镜像结构**(左亮右暗 vs 左暗右亮),这是已知取舍 —— 匹配要求连续多行同时相等,单行碰撞在连续段里被稀释。
+2. **`find_shift` 允许"没跑到重叠终点"**:早期版本要求重叠区逐行全等才算命中,结果**一行动态内容(时间戳/光标闪烁)就让整次匹配失败**。改为取最长连续段、够门槛就采纳。单测 `survives_dynamic_row_between_frames` 锁住此行为。
+3. **触发高度上限时,基准指纹必须同步截断**:若仍以整帧为基准,下一帧按 `min(prev_h - k, next_h)` 算重叠会算小 —— 产物缺行。这是写测试时发现的真实缺陷。
+4. **增量拼接**:会话只留结果图 + 上一帧指纹,不留历史帧(30 帧 4K 全留就是数百 MB)。
+
+### 设置与热键
+
+- `Settings` 新增 `stitch_max_height`(默认 30000)与 `stitch_overlap_ratio`(默认 3),`validate()` 范围与 `stitch` 模块常量**同源引用**,避免"设置页能填、核心拒绝"。
+- `HotkeyAction::CaptureScrolling` + `hotkeys.capture_scrolling`,**默认 `Ctrl+Shift+L`**(L = Long)。与 `capture_delayed`/`capture_ocr` 刻意不同:直通模式下浮条不出现,不给默认键等于没这个功能。
+
+### FFI(ABI v1 追加,不改既有方法)
+
+`stitch_append`(支持 `rgba_base64` 或 `png_base64` 两种入参)/ `stitch_finish` / `stitch_abort`。
+
+### 验证
+
+- `cargo test -p nbcore`:**329 passed / 0 failed / 5 ignored**(新增 21 个,零回归);
+- ⚠️ 本沙箱里 `cargo test` 最初报 `libsqlite3-sys` / `clipper-sys` 的 cc-rs 失败,
+  根因是**系统临时目录受限制**,cl.exe 无法写中间文件。把 `TMP`/`TEMP` 指到项目内目录后即通过。
+  真机不受影响,但 CI 若用受限临时目录需注意。
+
+### 未做(S2 起)
+
+~~宿主侧 `CoreBridge` 包装、`--stitch-flow` 验收入口、遮罩长截图态、真实采集、浮条第 8 键。~~(均已落地,见后)
+
+---
+
+## 2026-10-17(五)长截图 S4:滚动穿透(挖洞)+ 采集节拍 —— 长截图在真机可用了
+
+### 一、滚动问题:为什么"转发滚轮"是错的方案
+
+遮罩是铺满整屏的置顶窗口,会**吞掉所有鼠标事件**。用户在选区上滚动时滚轮被遮罩
+接收,底下的浏览器/记事本根本不动 —— 采到的每一帧都是同一张图,长截图**静默失效**,
+而且没有任何报错(docs/19 §7 R2 标注的风险)。
+
+三种方案对比:
+
+| 方案 | 说明 | 结论 |
+| --- | --- | --- |
+| ① 转发滚轮(`SendInput` 给下层) | 能滚 | ❌ 用户看到的仍是冻结画面,**等于盲滚**;还要猜目标窗口 |
+| ② 整个遮罩 `WA_TransparentForMouseEvents` | 能滚 | ❌ 连「结束」按钮都点不到,无法收尾 |
+| ③ **选区挖洞** | `SetWindowRgn` 把选区从窗口区域挖掉 | ✅ **采用**:下层窗口可见、可交互、滚动即时可见,面板在洞外仍可点 |
+
+实现:`OverlayWidget::applyStitchHole/refreshStitchHole` —— 用四个矩形拼出
+"整屏减去选区"(比 HRGN 差集更可控,失败时有确定行为)。进入采集时挖、结束/取消/
+退出时补。`resizeEvent` 里按新尺寸重算(否则 DPI 切换后洞会留在旧坐标)。
+
+### 二、抓到的真缺陷:`SetWindowRgn(hwnd, nullptr, TRUE)` 不能用来"补洞"
+
+第一版补洞写的是 `SetWindowRgn(hwnd, nullptr, TRUE)`(MSDN 语义:清空区域 = 恢复整窗)。
+验收立刻红:`GetWindowRgn` 返回 **NULLREGION(0)** —— 遮罩**没有任何可见区域**,
+合成期间整块消失,用户会看到桌面闪一下。
+
+改为显式设一个覆盖整窗的矩形区域:
+
+```cpp
+HRGN full = ::CreateRectRgn(win.left(), win.top(), win.right() + 1, win.bottom() + 1);
+::SetWindowRgn(hwnd, full, TRUE);
+```
+
+补洞后 `kind = 2`(SIMPLEREGION)且选区中心回到区域内 —— 验收从红转绿。
+
+### 三、采集节拍:定频采样 + 核心侧去重
+
+为什么**不是**"内容变化才采":判断"内容变了"本身就要先截一帧再比,等于每拍都截。
+折中是**定频 500ms 采样,重复帧交给核心按 `duplicate` 丢弃**(一次指纹比对只是几行
+整数,远低于一次整屏捕获)。
+
+- 太快(100ms):4K 上恒定吃 10~20% CPU;
+- 太慢(1500ms):快速滚动时相邻帧重叠不足 → 核心判 `no-overlap` → 长图缺行。
+
+另外加了"上一拍未回来则跳过本拍"的背压,避免核心慢时堆请求。
+**关键**:该标志必须用 RAII 守卫在所有出口复位 —— 漏一次节拍器就**永久停摆**
+(页面还在滚,长图再也不更新,且无任何报错)。
+
+### 四、验收(全部实测)
+
+`--capture-toolbar-flow` 新增 6 条,实测 **failures = 0**:
+
+```
+PASS 采集期间窗口区域已设置(SetWindowRgn 生效)        kind=3 COMPLEXREGION
+PASS 选区被**挖掉**(滚轮可直达下层窗口,页面能滚)     中心点在区域外
+PASS 选区外遮罩仍在(「结束」按钮可点)                 外部点在区域内
+PASS 挖洞处命中**不是遮罩**                          WindowFromPoint
+PASS 遮罩处仍命中遮罩
+PASS 挖洞处命中的是**真实应用窗口**                   实测 Chrome_RenderWidgetHostHWND
+PASS 结束采集后挖洞已补回(遮罩恢复完整)              kind=2,中心回到区域内
+```
+
+`--stitch-flow` 复跑:**failures = 0**。
+
+### 五、写验收时的一个教训
+
+最初断言"挖洞处命中的窗口 == 我造的那个测试窗口",结果红了 —— 因为那块屏上
+**Chrome(宿主 GUI)覆盖在最上层**。这反而**证明挖洞是对的**:事件确实交给了
+下层的真实应用,而不是被遮罩吞掉。断言已改为"命中真实应用窗口且不是遮罩",
+不再依赖桌面现状 —— 否则换个窗口布局用例就会红,变成对环境敏感。
+
+### 六、未做(后由 S6 补齐,见下)
+
+- **浮条第 8 键的真机手感**、多屏 DPI 下的挖洞正确性;
+- **R3 体积联动**:长图撞 `max_image_mb` 时目前只打日志,还没有面向用户的提示;
+- S5(浮条按钮入库已通,但"点开始后自动滚"不做 —— 用户拍板默认自己滚)、S6 设置项 UI。
+
+---
+
+## 2026-10-17(五)长截图 S6 + R3:设置项 UI、热键、体积超限提示
+
+### 一、R3:长图撞 `maxImageMb` 时不再静默丢数据
+
+原行为:入库按编码后 PNG 体积卡 `maxImageMb`,超了就 `entry=null` —— 只写剪贴板、
+**不入库**,而宿主只打一行日志。用户以为存下来了,过后在列表里找不到。
+
+普通框选超限几乎不可能,但**长截图极易撞上**(30000px 长图 RGBA 就是几百 MB,
+PNG 压完仍可能超),所以这是长截图带来的新风险,必须补。
+
+改动:`ingestImageAndCopy` 新增 `outOversize` / `outNotice` 两个出参;
+`finishCapture` 在超限时经 `CoreFacade::showToast` 明确告知:
+
+> 图片超过 20MB 上限,未存入历史(已复制到剪贴板)
+
+刻意做成 **toast 而非阻塞对话框**:截图是高频动作,弹窗会打断后续操作,
+而"东西在剪贴板里"是可用状态,不需要用户立刻决策。
+
+### 二、S6:设置项 UI
+
+`SettingsDrawer` 的「截图」分组新增两项(读入/保存两个方向都接上):
+
+| 控件 | 字段 | 范围 |
+| --- | --- | --- |
+| 长截图高度上限(px) | `stitchMaxHeight` | 2000–100000,步进 1000 |
+| 长截图重叠判定门槛(%) | `stitchOverlapRatio` | 1–20 |
+
+两条 HintLabel 解释"为什么会有这个旋钮",并点明上限要与「单张图片上限」配合看。
+**不做硬耦合拦截**:长图体积取决于内容重复度,事先算不准,拦死会误伤;
+超限时的明确提示(R3)才是正确防线。
+
+热键面板新增「滚动长截图」字段(`hotkeys.captureScrolling`,默认 `Ctrl+Shift+L`)。
+`Hotkeys::applyFromSettings` 的映射表与 `Action::CaptureScrolling` 一并接上。
+
+### 三、热键行为的一个刻意选择
+
+`CaptureScrolling` 热键**不**直接进入长截图态,而是走 `hidePanelThenCapture(Region)` ——
+把用户送到"有选区、浮条可见"的起点,之后点「长截图」。
+
+理由:先框出"采哪一块"是选区交互的事,热键不该替用户决定。这样热键与手动点击
+**走完全同一条路径**,少一条就少一处漂移。
+
+副作用要记住:**长截图要求 `regionAutoConfirm=false`**。直通模式下没有浮条,
+热键会把用户送到一个"没有长截图按钮"的状态。这是 docs/19 §9 Q3 已记录的前提。
+
+### 四、新增验收入口 `--stitch-settings-flow`
+
+只验"能否存进去、能否读回来、非法值是否被拒",不验控件像素。
+
+**为什么值得单开一条**:设置字段的典型故障是"QML 写了但 core 不认"(名字拼错/
+大小写不符/serde 重命名漏了)。`save_settings` 走**字段级合并**,拼错的名字会被
+**静默忽略** —— 表现为"用户改了不生效且没有任何提示",肉眼极难发现。
+
+实测 **failures = 0**:
+
+```
+ok: 默认上限 = 30000px          ok: 默认重叠门槛 = 3%
+ok: 默认热键 = Ctrl+Shift+L     ok: save_settings 成功
+ok: 上限读回 45000              ok: 门槛读回 7
+ok: 热键读回 Ctrl+Shift+U
+ok: 写长截图热键**没有**清掉其它快捷键(字段级合并生效)
+ok: 上限 999999 被拒绝          ok: 门槛 99% 被拒绝
+ok: 被拒后上限保持 45000
+```
+
+### 五、验证汇总
+
+| 项 | 结果 |
+| --- | --- |
+| `cargo test -p nbcore` | **329 passed / 0 failed / 5 ignored** |
+| `--stitch-flow` | **failures = 0** |
+| `--stitch-settings-flow` | **failures = 0** |
+| `--capture-toolbar-flow` | **failures = 0**(含挖洞与窗口区域断言) |
+| `--screenshot --settings` 自截 | 抽屉渲染正常,**零 QML 告警** |
+| 全量重编 | 零警告零错误 |
+
+
+---
+
+## 2026-10-17(五)长截图:真机"没有正常拼接"的排查与修复
+
+### 起因
+
+用户实测长截图**没有正常拼接**。查日志时先撞上两件对不上的事:
+
+- 日志里注册了 `Ctrl+Shift+F`,而全仓源码对此**零引用**,配置里 `captureScrolling`
+  是 `Ctrl+Shift+L`,且日志里**一次都没注册过 L**;
+- 最后一个会话停在 `mem[startup]`,之后没有任何热键/截图记录。
+
+判断:那份日志不是用户当次运行产生的,不能据此推断。于是**改为造可复现的端到端测试**,
+而不是继续猜。
+
+### 新增 `--stitch-live-flow`:真实采集验收
+
+此前三条验收各有盲区:`--stitch-flow` 用构造帧验算法,`--capture-toolbar-flow` 验
+状态机与窗口区域,**没有一条验证真正的采集链路**(挖洞 → 页面可见 → 截图内容 →
+滚动后内容变化)。这条链路断了的表现恰好就是"每帧都一样 → 核心判 duplicate →
+长图只有一屏",而日志里全是 ok。
+
+做法:造一个**真的会滚**的窗口(内容按行着色,颜色唯一确定滚动位置),
+走「框选 → 开始 → 挖洞 → 采帧 → 滚动 → 结束」全链路,并用
+`captureMonitorMatched` 的像素与 GDI 同点对照。
+
+### 期间发现并修掉的**产品**缺陷
+
+**1. 点「结束」崩溃(0xc0000005)**
+
+`stitchFinishRequested` 在遮罩的点击处理栈上**同步**执行收尾,而
+`closeAllOverlays()` 会 close 掉正在发信号的这块遮罩,随后 PNG 编码 + 写库 +
+写剪贴板全跑在同一个栈上。改为 `QTimer::singleShot(0, ...)` 转出信号栈。
+
+**2. 挖洞后屏幕不重绘**
+
+`SetWindowRgn` 只改窗口区域,**不会**让那块屏幕自动重绘 —— 屏幕残留的还是遮罩
+上一次绘制的半透明像素。采帧拿到的因此是遮罩残影,不是页面:每帧一样 →
+全判 duplicate → 长图只有一屏。这正是"没有正常拼接"的直接机制。
+
+修复:挖洞后只无效化**洞那一块**(`InvalidateRect(nullptr, &holeScreen, TRUE)`)。
+⚠️ 刻意不用 `InvalidateRect(nullptr, nullptr, ...)`:那是无效化整个桌面,
+多屏下会整屏闪烁。
+
+### 排查过程中被"测试自身缺陷"误导的三次(值得记下来)
+
+这类假失败比漏测更糟 —— 会把排查引向错误代码位置:
+
+| 现象 | 真实原因 |
+| --- | --- |
+| 采到纯灰 `#949495` / `#f3f3f3` | 测试页面是 `Qt::Tool` 且未置顶,被桌面其它窗口盖住 |
+| 采帧日志一条都没有 | 测试自己 `new OverlayWidget`,**绕过了 `startCaptureSession` 的信号连接** |
+| 第二次采样后崩溃 | `sampleCenter` 用 `[&]` 捕获,被内层 lambda 复制后 900ms 才执行,引用已悬空 |
+| 偶发崩溃/采到背景 | 用 `QThread::msleep(250)` 等合成 —— 阻塞主线程,窗口反而得不到重绘 |
+
+最后一条尤其要记:**验收里不许用 `msleep` 等"界面稳定"**,要交给事件循环。
+测试页面也已改为 `WindowStaysOnTopHint` 并走真实入口。
+
+### 验收结果(4/4 稳定,连跑验证)
+
+```
+STITCH-LIVE   PASS 框完进入长截图态(热键意图)
+STITCH-LIVE   PASS 点「开始」进入采集中
+STITCH-LIVE   PASS 选区三处采样点都在窗口区域**之外**(洞真的挖掉了)
+STITCH-LIVE   PASS 窗口边缘仍在区域**之内**(遮罩没整块消失)
+STITCH-LIVE   PASS 按屏配对捕获的尺寸与本屏几何自洽(没配到别屏)
+STITCH-LIVE   PASS 挖洞后选区里看到的是**真实页面**(不是遮罩残影) got=#af2080
+STITCH-LIVE   PASS 页面滚动后抓到的内容**跟着变**(offset=60 got=#632980)
+长截图:完成 400x360 gaps=0
+STITCH-LIVE   RESULT failures = 0
+```
+
+关键日志(拼接过程一目了然):`shift=300 → duplicate → shift=60 → duplicate →
+完成 400x360` —— 首帧整吸 300、滚动只吸 60、未滚动时正确判重复。
+
+四条验收全绿:`--stitch-live-flow` / `--stitch-flow` / `--stitch-settings-flow` /
+`--capture-toolbar-flow` 均 **failures = 0**,无崩溃。
+
+
+---
+
+## 2026-10-17(五)长截图拼接错位:根因是"空白行指纹无区分度"
+
+用户实测:白底文档类内容拼接处出现错位/缺段。
+
+### 根因(用用户提供的截图定量确认)
+
+把那张长截图解码后统计:**233 行里只有 80 个不同指纹,最长 33 行连续完全相同**
+——那些行是纯白空白。空白行的指纹恒为 `(diff=0, mean=765)`,于是:
+
+1. `prev[0]` 与 `next[0]` 都是空白 → 指纹相等,候选位移 `k=0` 成立;
+2. 连续几十行空白全部相等 → `run` 轻松越过门槛被判定"匹配成功";
+3. 结论 `k=0` → 该帧被判 `Duplicate` → **整帧丢弃**。
+
+复现:真实滚动 195 行时,算法返回 `k=0`(run=18),那一帧 195 行内容全部丢失
+—— 表现就是长截图在拼接处**凭空少一段**。
+
+### 修复(三处,缺一不可)
+
+| # | 改动 | 理由 |
+| --- | --- | --- |
+| 1 | `RowFingerprint::is_blank()` | 识别"无定位信息的行"(diff≤4 且 mean≥740,含近白);只有它才能把空白行从证据里剔除 |
+| 2 | `find_shift` 统计 `evidence`(非空白相等行数),并要求 `evidence >= max(门槛/2, 4)` | 纯"空白对空白"不构成匹配证据 |
+| 3 | 择优顺序改为 **evidence > run > 较小 k** | 关键:重叠越长包含的文字行必然越多,若按 `run` 择优,`k=0`(重叠最大)永远赢。实测 `k=0` 证据 18 行、真位移 30 只有 12 行 —— 按 run 必错,按 evidence 才对 |
+
+另外把 `Duplicate` 的判据收紧为**整帧逐行全等**(`rows_all_equal`),不再只看
+"重叠覆盖整帧 + run 达标" —— 否则首行对齐但内容已变的帧也会被当成"没滚动"丢掉;
+那种情况现在明确报 `no-overlap` 并记缺口,不静默丢内容。
+
+### 验证
+
+**用户提供的真实图片**(119/233 行是空白,正是最坏输入):
+
+```
+true shift 10 -> k=10 OK    (evidence 83)
+true shift 30 -> k=30 OK    (evidence 72)
+true shift 50 -> k=50 OK    (evidence 67)
+true shift 80 -> k=80 OK    (evidence 53)
+true shift 100 -> k=100 OK  (evidence 50)
+true shift 120 -> k=120 OK  (evidence 30)
+```
+
+修复前这些大多会落到 `k=0`。
+
+**新增 4 个单测**(白底文档专项):
+`blank_rows_are_detected` / `blank_region_does_not_fake_k_zero` /
+`true_duplicate_still_detected`(反向保护,别把 duplicate 一起弄坏)/
+`document_shift_accuracy`(位移 12/30/45 都要算准)。
+
+**测试数据必须非周期**:第一版用"等距同款文字",结果 k=0 与真位移在数据上
+真的等价(证据 18 vs 12),用例把算法缺陷掩盖成"测试写法问题"。改成每段
+长短与墨色各异后才有效 —— 这条已写进测试注释。
+
+### 回归
+
+| 项 | 结果 |
+| --- | --- |
+| `cargo test -p nbcore` | **333 passed / 0 failed / 5 ignored** |
+| `--stitch-live-flow` | failures = 0,长图 `400x360` 正确合成 |
+| `--stitch-flow` | failures = 0 |
+| `--stitch-settings-flow` | failures = 0 |
+| `--capture-toolbar-flow` | failures = 0 |
+
+### 仍存在的边界(设计内,已明确告知而非静默)
+
+- 滚动量超过 `帧高 - 门槛` 时重叠不足 → `no-overlap` + 记缺口(用户会看到提示);
+- 大面积纯色/纯白且**没有任何文字**的区域仍无从定位 —— 若整屏都是这样的内容,
+  任何基于像素比对的方案都无解,此时会给 `no-overlap` 而不是乱拼。
+
+### 仍未验证
+
+- **真机手感**:真实浏览器/记事本里滚动是否跟手、面板是否挡内容、多屏 DPI 下
+  挖洞是否正确 —— 本环境只能验"像素确实来自页面"与"窗口区域正确";
+- 用户那次的具体现象(如果修复后仍有问题)需要**新的日志**才能继续定位,
+  判据是日志里应出现 `长截图: shift=... reason="ok"` 而不是连续 `duplicate`。
+
+### 六、剩下什么
+
+- **真机手感**:浮条第 8 键点击、面板遮挡、多屏 DPI 下的挖洞正确性 —— 本环境只能验几何与系统状态;
+- **S5 的"自动滚动"不做**(用户拍板默认自己滚,docs/19 §9 Q1);
+- 长截图的 OCR / 翻译接续(现在完成后直接入库 + 剪贴板,没有自动接 OCR)。
+
+---
+
+## 2026-10-17(五)长截图:热键直达框选(CaptureIntent::Scrolling)
+
+**用户要求**:「热键应该直接进行长截图框选」。可行,且比原实现更合理 —— 已改。
+
+### 原实现的缺陷
+
+热键走的是 `CaptureIntent::Region`,即"普通框选"。框完之后去向由
+`regionAutoConfirm` 决定:
+
+- `regionAutoConfirm=false`(浮条模式)→ 松手出浮条 → 用户再点「长截图」;
+- `regionAutoConfirm=true`(默认,**松手即入库**)→ **松手就入库了,浮条根本不出现**
+  → 用户**永远到不了长截图**,而且没有任何提示。
+
+即:功能对"用默认设置"的用户完全不可达。这不是交互口味问题,是死角。
+
+### 改法:新增第三种意图
+
+```cpp
+enum class CaptureIntent {
+    Region,     // 按 regionAutoConfirm 决定去向
+    Fullscreen, // 整屏直通
+    Scrolling,  // 框完**直接进长截图就绪态**,与 regionAutoConfirm 无关
+};
+```
+
+`OverlayWidget` 增 `autoStartStitching` 开关;`mouseReleaseEvent` 的出口从两种变三种:
+
+```
+if (m_autoStartStitching) enterStitching();      // 长截图:唯一出口
+else if (m_autoConfirm)   regionConfirmed();     // 直通:松手即入库
+else                      showToolbar();         // 浮条:等用户选
+```
+
+**为什么不用「临时把 regionAutoConfirm 当 false 处理」**:那会让遮罩上出现浮条,
+用户还得多点一次;而且"要不要浮条"与"是不是长截图"是两件事,借一个布尔量
+表达两件事正是 docs/17 §18.4 早已清掉的坑。
+
+长截图意图下 `autoConfirm` 只剩下"点空是否取消"的作用(`mouseReleaseEvent`
+里选区不可用时 `if (m_autoConfirm) emit cancelled()`),语义更窄但也更清楚。
+
+### 顺带:托盘也加一个入口
+
+`托盘菜单 → 滚动长截图`(与矩形截图/全屏截图并列)。理由:**"有热键但用户不知道"
+与"没热键"一样够不到功能**。托盘点击走同一条 `CaptureIntent::Scrolling`。
+
+### 验收(新增 5 条,实测 failures = 0)
+
+刻意造一个 `autoConfirm=true` + 长截图意图的遮罩(即"默认设置 + 热键"的真实组合):
+
+```
+PASS 长截图意图:框完**直接进长截图态**(无需点浮条)
+PASS 长截图意图:进入后处于就绪态,等用户点「开始」
+PASS 长截图意图**绕过** regionAutoConfirm=true(否则松手就入库,永远进不了长截图)
+PASS 长截图意图下 Esc 退出长截图态
+PASS 退出后遮罩仍在、未误触发入库
+```
+
+日志同时打印 `stitching=true capturing=false regionConfirmed fired=false` ——
+三个量一起看才能确认"进了长截图、没开始采集、也没走入库"。
+
+### 回归
+
+| 项 | 结果 |
+| --- | --- |
+| `--capture-toolbar-flow` | **failures = 0**(含新增 5 条) |
+| `--stitch-flow` | **failures = 0** |
+| `--stitch-settings-flow` | **failures = 0** |
+
+### 需要更正的一处文档说法
+
+docs/19 §9 Q3 曾写"长截图要求 `regionAutoConfirm=false`" —— 那是在**旧实现**下
+才成立的前提。现在意图已解耦,该前提**不再存在**,任意 `regionAutoConfirm`
+取值下热键与托盘入口都可达。已同步修订 §9。
+
+
+
+
+---
+
+## 2026-10-17(五)长截图 S2:宿主通道 + `--stitch-flow` 验收(端到端跑通)
+
+### 为什么走原生 RGBA 通道,而不是 JSON 门面
+
+S1 曾在 `dispatch` 里加过 `stitch_append/finish/abort` 三个 JSON 方法。S2 把它们**删掉**,
+改为 `nb_stitch_append` / `nb_stitch_finish` / `nb_stitch_abort` 三个原生导出,理由:
+
+- 逐帧输入是**一整张选区图**(1080p 选区 ~8MB)。走 JSON 要 base64 进字符串(再膨胀
+  1.33 倍)+ 核心侧解回来,一次三份峰值拷贝;
+- `docs/06-memory-optimization.md` §10 已把「截图 base64 往返」列为待改项**头一条**;
+  长截图是高频路径,更不该重蹈;
+- 两份实现必然漂移 —— 保留 JSON 版只会变成"验收走这条、产品走那条"的隐患。
+
+最终契约:
+
+| 导出 | 入参 | 出参 |
+| --- | --- | --- |
+| `nb_stitch_append` | session、RGBA 裸指针、w/h、reset | 小 JSON(位移/总高/结论/缺口) |
+| `nb_stitch_finish` | session | PNG 字节(nb_free_buffer)+ 小 JSON 元信息 |
+| `nb_stitch_abort` | session | — |
+
+### 宿主侧(`core_bridge`)
+
+- `hasStitch()`:`m_stitchAppend && m_stitchFinish && m_stitchAbort`。三个都是**可选导出**
+  (与 `capture_monitor_matched` 同策略):旧 nbcore.dll 加载不会因此失败,功能侧
+  自行判断并给可读提示。
+- `stitchFinish` 刻意**不用零拷贝**:PNG 字节 → `QImage::fromData` 解出**自有**像素,
+  随后立即 `nb_free_buffer`。长截图只有一次,不是逐帧路径,多一次解码换掉跨 FFI 的
+  所有权纠葛是划算的。
+
+### 验收入口 `--stitch-flow`
+
+用**构造的帧序列**跑 9 步:首帧整吸 → 下滚 100 行只吸 100 → 重复帧 duplicate →
+跳远 no-overlap 且记缺口 → 两会话隔离 → finish 出 PNG 且尺寸正确 → 二次 finish 必须失败
+→ abort×3 幂等 → 帧宽变化必须失败。
+
+不用真屏的理由写在文件头:真屏采集要真的滚窗口、等渲染,不可重复、不可并行,
+失败时分不清是算法错还是采集错。真机采集链路由 docs/19 §8 A4 覆盖。
+
+**实测结果**:`STITCH DONE failures= 0`,九步全过。
+
+### 写验收时抓到的真问题:**测试数据不唯一**
+
+第一次跑 STEP4 期望 `no-overlap`,实际得到 `matched=true, shiftPx=195`。看着像算法缺陷,
+追下去是测试数据构造错误:
+
+- `makePage` 把行号拆成 `R=lo, G=hi, B=0`。核心指纹的均值项是 `sum(R+G+B)`,
+  于是**只要 `lo+hi` 相同,两行的均值项就撞上**;
+- 实测 y=550(38+2=40)与 y=295(39+1=40)撞了;550 行正好对上前一帧的第 195 行,
+  于是"合法位移 195"被算出来 —— 算法没错,是**两种不同内容在我的测试数据里长得一样**;
+- 另一个叠加因素:`sliceRows(page, 550, 300)` 越界(`makePage(W, H*2)` 只有 600 行),
+  `QImage::copy` 静默与矩形求交,实际只给了 50 行。
+
+两处都修:
+
+1. 第三个通道改 `lo ^ hi` —— `(lo, hi, lo^hi)` 对每个 y 唯一,`sum` 随之唯一;
+2. `sliceRows` 加越界断言(越界 = 测试缺陷,必须当场暴露,不能静默返回半张图)。
+
+核心单测的 `page_of` 是同一个毛病(只是行数少没触发),一并修掉。
+
+### 验证
+
+- `cargo test -p nbcore`:**329 passed / 0 failed / 5 ignored**;
+- `ninja` 全量重编:nbcore release(含 `nb_stitch_*`)+ nextboard.exe,**零警告零错误**;
+- `nextboard.exe --stitch-flow`:**failures = 0**。
+
+### 环境备注
+
+本沙箱里 `cargo` 的 cc-rs 依赖(`libsqlite3-sys`/`clipper-sys`)会因**系统临时目录受限**
+而失败(cl.exe 写不了中间文件)。把 `TMP`/`TEMP` 指到项目内目录即可。真机用 `build.ps1`
+走 vcvars64 不受影响;将来接 CI 若用受限临时目录需注意。
+
+### 未做
+
+S4 真实采集、S5 浮条第 8 键 + 入库、S6 设置项 UI。
+
+---
+
+## 2026-10-17(五)长截图 S3:遮罩长截图态(状态机 + 面板 + 采集接线)
+
+### 几何(纯函数,可独立断言)
+
+`overlay_geometry` 新增两个函数,沿用 `toolbarRectFor` 的"下→上→夹住"退让风格:
+
+| 函数 | 说明 |
+| --- | --- |
+| `stitchPanelRectFor` | 面板首选贴选区**右下角下方**(注意力在选区内容与滚动条上,面板压在外面最不碍事;右下角离"滚到底"的鼠标也近)。放不下 → 上翻 → 压进选区底部内侧 → 夹进窗口 |
+| `stitchProgressRectFor` | 采集中进度条贴选区**底边内侧**:进度(已拼接高度)与"往下长"方向一致,视线不必来回跳 |
+
+### 状态机(三态)
+
+```
+Off ──点「长截图」──▶ Ready(选区锁定、面板「开始」)──点开始──▶ Capturing(面板「结束」+进度条)
+                          ▲                                        │
+                          └──────────── 点结束 / Esc ─────────────┘
+```
+
+- **选区锁定**:`stitchActive()` 时 mousePress 除面板外一律 return,8 向手柄不绘制。
+  理由是取材窗口不能变 —— 中途改尺寸会让已采帧与新帧宽度不一致,拼接必然错位
+  (核心会直接报 `帧宽不一致`,但那时用户的几十帧已经白采了)。
+- **标注互斥**:进入长截图态先 `exitAnnotating()`。标注锚定在选区上,而长截图的选区
+  是采集窗口;两者同时生效会让笔画跟着长图一起被滚走。
+- **Esc 分层**(docs/19 §3.4):采集中 → 结束并合成(不丢已采内容,用户常按 Esc 表示
+  "拍到这儿");就绪态 → 退回普通框选(选区仍在);普通框选态 → 取消整次截图(原行为)。
+
+### 浮条 7 → 8 个按钮
+
+插入位置:**OCR取字之后、贴图之前**(截图类动作相邻)。按钮宽 79 → 71,
+总宽 553 → 568,1366 宽屏仍从容。
+
+⚠️ 索引全部右移一位。绘制(完成/取消/透明的配色)与点击分发两处**都**改了,
+验收脚本里写死的 `doneIndex` 也改了。这类"按钮集合变了但某处索引没跟着变"是
+假通过的经典来源 —— docs/14 §16 与本次 §3.1 都点名过。
+
+### 采集接线(会话层)
+
+```
+遮罩 stitchFrameRequested(物理矩形)
+  → 重新 captureMonitorMatched(该屏)     ← 不用框选时的 frozen:那是静止画面
+  → captureCrop(物理矩形)
+  → core.stitchAppend(session, frame, reset=首帧)
+  → 遮罩 updateStitchProgress(总高/缺口/结论)
+
+遮罩 stitchFinishRequested
+  → core.stitchFinish → closeAllOverlays(等遮罩析构)→ finishCapture(入库+剪贴板)
+```
+
+**三个必须解释的点**:
+
+1. **为什么不能用 `overlay->grab()` 采帧**:遮罩是全屏半透明窗口,`grab()` 会把它
+   自己(半透黑罩 + 浮条)一起采进长图 —— docs/19 §7 R1 标注的"本功能最致命的坑"。
+   必须重新捕获该屏再裁选区。
+2. **为什么 finish 走 `closeAllOverlays` 的回调**:该函数会等全部遮罩**真正析构**后
+   再跑回调。长图入库(PNG 编码 + 写库 + 写剪贴板)不该陪跑三块整屏底图的内存,
+   这是 docs/06 已确立的既有约定。
+3. **为什么会话 id 放会话层全局**:动作发生在遮罩的 lambda 里,而 id 必须跨帧存活。
+   会话结束(含空闲超时 / Esc 取消 / 完成)统一在 `closeAllOverlays` 里
+   `abortStitchSession()` —— 否则核心侧那张几百 MB 的结果图会一直挂在表里。
+
+### 验收(`--capture-toolbar-flow` 扩展)
+
+新增 5 条断言,实测 **failures = 0**:
+
+```
+PASS 点「长截图」后进入长截图态
+PASS 进入长截图态时**不**自动开始采集(等用户点开始)
+PASS 长截图面板完整落在窗口内(不会被裁到屏外)
+PASS 长截图态不绘制 8 向手柄(选区已锁定)
+PASS 长截图面板**真的画出来了**(非背景像素数 > 40)
+PASS 就绪态 Esc 退出长截图态(而非取消整次截图)
+PASS Esc 只退长截图态,遮罩与选区仍在
+```
+
+"面板真的画出来了"这条是补的:只断言几何落在窗口内,面板完全不画也能通过。
+现在数面板矩形内的非底色像素(实测 373),并另存 `stitch.png.panel.png` 小图供人工核对。
+
+`--stitch-flow` 复跑:**failures = 0**(S3 改动未破坏 S2 链路)。
+
+### 未做 / 待真机
+
+- **真实采集时序**(S4):现在点「开始」只发一次 `stitchFrameRequested`,还没有
+  "内容变化即采一帧"的定时器。滚动推进与去重节奏是 S4 的核心;
+- **滚动穿透**(R2):遮罩是全屏窗口,用户滚轮事件被它吞掉,页面**根本不会滚动**。
+  S4 必须解决(转发滚轮或 `SendInput`);
+- 浮条第 8 键与面板的**真机手感**(点击命中、面板遮挡、多屏 DPI)—— 本环境只能验几何与状态。
+
+
+
+

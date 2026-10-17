@@ -358,6 +358,116 @@ pub unsafe extern "C" fn nb_capture_crop(
     report(result)
 }
 
+/// 滚动长截图:**吸收一帧**(RGBA 直入,不走 base64)。
+///
+/// 为什么单独开原生导出而不是复用 nb_call("stitch_append"):
+/// 逐帧采集时每帧都是一整张选区图(1080p 选区 ~8MB)。走 JSON 门面要把像素
+/// base64 进字符串(再膨胀 1.33 倍)+ 在核心侧解回来,一次就是 **3 份**峰值拷贝。
+/// docs/06-memory-optimization.md 第 10 节已把"截图 base64 往返"列为待改项的
+/// 头一条 —— 长截图是高频路径,更没有理由重蹈。
+///
+/// 结果(位移/总高/结论)是**小 JSON**,出参走 out_result(宿主以 nb_free_string 释放)。
+///
+/// # Safety
+/// rgba 由宿主持有,本函数只读;session 必须是 NUL 结尾 UTF-8;
+/// out_result 为可写指针槽位。
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn nb_stitch_append(
+    session: *const c_char,
+    rgba: *const u8,
+    rgba_len: usize,
+    width: u32,
+    height: u32,
+    reset: i32,
+    out_result: *mut *mut c_char,
+) -> i32 {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if rgba.is_null() || rgba_len == 0 {
+            return Err(AppError::InvalidInput("长截图帧为空".into()));
+        }
+        let session = cstr_to_string(session)?;
+        let bytes = std::slice::from_raw_parts(rgba, rgba_len);
+        let settings = crate::core::Core::get()?.settings()?;
+        let out = crate::stitch::append_frame(
+            &session,
+            bytes.to_vec(),
+            width,
+            height,
+            reset != 0,
+            settings.stitch_max_height,
+            settings.stitch_overlap_ratio,
+        )?;
+        Ok(serde_json::to_value(out)?.to_string())
+    }))
+    .unwrap_or_else(|_| Err(AppError::Panicked("nb_stitch_append panic".into())));
+    report_out_text(result, out_result)
+}
+
+/// 滚动长截图:**结束并取回拼接结果**。
+///
+/// 产物是 PNG 字节(宿主拿去 ingest_capture_png 入库 / 写剪贴板),
+/// 走 out_png + nb_free_buffer。尺寸与缺口数在 out_meta(小 JSON 字符串)。
+/// 会话取完即弃(长截图是一次成型产物,docs/19 第 2.2 节 N5)。
+///
+/// # Safety
+/// 出参契约同上。
+#[no_mangle]
+pub unsafe extern "C" fn nb_stitch_finish(
+    session: *const c_char,
+    out_png: *mut *mut u8,
+    out_png_len: *mut usize,
+    out_meta: *mut *mut c_char,
+) -> i32 {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if out_png.is_null() || out_png_len.is_null() || out_meta.is_null() {
+            return Err(AppError::InvalidInput("出参指针为空".into()));
+        }
+        let session = cstr_to_string(session)?;
+        let finished = crate::stitch::finish_session(&session)?;
+        let meta = serde_json::json!({
+            "width": finished.width,
+            "height": finished.height,
+            "gaps": finished.gaps,
+        })
+        .to_string();
+
+        // PNG 字节按 Vec 布局移交宿主(nb_free_buffer 按 (len,1) 归还)
+        let mut png = finished.png;
+        let len = png.len();
+        if png.capacity() != len {
+            png.shrink_to_fit();
+        }
+        if len == 0 || png.capacity() != len {
+            return Err(AppError::Internal("长截图 PNG 缓冲整理失败".into()));
+        }
+        let ptr = png.as_mut_ptr();
+        std::mem::forget(png);
+        // SAFETY: 出参已校验非空,ptr 指向长度为 len 的 u8 缓冲
+        unsafe {
+            *out_png = ptr;
+            *out_png_len = len;
+        }
+        Ok(meta)
+    }))
+    .unwrap_or_else(|_| Err(AppError::Panicked("nb_stitch_finish panic".into())));
+    report_out_text(result, out_meta)
+}
+
+/// 滚动长截图:**丢弃会话**(取消/换选区/异常退出时释放缓冲)。幂等。
+///
+/// # Safety
+/// session 必须是 NUL 结尾 UTF-8。
+#[no_mangle]
+pub unsafe extern "C" fn nb_stitch_abort(session: *const c_char) -> i32 {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let session = cstr_to_string(session)?;
+        crate::stitch::abort_session(&session)
+    }))
+    .unwrap_or_else(|_| Err(AppError::Panicked("nb_stitch_abort panic".into())));
+    report(result)
+}
+
 // ---------- 内部工具 ----------
 
 /// PNG 字节 → (RGBA 像素, 宽, 高)。

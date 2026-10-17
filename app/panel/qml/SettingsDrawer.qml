@@ -378,6 +378,14 @@ AppDrawer {
         regionExitCombo.currentIndex = s.regionAutoConfirm === false ? 1 : 0
         rightClickCancelCheck.checked = s.regionRightClickCancel === true
         captureDelay.value = s.captureDelaySecs > 0 ? s.captureDelaySecs : 3
+        // 长截图(docs/19 §6):上限与重叠门槛都来自 core,兜底值必须与
+        // settings.rs 的默认一致(30000 / 3),否则"显示与行为分叉"。
+        const stitchH = (s.stitchMaxHeight === undefined || s.stitchMaxHeight === null)
+                        ? 30000 : s.stitchMaxHeight
+        stitchMaxHeight.value = stitchH
+        const stitchR = (s.stitchOverlapRatio === undefined || s.stitchOverlapRatio === null)
+                        ? 3 : s.stitchOverlapRatio
+        stitchOverlap.value = stitchR
         // 0 = 不自动取消,必须原样保留;缺失时按 core 默认 60 秒
         // ⚠️ 兜底值必须与 settings.rs / capture_session.cpp 一致(都取 60):
         //    这里原先写 600,get_settings 失败时显示"10 分钟"而实际行为是 60s ——
@@ -412,6 +420,7 @@ AppDrawer {
         hkCaptureTranslate.value = hk.captureTranslate || ""
         hkCaptureOcr.value = hk.captureOcr || ""
         hkCaptureDelayed.value = hk.captureDelayed || ""
+        hkCaptureScrolling.value = hk.captureScrolling || ""
 
         const index = providers.indexOf(s.translateProvider)
         providerCombo.currentIndex = index < 0 ? 0 : index
@@ -471,6 +480,8 @@ AppDrawer {
         s.regionAutoConfirm = regionExitCombo.currentIndex === 0
         s.regionRightClickCancel = rightClickCancelCheck.checked
         s.captureDelaySecs = captureDelay.value
+        s.stitchMaxHeight = stitchMaxHeight.value
+        s.stitchOverlapRatio = stitchOverlap.value
         s.overlayIdleSecs = overlayIdle.value * 60
         s.theme = ["system", "light", "dark"][themeCombo.currentIndex]
         s.softwareRender = softwareRenderCheck.checked
@@ -494,6 +505,7 @@ AppDrawer {
         hk.captureTranslate = hkCaptureTranslate.value
         hk.captureOcr = hkCaptureOcr.value
         hk.captureDelayed = hkCaptureDelayed.value
+        hk.captureScrolling = hkCaptureScrolling.value
         s.hotkeys = hk
 
         s.translateProvider = provider
@@ -766,6 +778,38 @@ AppDrawer {
                     from: 0; to: 60
                     editable: true
                     onValueModified: root.scheduleSave()
+                }
+
+                // ---- 滚动长截图(docs/19 §6)----
+                //
+                // 上限要与「单张图片上限」配合看:入库按编码后的 PNG 体积卡
+                // maxImageMb,超了只写剪贴板、不入库(R3 会在入库超限时再提示一次)。
+                // 这里做**软提示**而不是硬拦 —— 生成时的体积取决于内容重复度,
+                // 事先算不准,拦死会误伤。
+                Label { text: "长截图高度上限(px)"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
+                ReadableSpinBox {
+                    id: stitchMaxHeight
+                    Layout.fillWidth: true
+                    from: 2000; to: 100000; stepSize: 1000
+                    editable: true
+                    onValueModified: root.scheduleSave()
+                }
+                HintLabel {
+                    text: "超过此高度会停止采集并提示分段。长图还需满足上面的「单张图片上限」:"
+                          + "太高时可能存不进历史(此时仍会进剪贴板)。"
+                }
+
+                Label { text: "长截图重叠判定门槛(%)"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
+                ReadableSpinBox {
+                    id: stitchOverlap
+                    Layout.fillWidth: true
+                    from: 1; to: 20
+                    editable: true
+                    onValueModified: root.scheduleSave()
+                }
+                HintLabel {
+                    text: "门槛越低,越容易把重复图案(表格线/纯色块)误认为已重叠 —— 长图会缺行;"
+                          + "越高则要求每次滚动幅度更小。默认 3。"
                 }
 
                 Label { text: "主题"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
@@ -1206,6 +1250,17 @@ AppDrawer {
                 FieldLabel { text: "延时截图" }
                 HotkeyField {
                     id: hkCaptureDelayed
+                    Layout.fillWidth: true
+                    onValueModified: {
+                        root.hotkeysDirty = true
+                        root.scheduleSave()
+                    }
+                }
+                // 长截图是**独立入口**:直通模式(框选后→直接入库)下浮条不出现,
+                // 没有热键就完全够不到这个功能,故默认预置 Ctrl+Shift+L(docs/19 §9 Q3)。
+                FieldLabel { text: "滚动长截图" }
+                HotkeyField {
+                    id: hkCaptureScrolling
                     Layout.fillWidth: true
                     onValueModified: {
                         root.hotkeysDirty = true

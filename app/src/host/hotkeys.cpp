@@ -121,6 +121,16 @@ Hotkeys::Hotkeys(PanelWindow& panel, CoreBridge& core, QObject* parent)
                                                               QStringLiteral("entry"));
                 });
                 break;
+            case Action::CaptureScrolling:
+                // 滚动长截图(docs/19):收起面板 → **长截图专用框选**。
+                //
+                // 用 CaptureIntent::Scrolling 而不是 Region:后者框完就按
+                // regionAutoConfirm 决定去向(默认直接入库),用户还得再点一次
+                // 浮条的「长截图」—— 而设了"松手即入库"的用户根本到不了那一步
+                // (浮条不出现)。专用意图让"框完即进长截图就绪态"成为唯一出口,
+                // 与那个设置项彻底解耦。
+                hidePanelThenCapture(m_panel, nb::CaptureIntent::Scrolling);
+                break;
             default:
                 qInfo() << "hotkey action" << static_cast<int>(m_registered.value(id));
                 break;
@@ -151,6 +161,7 @@ void Hotkeys::applyFromSettings() {
         {Action::CaptureTranslate, "captureTranslate"},
         {Action::CaptureDelayed, "captureDelayed"},
         {Action::CaptureOcr, "captureOcr"},
+        {Action::CaptureScrolling, "captureScrolling"},
     };
     for (auto it = names.constBegin(); it != names.constEnd(); ++it) {
         const QString combo = hotkeys.value(it.value()).toString();

@@ -107,6 +107,11 @@ S0 ──→ S1 ──→ S2 ──→ S3 ──→ S4 ──→ S5 ──→ S6
 
 ## 第一版明确不做(进入 backlog)
 
-富文本/HTML 条目、滚动长截图、GIF 录制、贴图布局持久化、应用黑名单、SQLCipher、
+富文本/HTML 条目、GIF 录制、贴图布局持久化、应用黑名单、SQLCipher、
 多显示器拼接截图、流式翻译输出、云同步。与第一代 design.md §2.2 backlog 一脉相承,
 v1 不扩。
+
+> **例外(2026-10-17)**:「滚动长截图」已从 backlog **提为 v2 首个功能项**,
+> 设计与分阶段规划见 [19-scrolling-capture-plan.md](./19-scrolling-capture-plan.md)。
+> 提出理由:该功能的三个传统难点(逐帧采集、可停留的遮罩、三套坐标换算)在本项目
+> 已全部就位,实施面收敛在 `OverlayWidget` 加一个状态 + nbcore 加一个纯函数模块。
