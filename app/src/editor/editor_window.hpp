@@ -49,7 +49,8 @@ signals:
     /// 「取消」或 Esc。
     void cancelled();
     /// 「贴图」:把合成图贴成置顶窗口(宿主负责 showPinWindow)。
-    /// 贴图/OCR 都会结束本次编辑(决策:操作后工具栏关闭)。
+    /// ⚠️ 贴图会结束本次编辑(决策:操作后工具栏关闭);OCR **不会** ——
+    ///    识别结果面板驻留,由用户自己「关闭」或直接关编辑器。
     void pinRequested(const QImage& composed);
     /// 「OCR 取字」完成:text 为识别文本;失败时为空串(reason 给原因)。
     void ocrFinished(const QString& text, const QString& reason);
@@ -82,8 +83,6 @@ private:
     void pinToScreen();
     void ocrTakeText();
     void showOcrResult(const QString& text, const QString& reason);
-    /// 把 OCR 文本落成画布上的文字标注(落点取当前可见区域中心)。
-    void insertOcrAsText(const QString& text);
     /// 画布的光标形状与"穿透态"和当前状态对齐(当前工具 / 是否文字编辑中)。
     /// **单一入口**:任何会改变这两者的地方都调它 —— 否则两处状态各走各的
     /// (此前 passthrough 只置 true 不复位,文字确认后画布再也画不上东西)。

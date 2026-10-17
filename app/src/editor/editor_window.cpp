@@ -580,8 +580,13 @@ void EditorWindow::showOcrResult(const QString& text, const QString& reason) {
     // 原实现两点不好用:①文本只"展示",用户看完就没了(虽然已进剪贴板却看不出);
     // ②面板是编辑器子窗口,而识别完成后 singleShot(0) 立刻 close → 面板一帧都
     // 看不到(表现为"点了取字,啥也没发生")。
-    // 现改为:面板**驻留**并给出两个去处 ——「插入为标注文字」(把识别结果直接落到
-    // 画布,这是标注场景真正想要的动作)与「关闭」(文本已在剪贴板,可 Ctrl+V)。
+    // 现改为:面板**驻留**,明确提示"已复制,可 Ctrl+V",文本可鼠标选取(便于只取片段)。
+    //
+    // ⚠️ 2026-10-17 移除「插入为标注文字」(曾把 OCR 文本直接落成画布文字标注),两条理由:
+    //    ①场景受限 —— 取字链路本就以"把文本带走"为主,"留在本图"属小众需求;
+    //    ②文字布局难处理 —— 只能落在可见区中心(引擎只回纯文本、没有逐行框),
+    //      字号/颜色/行距都与原图无关,多行必然压字或溢出,"看着不对"比不打这句还差。
+    //    故 OCR 文本的去处收敛为**剪贴板**一条(要留在图上就自己用文字工具输入)。
     if (m_ocrPopup) { m_ocrPopup->deleteLater(); m_ocrPopup = nullptr; }
 
     // "识别中…" 仍用轻量提示(此时没有可操作的文本)
@@ -609,9 +614,7 @@ void EditorWindow::showOcrResult(const QString& text, const QString& reason) {
         "QLabel#ocrStatus{color:#8FA0B4;font-size:12px;} "
         "QPushButton{background:#33363F;color:#DFE1E8;border:none;border-radius:5px;"
         "padding:6px 12px;font-size:13px;} "
-        "QPushButton:hover{background:#3E424D;} "
-        "QPushButton#ocrPrimary{background:#1C7ED6;color:#FFFFFF;} "
-        "QPushButton#ocrPrimary:hover{background:#2A8FE8;}"));
+        "QPushButton:hover{background:#3E424D;}"));
 
     auto* layout = new QVBoxLayout(panel);
     layout->setContentsMargins(12, 10, 12, 10);
@@ -636,18 +639,8 @@ void EditorWindow::showOcrResult(const QString& text, const QString& reason) {
 
     auto* buttons = new QHBoxLayout();
     buttons->addStretch(1);
-    if (!text.isEmpty()) {
-        // 「插入为标注文字」:OCR 在标注场景里最常用的去向 —— 把识别结果直接
-        // 落成画布上的文字标注(落点取画布中心),省掉"复制→切工具→手打"。
-        auto* insert = new QPushButton(QStringLiteral("插入为标注文字"), panel);
-        insert->setObjectName("ocrPrimary");
-        insert->setCursor(Qt::PointingHandCursor);
-        connect(insert, &QPushButton::clicked, this, [this, text] {
-            insertOcrAsText(text);
-            if (m_ocrPopup) { m_ocrPopup->hide(); }
-        });
-        buttons->addWidget(insert);
-    }
+    // 只剩「关闭」一个动作:文本已进剪贴板,面板的职责是"让用户看见识别到了什么"
+    // 并能选取片段 Ctrl+C,不再提供落画布的入口(见上方 2026-10-17 说明)。
     auto* closeBtn = new QPushButton(
         text.isEmpty() ? QStringLiteral("关闭") : QStringLiteral("关闭(已在剪贴板)"), panel);
     closeBtn->setCursor(Qt::PointingHandCursor);
@@ -663,29 +656,10 @@ void EditorWindow::showOcrResult(const QString& text, const QString& reason) {
     panel->show();
     m_ocrPopup = panel;
 
-    // ⚠️ 不再自动关编辑器:面板要留给用户操作(插入/阅读)。
-    //    关闭由用户点按钮(或直接关编辑器)完成 —— 原先 singleShot 关窗会把
-    //    面板连同结果一起销毁。
+    // ⚠️ 不再自动关编辑器:面板要留给用户阅读/选取片段。
+    //    关闭由用户点按钮(或直接关编辑器)完成 —— 原先识别完就 singleShot 关窗,
+    //    会把面板连同结果一起销毁(表现为"点了取字,啥也没发生")。
     emit ocrFinished(text, reason);
-}
-
-void EditorWindow::insertOcrAsText(const QString& text) {
-    if (!m_engine || text.isEmpty()) return;
-    // 落点取**画布可见区域中心**(用户此刻正看着的地方),而不是场景原点 ——
-    // 否则图被缩放/平移到别处时,文字会落在看不见的角落。
-    const QPointF center = m_view ? m_view->mapToScene(m_view->viewport()->rect().center())
-                                  : QPointF(0, 0);
-    // 多行文本:逐行落,行高按当前字号估算(引擎里文字图元不支持换行编辑,
-    // 但落成多个单行图元视觉上等价,且每行仍可单独撤销)。
-    const QStringList lines = text.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
-    const int fontPx = m_engine->fontSize();
-    qreal y = center.y();
-    for (const QString& line : lines) {
-        m_engine->addText(line, QPointF(center.x(), y), m_engine->color(), fontPx);
-        y += fontPx * 1.35;   // 行距 1.35 倍字号
-    }
-    // 落完即刷新画布(文字是烘焙图元,不经过画笔路径)
-    if (m_view && m_view->viewport()) m_view->viewport()->update();
 }
 
 void EditorWindow::keyPressEvent(QKeyEvent* e) {
