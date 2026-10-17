@@ -114,7 +114,7 @@
 
 | 项 | 现状 | 备注 |
 | --- | --- | --- |
-| 开机自启 | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 值 `Nextboard` = 带引号的 exe 路径(`auto_start.cpp`) | 应用内设置开关;**未传 `--hidden`**,开机启动会弹出面板(`main.cpp:145-146`) |
+| 开机自启 | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 值 `Nextboard` = `"<exe 路径>" --hidden`(`auto_start.cpp` `commandLine()`) | 应用内设置开关与安装器(`installer.nsi` SecAutoStart)**写同一形态**(D11,2026-10-17 统一);开机静默驻留托盘、不弹面板 |
 | 单实例 | 命名互斥量 `NextboardSingleInstance`(`main.cpp:88`) | 第二实例激活既有窗口后退出 |
 
 ---
@@ -288,7 +288,8 @@ powershell -ExecutionPolicy Bypass -File tools\package.ps1 -SkipInstaller   # �
 
 > **2026-10-10 会话内实测**:第 **1、2、8** 项通过(启动无错误日志;数据落于安装目录
 > `data\`;默认卸载后仅剩 `data\` 且用户数据完好),第 **3** 项的热键注册为 6/6。
-> 第 **4**(截图闭环)、**5**(关于页版本)、**6**(只读位置防御)、**7**(自启重启后不弹面板)、
+> 第 **4**(截图闭环)、**5**(关于页版本)、**6**(只读位置防御)、**7**(自启重启后不弹面板 ——
+> 注册表**形态**已由 `--autostart-flow` 覆盖,重启观感仍须真机)、
 > **9**(勾选删数据的交互路径)、**10**(重装)仍须真机确认 —— 明细见 §10.1。
 
 ---
@@ -364,7 +365,7 @@ powershell -ExecutionPolicy Bypass -File tools\package.ps1 -SkipInstaller   # �
 | D9 | 更新机制范围 | v1 仅"检查更新+打开下载页"(§7.3) | **是(已落地 2026-10-15)** | 与路线图 6.4 一致;实现与实测见 [07-auto-update.md](./07-auto-update.md) |
 | D12 | 更新检查的实现落点 | a) 宿主 `QNetworkAccessManager`(本文原 §7.3 写法);b) nbcore 新增 `check_update`,复用 `translate::http` | **b(已落地,2026-10-15 改判)** | 选 a 要在 C++ 重写一遍 system/manual/SOCKS5 的代理翻译与接线才能与翻译链路行为一致,而本仓无 C++ 测试设施;版本比较与响应解析放 Rust 才能表驱动单测 |
 | D10 | 下一发布版号 | 0.2.1 / 0.3.0 / 1.0.0-rc | 待用户定 | 影响 tag、安装器显示、更新比较基准 |
-| D11 | 自启是否带 `--hidden` | 安装器写 Run 时带 / 不带 | **带(已落地)** | 修开机弹面板(§2.6);应用内自启开关(auto_start.cpp)是否同步改,请一并裁定 |
+| D11 | 自启是否带 `--hidden` | 安装器写 Run 时带 / 不带 | **带,且两处统一(已落地 2026-10-17)** | 修开机弹面板(§2.6)。应用内开关同步改:`auto_start.cpp` 的 `commandLine()` 固定追加 `--hidden`;老版本(≤0.2.0)留下的无 `--hidden` 值由启动时 `refreshCommandLineIfStale()` 就地升级(用户不必关了再开)。验收 `--autostart-flow` |
 
 ---
 

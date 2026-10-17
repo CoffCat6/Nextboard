@@ -71,6 +71,43 @@ void reportTodoGroups(PanelWindow& panel);
 /// 纯本机几何与渲染断言,不写库、不联网,无需 --data-dir。
 void runCaptureToolbarFlow();
 
+/// 自启注册表自检(--autostart-flow):**真实读写** HKCU 的 Run 键,验证
+/// "应用内开自启写的命令行与安装器同一形态(带 --hidden)"。
+/// 步骤:保存原值 → 写启(读回断言含 --hidden 且以 exe 路径开头)→
+///       伪造一条旧形态值(无 --hidden)→ 调 refreshCommandLineIfStale() 断言被改写
+///       → 写停(断言值消失)→ 还原原值。
+/// 日志前缀 AUTOSTART STEP*。⚠️ 会**临时改写用户的 Run 键**,结束前必定还原;
+/// 它不碰剪贴板数据库,但为了"不干扰真实实例",仍要求配 --data-dir
+/// (main.cpp 的门禁统一处理)。
+void runAutoStartFlow();
+
+/// 长截图设置与热键的**往返**验收(--stitch-settings-flow)。
+///
+/// 只验"能否存进去、能否读回来、非法值是否被拒",不验 QML 控件像素。
+/// 值得单开一条:设置字段的典型故障是"QML 写了但 core 不认"(名字拼错/大小写不符),
+/// 表现是**用户改了不生效且没有任何提示** —— save_settings 走字段级合并,拼错的
+/// 名字会被静默忽略。
+void runStitchSettingsFlow();
+
+/// 滚动长截图验收(--stitch-flow):用**构造的帧序列**跑通 append → finish → abort,
+/// 断言位移/总高/缺口/会话隔离/幂等/宽度变化。
+///
+/// 为什么不用真屏:这些断言只与像素内容有关,真屏采集要真的滚窗口、等渲染,
+/// 不可重复也不可并行,失败时还分不清是算法错还是采集错。真机采集链路由
+/// docs/19 §8 A4 的真机验收覆盖,不在这里假装。
+///
+/// 纯内存图像运算:不写库、不联网、不碰注册表,无需 --data-dir。
+void runStitchFlow();
+
+/// 长截图**真实采集**验收(--stitch-live-flow):真的造一个会滚的窗口,
+/// 真的走「框选 → 开始 → 挖洞 → 采帧 → 滚动 → 结束」全链路。
+///
+/// 与 `--stitch-flow`(构造帧验算法)、`--capture-toolbar-flow`(验状态机与窗口
+/// 区域)互补 —— 那两条都**没有验证真正的采集链路**。这条链路断了的表现是
+/// "每帧都一样 → 核心判 duplicate → 长图只有一屏高",而日志里全是 ok,
+/// 完全看不出错在哪。故必须有这一条。
+void runStitchLiveFlow();
+
 /// 多屏配对自检:并排打印 Qt 侧(`QScreen::name()/geometry/DPR`)与核心侧
 /// (`list_monitors` 的 name/几何)的显示器清单,并逐屏核对**名字能否配上**、
 /// 配上后取到的底图尺寸是否与该屏几何自洽。用于验证/回归"多屏位置与分辨率

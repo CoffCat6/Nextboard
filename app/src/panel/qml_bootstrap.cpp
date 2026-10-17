@@ -181,6 +181,14 @@ void qmlAttachPanel(PanelWindow* panel) {    if (!panel) return;
     auto* lifecycle = new PanelListLifecycle(panel, s_entries);
     panel->installEventFilter(lifecycle);
     QObject::connect(panel, &PanelWindow::modeChanged, panel, [lifecycle] { lifecycle->sync(); });
+    // 初始步对齐:**起飞态即离线**。
+    // 过滤器只认自己看到的 Show/Hide,而 `--hidden` 开机自启压根不会 Show
+    // (panel_window.cpp 的 prepareHiddenStart),于是 `m_visible` 保持初值 false
+    // 却从不触发 sync() —— 模型既没冻结也没释放,隐藏期间的剪贴板通知会照常
+    // 触发 reload,把整页行与纹理装进内存。开机后长时间无人呼出,这份驻留
+    // 就白占了(与 S6.1 的收口目标相反)。
+    // 这里补一次,让"从未显示过"与"显示后又隐藏"落在同一状态。
+    lifecycle->sync();
     // 待办到点 → 列表与角标立即重拉(docs/05-todo.md §4.3)。
     // ⚠️ 走 refreshNow 绕开 200ms 去抖:提醒到点后角标/列表晚半秒,
     //    用户会读成"提示了但列表里没有"。

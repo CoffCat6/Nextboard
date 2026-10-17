@@ -42,6 +42,7 @@ static void fileMessageHandler(QtMsgType type, const QMessageLogContext& ctx, co
 #include "host/tray.hpp"
 #include "host/hotkeys.hpp"
 #include "host/acceptance.hpp"
+#include "host/auto_start.hpp"
 #include "panel/core_facade.hpp"
 #include "panel/panel_window.hpp"
 #include "panel/qml_bootstrap.hpp"
@@ -122,7 +123,8 @@ int main(int argc, char* argv[]) {
                 || arg == QLatin1String("--clear-all-flow")
                 || arg == QLatin1String("--update-flow")
                 || arg == QLatin1String("--dump-monitors")
-                || arg == QLatin1String("--capture-toolbar-flow")) {
+                || arg == QLatin1String("--capture-toolbar-flow")
+                || arg == QLatin1String("--autostart-flow")) {
                 const QString dir = QDir(QCoreApplication::applicationDirPath())
                                         .filePath(QStringLiteral("acceptance-data"));
                 const bool created = QDir().mkpath(dir);
@@ -161,6 +163,13 @@ int main(int argc, char* argv[]) {
     qInfo() << "Nextboard starting, appDir =" << QCoreApplication::applicationDirPath();
     if (dataDirReady) qInfo() << "data dir =" << nb::appDataDir();
     else qWarning() << "数据目录创建失败(安装目录需可写):" << nb::appDataDir();
+    // 开机自启的命令行形态升级:0.2.0 及更早的应用内开关只写 `"<exe>"`,不带
+    // --hidden,于是"设置里开了自启 → 每次开机主面板抢焦点弹出"。已启用但命令行
+    // 是旧形态时就地改写(用户不必去设置页关了再开)。安装器自己的 SecAutoStart
+    // 从一开始就带 --hidden,这里补齐应用内开关这条路径 —— docs/04 §8 D11。
+    if (nb::auto_start::refreshCommandLineIfStale())
+        qInfo() << "auto_start: 自启命令行已升级为带 --hidden(开机静默驻留托盘)";
+
     // 启动分段读数:基线高时据此定位是"Qt 运行时 / nbcore / QML 装配 / 面板 QML 树"
     // 哪一段吃掉的,而不是靠猜。
     nb::logMemory("app-init");   // Qt 运行时 + 平台插件,尚未加载任何 QML
@@ -206,8 +215,12 @@ int main(int argc, char* argv[]) {
     nb::PanelWindow panel(core);
     nb::logMemory("panel-built");  // + 主面板 QQuickWidget 与整棵 QML 树(含列表)
     nb::qmlAttachPanel(&panel);
-    panel.showAtCursor();
-    if (startHidden) panel.hide();
+    if (startHidden) {
+        // 开机自启(--hidden):**不上屏**,而不是"显示后立刻隐藏"(后者会闪一帧)。
+        panel.prepareHiddenStart();
+    } else {
+        panel.showAtCursor();
+    }
     // 内存基线:此后每个关键事件都有一条读数,便于做前后对比(S6.5 验收)
     nb::logMemory("startup");
 
@@ -240,6 +253,7 @@ int main(int argc, char* argv[]) {
     bool todoGroups = false;
     bool dumpMonitors = false;
     bool captureToolbarFlow = false;
+    bool autoStartFlow = false;
     for (int i = 1; i < argc; ++i) {
         const QString arg = QString::fromLocal8Bit(argv[i]);
         if (arg == QLatin1String("--screenshot") && i + 1 < argc)
@@ -282,6 +296,10 @@ int main(int argc, char* argv[]) {
         // (见 host/capture_toolbar_flow.cpp)。不写库,故不进 --data-dir 门禁。
         else if (arg == QLatin1String("--capture-toolbar-flow"))
             captureToolbarFlow = true;
+        // 自启形态验收:真实读写 Run 键,断言应用内开关写的命令行带 --hidden
+        // (与安装器同形态)。会临时改写用户的 Run 键,结束前必定还原。
+        else if (arg == QLatin1String("--autostart-flow"))
+            autoStartFlow = true;
     }
     // 待办交互验收(--todo-flow):真实点击驱动整条链路,逻辑见 host/acceptance.cpp
     if (todoFlow) nb::runTodoAcceptanceFlow(panel);
@@ -298,6 +316,7 @@ int main(int argc, char* argv[]) {
     if (todoGroups) nb::reportTodoGroups(panel);
     if (dumpMonitors) nb::reportMonitors();
     if (captureToolbarFlow) nb::runCaptureToolbarFlow();
+    if (autoStartFlow) nb::runAutoStartFlow();
     if (!shotPath.isEmpty()) {
         QTimer::singleShot(5000, &panel, [path = shotPath, queryText, openSettings,
                                           translateText, &panel] {

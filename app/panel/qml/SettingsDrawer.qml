@@ -827,7 +827,10 @@ AppDrawer {
                 }
                 ReadableCheckBox {
                     id: autoStartCheck
-                    text: "开机自启(写入当前用户注册表 Run 键)"
+                    text: "开机自启(静默驻留托盘,不弹面板)"
+                    // 勾选态 = 注册表 Run 键实际存在(不是本地布尔)。
+                    // 命令行形态固定为 `"<exe>" --hidden`,与安装器同一写法;
+                    // 老版本留下的无 --hidden 值由启动时的 refreshCommandLineIfStale() 就地升级。
                     checked: Core.autoStartEnabled()
                     onClicked: {
                         // 注册表操作立即生效并回读实际结果,失败时还原勾选态并提示原因

@@ -1,11 +1,13 @@
 #include "host/acceptance.hpp"
 
+#include "host/auto_start.hpp"
 #include "host/core_bridge.hpp"
 #include "panel/core_facade.hpp"
 #include "panel/panel_window.hpp"
 
 #include <QApplication>
 #include <QClipboard>
+#include <QCoreApplication>
 #include <QDate>
 #include <QDateTime>
 #include <QDebug>
@@ -798,4 +800,73 @@ void reportMonitors() {    // 多屏配对自检:把两端清单并排打出来,
     QApplication::quit();
 }
 
+void runAutoStartFlow() {
+    // 自启注册表自检:核心断言是"应用内开关写的命令行带 --hidden",与安装器
+    // (tools/installer.nsi SecAutoStart)同形态。这条缺陷在真机上的唯一可观测后果
+    // 发生在**下次开机**,人工回归一次就要重启一次,而它全是注册表读写 ——
+    // 完全可以进程内断言,故做成验收入口。
+    //
+    // ⚠️ 本流程**真实改写** HKCU\Software\Microsoft\Windows\CurrentVersion\Run
+    //    的 Nextboard 值:开头快照原值,每个分支（含所有失败路径）必定还原。
+    const QString original = auto_start::debugRegisteredCommandLine();
+    qInfo() << "AUTOSTART STEP0 original:" << original;
+
+    auto restore = [original] {
+        if (original.isEmpty()) {
+            auto_start::setEnabled(false);            // 原本没开自启 → 删掉试写值
+        } else {
+            auto_start::debugWriteRawCommandLine(original);   // 原样写回
+        }
+        qInfo() << "AUTOSTART STEP5 restored:" << auto_start::debugRegisteredCommandLine();
+    };
+
+    // ① 启用:断言写入的命令行 == 期望形态(`"<exe>" --hidden`)
+    const bool enabledOk = auto_start::setEnabled(true);
+    const QString written = auto_start::debugRegisteredCommandLine();
+    const QString expected = auto_start::debugExpectedCommandLine();
+    qInfo() << "AUTOSTART STEP1 enabled:" << enabledOk << "value:" << written;
+    qInfo() << "AUTOSTART STEP1 expect:" << expected << "match:" << (written == expected);
+    if (!enabledOk || written != expected) {
+        qWarning() << "AUTOSTART STEP1 ⚠️ 应用内自启与安装器形态不一致(应为 <exe> --hidden)";
+        restore();
+        QApplication::quit();
+        return;
+    }
+
+    // ② 旧形态 → 自动升级:伪造 0.2.0 及更早的写法(只有 exe,无 --hidden)。
+    //    ⚠️ 必须指向**本 exe**:refreshCommandLineIfStale() 只升级指向本进程的项
+    //    (否则跑一次 dev 构建就会把用户正式版的自启改到 build 目录)。
+    const QString stale = QStringLiteral("\"%1\"")
+        .arg(QDir::toNativeSeparators(QCoreApplication::applicationFilePath()));
+    auto_start::debugWriteRawCommandLine(stale);
+    qInfo() << "AUTOSTART STEP2 stale:" << auto_start::debugRegisteredCommandLine();
+    const bool upgraded = auto_start::refreshCommandLineIfStale();
+    const QString after = auto_start::debugRegisteredCommandLine();
+    qInfo() << "AUTOSTART STEP2 upgraded:" << upgraded << "now:" << after;
+    if (!(upgraded && after == expected)) {
+        qWarning() << "AUTOSTART STEP2 ⚠️ 旧形态未被升级(这些用户开机仍会弹面板)";
+        restore();
+        QApplication::quit();
+        return;
+    }
+
+    // ③ 幂等:已是新形态时再跑一次不应改写(返回 false)
+    const bool again = auto_start::refreshCommandLineIfStale();
+    qInfo() << "AUTOSTART STEP3 idempotent(expect false):" << again;
+    if (again) qWarning() << "AUTOSTART STEP3 ⚠️ 非幂等:已是最新形态却又改写了一次";
+
+    // ④ 停用:值应消失
+    const bool disabledOk = auto_start::setEnabled(false);
+    qInfo() << "AUTOSTART STEP4 disabled:" << disabledOk
+            << "enabled():" << auto_start::enabled()
+            << "value:" << auto_start::debugRegisteredCommandLine();
+    if (!disabledOk || auto_start::enabled())
+        qWarning() << "AUTOSTART STEP4 ⚠️ 停用后值仍存在";
+
+    restore();
+    qInfo() << "AUTOSTART DONE";
+    QApplication::quit();
+}
+
 } // namespace nb
+

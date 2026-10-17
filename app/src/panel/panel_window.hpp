@@ -44,6 +44,16 @@ public:
     /// 会把面板顶到屏幕边缘;居中更符合"从托盘打开一个窗口"的预期。
     void showCentered();
 
+    /// 开机自启(`--hidden`)的**静默启动**:只创建原生窗口,不显示。
+    ///
+    /// 不能写成 `showAtCursor(); hide();` —— 两者之间已有一帧上屏,开机瞬间会闪一下
+    /// 面板,用户开机后第一眼就被干扰。这里只调 `winId()` 建**隐藏**窗口:
+    /// `core.setNotifyHwnd()` 需要有效句柄投递剪贴板通知,而该调用不上屏。
+    ///
+    /// 副作用是「从未 Show 过」→ 列表模型保持未装载;首次热键呼出时由
+    /// `ClipEntryModel::acquire()` 的 `!m_loadedOnce` 分支补一次装载(docs/06 §11.3)。
+    void prepareHiddenStart();
+
     /// 切到翻译页并显示窗口 —— 三条打开链路(面板按钮/条目右键/热键)的统一入口。
     /// text 非空时预填原文并自动翻译。
     /// orientation 决定首次显示时的摆放:热键链路传 AtCursor,托盘等传 ScreenCenter。

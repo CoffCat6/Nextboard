@@ -99,6 +99,16 @@ void PanelWindow::applyModeSize(Mode mode) {
     move(topLeft);
 }
 
+void PanelWindow::prepareHiddenStart() {
+    // 触发原生窗口创建(HWND),但**不 show**:`winId()` 建的是**隐藏**窗口,不上屏。
+    // 句柄本身是 main.cpp 稍后 `core.setNotifyHwnd(panel.nativeHandle())` 必需的
+    // (那边也会调 winId() —— 提到这里只是让"静默启动"这一意图有明确落点与日志)。
+    // 形态无需归位:构造时 m_mode 已是 List,用户下次按热键走的 showAtCursor()
+    // 本身就会 setMode(List)。
+    (void)nativeHandle();
+    qInfo() << "panel: 静默启动(--hidden),不上屏";
+}
+
 void PanelWindow::showTranslate(const QString& text, Orientation orientation) {
     const bool wasHidden = !isVisible();
     setMode(Mode::Translate);   // 尺寸/停留策略随形态切换
