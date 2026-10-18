@@ -4281,6 +4281,95 @@ PASS Esc 只退长截图态,遮罩与选区仍在
   S4 必须解决(转发滚轮或 `SendInput`);
 - 浮条第 8 键与面板的**真机手感**(点击命中、面板遮挡、多屏 DPI)—— 本环境只能验几何与状态。
 
+## 2026-10-18(日) 截图入库改 RGBA 直传 + 列表键盘导航 + 复制后自动粘贴 + 遮罩首帧守卫
+
+### 改了什么(四件事,按依赖顺序)
+
+#### 1. 截图入库:base64 往返 → RGBA 直传(docs/06 §5.7)
+
+原链路(宿主 → 核心):`QImage → PNG 编码 → base64(1.33×,QString 还是 UTF-16 = 2.66× 字节)
+→ JSON → 核心 base64 解码 → PNG 解码 → to_rgba8 → Vec`,一张 1500×950 截图实测
+WS 峰值 299.8MB(基线 152MB)。
+
+新增两个**原生导出**(与 `nb_ocr_rgba` / `nb_stitch_append` 同一套「裸对象、无 ok/data 信封」约定):
+
+```rust
+nb_ingest_capture_rgba(rgba, len, w, h, source, out_result)  // 出参 {"entry": …|null}
+nb_copy_rgba_to_clipboard(rgba, len, w, h)                  // 同一块像素写 CF_DIBV5
+```
+
+- 宿主侧 `CoreBridge::ingestCaptureRgba` / `copyRgbaToClipboard` 包装,`hasRgbaIngest()`
+  探测导出是否存在 —— **旧 nbcore.dll 自动回退**原 PNG 通道,不会因新宿主配旧 DLL 就崩;
+- `ingestImageAndCopy` 的"已入库 → 写剪贴板"一步也改了:原先 `copy_entry(id)` 要**读 blob PNG
+  → 解码 → to_rgba8 → DIB**,现在直接用手上这块内存像素;
+- 超大小上限的"未入库仅写剪贴板"分支同样不再 PNG 编码 + base64。
+
+净效果:入库链路整帧拷贝 **>5 份 → 1 份**(宿主切片 → 核心 `Vec`,入库要所有权);
+PNG 编解码与 base64 全部消失。
+
+契约回归(`ffi::contract_tests`)新增两条:裸对象无信封、超限用 `null` 表达 ——
+后者是宿主区分"失败"与"成功但被上限挡下"的唯一依据。
+
+#### 2. 列表键盘导航(N1,原本完全没有)
+
+`Main.qml` 加 `kbIndex` 光标:↑↓ 选行 / PgUp·PgDn 走 5 行 / Home·End 首末 / Enter 复制并收起。
+搜索框里按 ↓ 直接进列表(Win+V 习惯);浮层(菜单/筛选/标签卡/待办卡/抽屉)打开时**不接管**
+方向键 —— 那些浮层有自己的焦点语义。
+
+两个写法上的坑:
+- `kbListActive` 一开始写成 `readonly property`,而这些卡片都在根对象**之后**创建,
+  根属性绑定在构造期就求值 → 取到 null → 静默恒 false。改成**函数** `listKeysUsable()`,
+  按键时才求值。
+- 光标是**行号**,模型刷新后必然失效 → `onCountChanged` 里夹回有效范围;面板收起时复位 -1。
+
+卡片高亮复用「当前操作对象」的强调语言(与右键菜单打开态同一视觉),不新增色板。
+状态栏补 `↑↓ / Enter 选中并复制` 提示 —— 否则用户不会想到能用键盘选条。
+
+#### 3. 复制后自动粘贴(N2),设置项 `copyAutoPaste` **默认关闭**
+
+新增 `app/src/host/auto_paste.{hpp,cpp}`:`SendInput` 投 **扫描码**版 Ctrl+V
+(虚拟键码路径要由系统反查键盘布局,反查失败就静默丢键;按下/抬起分四个事件投,避免部分
+应用只看到"按下"而 Ctrl 卡住)。
+
+默认关闭是刻意的:这是**改变既有行为**的功能,且前台窗口若是管理员权限(UIPI),
+低权限进程的 `SendInput` 会被静默丢弃 —— 用户应显式选择。设置页文案点明了这一点。
+
+调用点收敛成一个 `Core.autoPasteIfEnabled()`(C++ 现读设置),QML 侧**无条件调**;
+覆盖卡片单击、右键「复制」、复制路径、Ctrl+1..9、键盘 Enter 五条复制路径。
+
+保护:投键前查一次前台进程 pid,若仍**是本进程窗口**(用户手快又按了热键)就跳过 ——
+否则会粘到面板自己的搜索框里。
+
+#### 4. 遮罩首帧 `QPainter` 守卫(N4)
+
+`OverlayWidget::paintEvent` 与倒计时遮罩加 `if (!painter.isActive()) return;`。
+docs/06 §10 记录的 `Paint device returned engine == 0` / `Painter not active` 刷屏即
+"窗口/后备缓冲尚未就绪就开始画";丢掉这一帧由 Qt 重发即可,冻结底图不受影响。
+
+### 验证
+
+- `cargo test -p nbcore`:**335 passed / 1 failed / 5 ignored**。唯一失败是
+  `translate::http::tests::send_dispatches_socks5_through_ureq`(os error 11001 域名解析),
+  **改动前就红**(已用 `git stash` 在干净树上复现),与本次无关;
+- `cargo build --release`:通过;`moc` 能正确解析新增的 `Q_INVOKABLE autoPasteIfEnabled`;
+- 四个改动过的 C++ 文件逐一 `cl /Zs` 语法检查:**全部 EXITCODE=0**;
+- `qmllint` 三个改动 QML 文件:**无 syntax error**(其余是既有的"Theme.colors 未解析"类噪音)。
+
+### 未完成 / 环境限制
+
+- **app 未能整体重建**:`app/build` 的完整性标签是「中」,而受限进程只能写「低」,
+  整个目录对构建进程只读(`Access denied`,连 `nb_probe.txt` 都建不出来)。
+  `dist/` 同样。需要以管理员身份执行一次:
+
+  ```
+  icacls "D:\3project\rust\Nextboard\app\build" /setintegritylevel (OI)(CI)L
+  ```
+
+  之后 `build.ps1` 才能正常增量构建。绕过方案(不推荐长期用):另建构建目录,
+  但本环境的 CMake 连**最小工程**都卡在 "Detecting CXX compiler ABI info"(与项目无关)。
+- 自动粘贴的**真机手感**(UIPI 场景、输入法/远程桌面下的按键可见性)需要在正常桌面会话里验。
+
+
 
 
 

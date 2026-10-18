@@ -117,6 +117,11 @@ public:
     /// 打开文件对话框(原生;选备份 zip 等)。返回选中路径,取消为空串。
     Q_INVOKABLE QString openFileDialog(const QString& caption, const QString& filter);
 
+    /// 把当前剪贴板内容**自动粘贴**到前台窗口(仅当设置 copyAutoPaste 开启)。
+    /// 调用时机:复制条目成功、面板已 hide() 之后(见 Main.qml 的 copyEntryAndAutoPaste)。
+    /// 关闭该设置时本函数立即返回 —— 调用方不必自己判断设置,漏判只会少粘一次。
+    Q_INVOKABLE void autoPasteIfEnabled();
+
     /// 开机自启当前状态(注册表 Run 键)。
     Q_INVOKABLE bool autoStartEnabled();
     /// 启用/停用开机自启。返回是否成功;失败时 toast 提示。

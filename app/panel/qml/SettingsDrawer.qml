@@ -370,6 +370,7 @@ AppDrawer {
         root.refreshOcrProbe()
         maxImage.value = s.maxImageMb
         monitorCheck.checked = s.monitorEnabled === true
+        autoPasteCheck.checked = s.copyAutoPaste === true
         // 单一出口(§18.4):由 regionAutoConfirm 推导 ——
         //   true  = direct (松手即入库)
         //   false = toolbar(浮出工具栏)
@@ -475,6 +476,7 @@ AppDrawer {
         s.ocrSessionMode = ocrSessionCombo.modeCodes[ocrSessionCombo.currentIndex]
         s.maxImageMb = maxImage.value
         s.monitorEnabled = monitorCheck.checked
+        s.copyAutoPaste = autoPasteCheck.checked
         // 单一出口 → 回写成 regionAutoConfirm(direct=true / toolbar=false)。
         // regionSkipEditor 已废弃(§18.5):不写它,让它保持读入时的原值(见 core 注释)。
         s.regionAutoConfirm = regionExitCombo.currentIndex === 0
@@ -730,6 +732,15 @@ AppDrawer {
                 ReadableCheckBox {
                     id: monitorCheck
                     text: "剪贴板监听"
+                    onClicked: root.scheduleSave()
+                }
+                // 复制后自动粘贴(N2):默认关闭。文案点明"模拟 Ctrl+V"与失效场景 ——
+                // 管理员权限窗口收不到模拟按键是 Windows 的 UIPI 限制,不写清楚
+                // 用户会当成 bug。
+                ReadableCheckBox {
+                    id: autoPasteCheck
+                    objectName: "autoPasteCheck"   // 验收钩子
+                    text: "复制后自动粘贴(模拟 Ctrl+V;管理员窗口无效)"
                     onClicked: root.scheduleSave()
                 }
                 // 框选之后去哪儿(§18.4):**单一出口**取代原先两个复选框。

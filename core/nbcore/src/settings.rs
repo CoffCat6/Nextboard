@@ -53,6 +53,15 @@ pub struct Settings {
     pub hotkeys: HotkeyMap,
     /// 暂停/恢复剪贴板监听。
     pub monitor_enabled: bool,
+    /// 复制条目后是否自动把内容粘贴到前台窗口（默认**关闭**）。
+    ///
+    /// 动机：选择一条历史 → 面板收起 → 用户还得自己按一次 Ctrl+V，是"复制"
+    /// 之后的固定多余动作。开启后由宿主在面板收起后向前台窗口投一次 Ctrl+V。
+    ///
+    /// 默认关闭是刻意的：这是**改变既有行为**的功能（老用户升级后突然开始自动
+    /// 粘贴会很意外），且**管理员权限窗口**（UIPI）接收不到模拟按键 —— 那种场景
+    /// 下只会静默无效果，必须让用户自己显式打开。
+    pub copy_auto_paste: bool,
     /// 界面主题。
     pub theme: String,
     /// 自定义数据目录（空串 = 默认位置；Phase 4）。
@@ -434,6 +443,7 @@ impl Default for Settings {
             max_text_kb: 1024,
             hotkeys: HotkeyMap::default(),
             monitor_enabled: true,
+            copy_auto_paste: false,
             theme: "system".into(),
             data_dir: String::new(),
             pin_default_opacity: 100,
@@ -2167,6 +2177,24 @@ mod tests {
         );
         let back: Settings = serde_json::from_value(value).unwrap();
         assert!(back.pin_prefer_image);
+    }
+
+    #[test]
+    fn copy_auto_paste_defaults_off_and_roundtrips_as_camel_case() {
+        // 默认必须**关闭**:这是改变既有行为的功能(升级后突然自动粘贴会很意外),
+        // 且管理员权限窗口(UIPI)根本收不到模拟按键。QML 按 `s.copyAutoPaste` 读写。
+        assert!(!Settings::default().copy_auto_paste, "复制后自动粘贴默认关闭");
+        let settings = Settings {
+            copy_auto_paste: true,
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&settings).unwrap();
+        assert_eq!(
+            value.get("copyAutoPaste").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        let back: Settings = serde_json::from_value(value).unwrap();
+        assert!(back.copy_auto_paste);
     }
 
     #[test]

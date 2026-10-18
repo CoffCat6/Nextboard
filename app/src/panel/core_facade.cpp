@@ -2,6 +2,7 @@
 
 #include "capture/capture_session.hpp"
 #include "editor/editor_window.hpp"
+#include "host/auto_paste.hpp"
 #include "host/auto_start.hpp"
 #include "host/core_bridge.hpp"
 #include "host/memory_probe.hpp"
@@ -363,6 +364,11 @@ QString CoreFacade::openFileDialog(const QString& caption, const QString& filter
     return QFileDialog::getOpenFileName(
         nullptr, caption,
         QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation), filter);
+}
+
+void CoreFacade::autoPasteIfEnabled() {
+    // 同处 namespace nb,直接调(没有 auto_paste 命名空间,见头文件)
+    pasteToForegroundIfEnabled();
 }
 
 bool CoreFacade::autoStartEnabled() {

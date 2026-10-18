@@ -6,6 +6,9 @@ core/target
 # 与「工作区内放行、%TEMP% 被拒」的沙箱口径配套,见该文件测试注释）
 core/nbcore/target
 dist
+# 构建期临时目录：本机 %TEMP% 落在沙箱拒写区时，把 TMP/TEMP 指到这里再构建
+# （MSVC 链接器在此写 lnk*.tmp，见 docs/progress.md 的 cc-rs 踩坑记录）
+.buildtmp
 # 待办交互验收（--todo-flow 未指定 --data-dir 时的兜底数据目录）
 acceptance-data
 # 启动冒烟临时数据目录与截图（--data-dir + --screenshot 手工验证用）
