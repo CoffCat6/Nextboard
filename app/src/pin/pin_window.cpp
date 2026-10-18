@@ -1,6 +1,7 @@
 #include "pin_window.hpp"
 
 #include "../app_font.hpp"
+#include "host/image_save.hpp"
 
 #include <QClipboard>
 #include <QContextMenuEvent>
@@ -302,23 +303,29 @@ void PinWindow::saveAs() {
                                ? QString::number(QDateTime::currentMSecsSinceEpoch())
                                : m_idPrefix;
     const bool isText = !m_text.isEmpty();
-    const QString path = QFileDialog::getSaveFileName(
-        this, QStringLiteral("另存为"),
-        isText ? QStringLiteral("文本_%1.txt").arg(suffix)
-               : QStringLiteral("贴图_%1.png").arg(suffix),
-        isText ? QStringLiteral("文本文件 (*.txt)") : QStringLiteral("PNG 图片 (*.png)"));
-    if (!path.isEmpty()) {
-        bool ok = false;
-        if (isText) {
-            QFile file(path);
-            if (file.open(QIODevice::WriteOnly | QIODevice::Truncate))
-                ok = file.write(m_text.toUtf8()) >= 0;
-        } else {
-            ok = m_image.save(path, "PNG");
+    if (isText) {
+        // 文本贴图仍只有 txt 一种落盘形式(格式选择对文本没有意义)。
+        const QString path = QFileDialog::getSaveFileName(
+            this, QStringLiteral("另存为"), QStringLiteral("文本_%1.txt").arg(suffix),
+            QStringLiteral("文本文件 (*.txt)"));
+        if (path.isEmpty()) {
+            activateWindow();
+            setFocus(Qt::OtherFocusReason);
+            return;
         }
-        showNotice(ok ? (isText ? QStringLiteral("已另存为文本")
-                                : QStringLiteral("已另存为图片"))
-                      : QStringLiteral("另存失败"));
+        bool ok = false;
+        QFile file(path);
+        if (file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+            ok = file.write(m_text.toUtf8()) >= 0;
+        showNotice(ok ? QStringLiteral("已另存为文本") : QStringLiteral("另存失败"));
+    } else {
+        // 图片走共享的另存通道:PNG / JPEG / WebP 由后缀决定。
+        // 贴图内容可能带透明(text 渲染的边角),JPEG 分支会自动铺白底。
+        QString error;
+        const QString saved = image_save::saveImageWithDialog(
+            this, m_image, QStringLiteral("贴图_%1").arg(suffix), &error);
+        if (saved.isEmpty() && !error.isEmpty()) showNotice(error);
+        else if (!saved.isEmpty()) showNotice(QStringLiteral("已另存为图片"));
     }
     // 文件对话框会夺走焦点:收回焦点,ESC 才能继续生效
     activateWindow();

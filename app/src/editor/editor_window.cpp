@@ -6,13 +6,12 @@
 
 #include "host/memory_probe.hpp"
 #include "host/core_bridge.hpp"
+#include "host/image_save.hpp"
 
 #include <QAction>
 #include <QActionGroup>
 #include <QCursor>
 #include <QDateTime>
-#include <QDir>
-#include <QFileDialog>
 #include <QFont>
 #include <QGraphicsEllipseItem>
 #include <QGraphicsItem>
@@ -43,7 +42,6 @@
 #include <QPainterPathStroker>
 #include <QResizeEvent>
 #include <QScreen>
-#include <QStandardPaths>
 #include <QToolBar>
 #include <QTimer>
 #include <QUndoCommand>
@@ -481,16 +479,15 @@ QImage EditorWindow::compose() const {
 
 void EditorWindow::saveToFile() {
     bakeTextItem();
-    const QString suggested =
-        QDir(QStandardPaths::writableLocation(QStandardPaths::PicturesLocation))
-            .filePath(QStringLiteral("Nextboard-%1.png")
-                          .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"))));
-    const QString path = QFileDialog::getSaveFileName(
-        this, QStringLiteral("另存为"), suggested, QStringLiteral("PNG 图片 (*.png)"));
-    if (path.isEmpty()) return;
-    if (!compose().save(path, "PNG"))
-        QMessageBox::warning(this, QStringLiteral("另存为"),
-                             QStringLiteral("写入失败:%1").arg(path));
+    // 格式(PNG/JPEG/WebP)与白底、质量等细节统一交给 image_save。
+    // ⚠️ 编辑器产物是 ARGB32_Premultiplied + fill(transparent):存 JPEG 时若
+    //    不铺白底,Qt 会把透明区写成黑色(实测)。这件事由 image_save 兜住。
+    const QString base = QStringLiteral("Nextboard-%1").arg(
+        QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss")));
+    QString error;
+    const QString saved = image_save::saveImageWithDialog(this, compose(), base, &error);
+    if (saved.isEmpty() && !error.isEmpty())
+        QMessageBox::warning(this, QStringLiteral("另存为"), error);
 }
 
 void EditorWindow::finish() {

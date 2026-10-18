@@ -63,7 +63,7 @@ RapidOCR 内化、内存收口(231MB → ~130MB)。
 | **3.4** | **翻译历史持久化 + 全文搜索** | 现在历史是**进程内内存队列,上限 50,退出即清零**(translate/mod.rs:109-137);而“存为条目”只是把单条推进素材库 | `static HISTORY: Mutex<Vec<HistoryItem>>` | **小**(可复用 clip_entries + source=translate) |
 | **3.5** | **条目内联编辑(文本)** | 复制来的文本有笔误/多余换行时,现在只能删掉重新复制。S5“素材库”语义下这是明显缺口 | clip_entry_model 有 todo_save(待办可编辑),**普通文本条目无编辑入口**;save_text_entry 只新增 | **中** |
 | **3.6** | **贴图方向键微调** | Snipaste 习惯;贴图现在只有拖拽/滚轮缩放/Alt 滚轮透明度/双击关 | pin_window.cpp:473-483 的 keyPressEvent **只处理 Esc** | **小** |
-| **3.7** | **另存为多格式** | 现在保存**只给 PNG**(capture_session.cpp:1181、editor_window.cpp:489、pin_window.cpp:309 三处写死);JPEG/WebP 对“截图发聊天窗”是实用差异 | 三处 QFileDialog 过滤器都只有 *.png | **小** |
+| ~~3.7~~ | ~~另存为多格式~~ | **已完成 2026-10-18**:新增 `app/src/host/image_save.{hpp,cpp}`,三处入口(截图浮条/编辑器/贴图)统一走它;支持 PNG / JPEG(.jpg .jpeg)/ WebP,按**实际后缀**判定格式,JPEG 自动铺白底 | — | — |
 | **3.8** | **导出格式扩展(JSON / CSV / HTML)** | 现在只有 Markdown(export_entries)。要接别的工具就得结构化格式 | backup_export.rs 已有完备框架 | **小** |
 | **3.9** | **搜索增强(正则 / 大小写 / 仅标题)** | 现在只有 FTS + 中文 LIKE 兜底 | setQuery 单一入口 | **小–中** |
 | **3.10** | **敏感内容保护:应用黑名单 + 疑似密钥不落库** | 隐私风险是剪贴板工具的天然软肋(密码管理器/网银) | 路线图 backlog 列了“应用黑名单”;app 侧 grep 零命中 | **中** |

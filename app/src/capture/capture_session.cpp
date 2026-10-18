@@ -2,6 +2,7 @@
 #include "capture/overlay_geometry.hpp"
 #include "editor/annotation_toolbar.hpp"
 #include "host/core_bridge.hpp"
+#include "host/image_save.hpp"
 #include "panel/core_facade.hpp"
 #include "host/memory_probe.hpp"
 
@@ -22,10 +23,7 @@
 #include <QLineEdit>
 #include <QtConcurrent/QtConcurrentRun>
 #include <QFutureWatcher>
-#include <QFileDialog>
 #include <QDateTime>
-#include <QDir>
-#include <QStandardPaths>
 #include <QMessageBox>
 #include <QScreen>
 #include <QTimer>
@@ -1732,17 +1730,14 @@ void OverlayWidget::drawSubbar(QPainter& painter) const {
 }
 
 void OverlayWidget::bakeSaveDialog(const QImage& image) {
-    const QString suggested =
-        QDir(QStandardPaths::writableLocation(QStandardPaths::PicturesLocation))
-            .filePath(QStringLiteral("Nextboard-%1.png")
-                          .arg(QDateTime::currentDateTime().toString(
-                              QStringLiteral("yyyyMMdd-HHmmss"))));
-    const QString path = QFileDialog::getSaveFileName(
-        this, QStringLiteral("另存为"), suggested, QStringLiteral("PNG 图片 (*.png)"));
-    if (path.isEmpty()) return;
-    if (!image.save(path, "PNG"))
-        QMessageBox::warning(this, QStringLiteral("另存为"),
-                             QStringLiteral("写入失败:%1").arg(path));
+    // 格式(PNG/JPEG/WebP)与白底、质量等细节统一交给 image_save,
+    // 详见该头文件开头的三条规则。
+    const QString base = QStringLiteral("Nextboard-%1").arg(
+        QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss")));
+    QString error;
+    const QString saved = image_save::saveImageWithDialog(this, image, base, &error);
+    if (saved.isEmpty() && !error.isEmpty())
+        QMessageBox::warning(this, QStringLiteral("另存为"), error);
 }
 
 } // namespace nb

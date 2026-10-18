@@ -4355,6 +4355,69 @@ docs/06 §10 记录的 `Paint device returned engine == 0` / `Painter not active
 - 四个改动过的 C++ 文件逐一 `cl /Zs` 语法检查:**全部 EXITCODE=0**;
 - `qmllint` 三个改动 QML 文件:**无 syntax error**(其余是既有的"Theme.colors 未解析"类噪音)。
 
+
+---
+
+## 2026-10-18(日) 另存为支持 JPEG / WebP
+
+### 改了什么
+
+三个另存入口(截图浮条「保存」/ 编辑器「另存为」/ 贴图「💾」)原先各写一份
+`getSaveFileName` + `save(path, "PNG")`,过滤器写死 `*.png`。
+
+新增 `app/src/host/image_save.{hpp,cpp}` 统一收口,三处改为一行调用:
+
+```cpp
+const QString saved = image_save::saveImageWithDialog(this, image, baseName, &error);
+```
+
+支持格式:PNG / JPEG(`.jpg` `.jpeg`)/ WebP(`.webp`)。
+
+### 三条实现规则(踩过才知道)
+
+1. **按用户实际输入的后缀判定格式,不看对话框过滤器**。
+   用户常把 `Nextboard-xxx.png` 手改成 `.jpg` 再回车,此时过滤器仍是 PNG,
+   但文件必须是 JPEG。仅靠过滤器会得到"后缀是 jpg 内容是 PNG"的假文件。
+2. **JPEG 必须铺白底**。Qt 的 JPEG 写入把透明像素写成**纯黑**,实测:
+   `00000000`(全透明)→ `FF000000`(黑)。编辑器产物是
+   `ARGB32_Premultiplied` + `fill(Qt::transparent)`,天生带透明边角,
+   不铺底就是一张黑框图。铺底用 `CompositionMode_DestinationOver`
+   (画在内容**下面**):用 SourceOver 会在半透明笔画上再叠一层白,把标注冲淡。
+3. **质量参数不能无脑传**。`save(path, "PNG", 90)` 里的 90 是**压缩等级**,
+   不是画质 —— 实测同一张图 PNG 默认 5448B、传 90 变 6270B,**反而变大**。
+   故只有 JPEG(90)/ WebP(85)传质量参数,PNG 走默认。
+
+另:用户没写后缀时补 `.png`(部分平台的对话框不自动补);未知后缀一律按 PNG
+(落到 Qt 的猜格式上会直接 `save()` 失败,用户只看到"写入失败"却说不出原因)。
+
+### 依赖
+
+**无需新增任何东西**:`app/build/imageformats/` 已有 `qjpeg.dll` 与 `qwebp.dll`
+(windeployqt 自动部署),编解码能力本就在包里,只是 UI 没暴露。
+
+### 验证
+
+- `cmake` + `ninja` 全量重建:**通过,零 warning**;
+- 独立验收程序(链接真实的 `image_save.cpp`)跑 5 种后缀 + 无后缀兜底,**failures = 0**:
+
+```
+png   -> fmt=PNG  ok=1 size=2192   角像素 alpha=0   rgb=(0,0,0)
+jpg   -> fmt=JPEG ok=1 size=2911   角像素 alpha=255 rgb=(255,255,255)   <- 白底正确
+jpeg  -> fmt=JPEG ok=1 size=2911   角像素 alpha=255 rgb=(255,255,255)
+webp  -> fmt=WEBP ok=1 size=1342   角像素 alpha=0                        <- alpha 保留
+JPG   -> fmt=JPEG ok=1 size=2911   (大写后缀也认)
+无后缀 -> fmt=PNG (兜底正确)
+```
+
+顺带清掉三处因此不再使用的 include(`QFileDialog` / `QStandardPaths` / `QDir`)。
+
+### 未做
+
+- 质量档位不做成设置项:固定 JPEG 90 / WebP 85 已够用,加设置要动 settings + 校验 + UI,
+  收益不匹配。确需可后续加。
+- WebP 默认有损(q=85)。截图上体积约为 PNG 的 61%(2192 → 1342B);
+  若更看重文字锐度,改 `kWebpQuality = 100` 即无损,体积会接近 PNG。
+
 ### 未完成 / 环境限制
 
 - **app 未能整体重建**:`app/build` 的完整性标签是「中」,而受限进程只能写「低」,
