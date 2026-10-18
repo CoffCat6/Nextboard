@@ -74,7 +74,7 @@ RapidOCR 内化、内存收口(231MB → ~130MB)。
 
 | # | 项 | 依据 | 说明 |
 | --- | --- | --- | --- |
-| 4.1 | 截图入库 base64 往返 | docs/06 §10 | 瞬态 WS 主要来源(>三次拷贝)。需改 FFI 契约加“RGBA 直传 command”,**docs 已明确“需单独立项”** |
+| ~~4.1~~ | ~~截图入库 base64 往返~~ | docs/06 §5.7 | **已完成 2026-10-18**:新增 `nb_ingest_capture_rgba` + `nb_copy_rgba_to_clipboard` 原生导出,宿主 `ingestImageAndCopy` 优先直入(旧 DLL 自动回退)。整帧拷贝 >5 份 → 1 份 |
 | 4.2 | 遮罩会话内 backing store + 合成缓冲 | docs/06 §3/§10 | ~53MB/3 屏。需重写遮罩渲染路径;且 docs/06 §11.4 的 §3 阶段 2/3(显式 deleteLater、多屏懒捕获)也未做,后者**需 UX 评审** |
 | 4.3 | 翻译页首次打开 +49MB | docs/06 §10/§13 | 已改冻结;TranslateView 内部瘦身未定位 |
 | 4.4 | ocr_scale / 语言项对 RapidOCR 的显隐 | docs/10 §14.6/§15.6 | RapidOCR 不走 ocr_scale,设置页该按后端隐藏 —— 现在两套参数同时可见,语义分叉 |

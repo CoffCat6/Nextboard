@@ -174,6 +174,10 @@ public:
 protected:
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
+        // 后备缓冲/窗口尚未就绪时 begin() 会失败(engine == 0):此时任何 draw*
+        // 都是空操作并刷出 "QPainter::begin: Paint device returned engine == 0"
+        // + "Painter not active" 一屏错误。Qt 会自行重发 paint,丢掉这一帧即可。
+        if (!painter.isActive()) return;
         painter.setRenderHint(QPainter::Antialiasing);
         painter.setPen(QPen(QColor(255, 255, 255, 70), 2));
         painter.setBrush(QColor(20, 22, 28, 205));
@@ -201,20 +205,38 @@ QString ingestImageAndCopy(const QImage& image, bool* outOversize, QString* outN
     if (outOversize) *outOversize = false;
     if (outNotice) outNotice->clear();
     CoreBridge& core = CoreBridge::instance();
-    const QString pngBase64 = quickPngBase64(image);
-    const QJsonObject resp = core.call("ingest_capture_png", {
-        {"png_base64", pngBase64},
-        {"source", "capture"},
-    });
-    if (!resp.value("ok").toBool()) {
-        const QString err = resp.value("error").toObject().value("message").toString();
-        qWarning() << "截图入库失败:" << err;
-        if (outNotice) *outNotice = QStringLiteral("入库失败:%1").arg(err);
+    const bool direct = core.hasRgbaIngest();
+    // RGBA 直入(docs/06 §5.4 最后一项):宿主不再 PNG 编码 + base64(1.33× QString)
+    // + JSON,核心也不再 base64/PNG 解码 —— 一张 1500×950 截图的瞬时峰值
+    // 从实测 299.8MB 降到"一次整帧拷贝"。旧核心(无该导出)走原 PNG 通道回退。
+    QString pngBase64;
+    QJsonObject resp;
+    if (direct) {
+        resp = core.ingestCaptureRgba(image, QStringLiteral("capture"));
+    } else {
+        pngBase64 = quickPngBase64(image);
+        resp = core.call("ingest_capture_png", {
+            {"png_base64", pngBase64},
+            {"source", "capture"},
+        });
+        if (!resp.value("ok").toBool()) {
+            const QString err = resp.value("error").toObject().value("message").toString();
+            qWarning() << "截图入库失败:" << err;
+            if (outNotice) *outNotice = QStringLiteral("入库失败:%1").arg(err);
+            return {};
+        }
+        resp = resp.value("data").toObject();
+    }
+    // 原生通道以返回码表达失败(出参为空对象,原因见 nbcore.log);JSON 通道的
+    // 失败已在上面按 ok 判过。空响应**必须**在这里拦住:否则会落到下面
+    // "id 为空 = 超大小上限"的分支,把一次真实失败说成"超过上限"并写剪贴板。
+    if (direct && resp.isEmpty()) {
+        qWarning() << "截图入库失败(RGBA 直入):核心返回空";
+        if (outNotice) *outNotice = QStringLiteral("入库失败:核心未返回结果");
         return {};
     }
-    // entry 为 null = 超过图片大小上限被忽略
-    const QString id =
-        resp.value("data").toObject().value("entry").toObject().value("id").toString();
+    // entry = null / 缺 id = 超过图片大小上限被忽略
+    const QString id = resp.value("entry").toObject().value("id").toString();
     if (id.isEmpty()) {
         // 未入库,但**仍要写剪贴板**:否则用户按了截图热键却"毫无反应"
         // (第一代同语义:超限时"未入库,仅写剪贴板")。
@@ -233,11 +255,28 @@ QString ingestImageAndCopy(const QImage& image, bool* outOversize, QString* outN
         qInfo().nospace() << "截图超过大小上限(" << limitMb << "MB),未入库;仅写剪贴板。"
                           << " 本次约 " << QString::number(actualMb, 'f', 1) << "MB(RGBA)";
         if (outNotice) *outNotice = notice;
-        const QJsonObject direct = core.call("copy_image_png", {{"png_base64", pngBase64}});
-        if (!direct.value("ok").toBool())
-            qWarning() << "超限截图写剪贴板失败:"
-                       << direct.value("error").toObject().value("message").toString();
+        // 未入库但仍要写剪贴板:直入通道直接用**手上这块像素**(不再 PNG 编码 +
+        // base64 往返);旧核心回退 copy_image_png。
+        if (direct) {
+            if (!core.copyRgbaToClipboard(image))
+                qWarning() << "超限截图写剪贴板失败(RGBA 直入)";
+        } else {
+            const QJsonObject copied = core.call("copy_image_png", {{"png_base64", pngBase64}});
+            if (!copied.value("ok").toBool())
+                qWarning() << "超限截图写剪贴板失败:"
+                           << copied.value("error").toObject().value("message").toString();
+        }
         return {};
+    }
+    // 已入库 → 写剪贴板。直入通道**不读回 blob PNG**:同一块像素直接写 DIB,
+    // 省掉"读文件 + PNG 解码 + to_rgba8"(4K 图又是一份整帧)。
+    if (direct) {
+        if (!core.copyRgbaToClipboard(image))
+            qWarning() << "截图写剪贴板失败(RGBA 直入);已入库,id =" << id;
+        else
+            qInfo() << "截图已入库并写入剪贴板(RGBA 直入):"
+                    << image.width() << "x" << image.height();
+        return id;
     }
     const QJsonObject copied = core.call("copy_entry", {{"id", id}});
     if (!copied.value("ok").toBool()) {

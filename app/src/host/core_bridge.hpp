@@ -38,6 +38,12 @@ using NbStitchAppend = int(__cdecl*)(const char*, const unsigned char*, unsigned
 using NbStitchFinish = int(__cdecl*)(const char*, unsigned char**, unsigned long long*, char**);
 /// 长截图丢弃会话(幂等)。
 using NbStitchAbort = int(__cdecl*)(const char*);
+/// 截图入库(RGBA 直入,不走 base64/PNG):出参为**裸**小 JSON {"entry": …|null}。
+using NbIngestCaptureRgba = int(__cdecl*)(const unsigned char*, unsigned long long,
+                                          unsigned, unsigned, const char*, char**);
+/// 把宿主内存里的 RGBA 直接写进系统剪贴板(CF_DIBV5,不经 PNG/base64)。
+using NbCopyRgbaToClipboard = int(__cdecl*)(const unsigned char*, unsigned long long,
+                                            unsigned, unsigned);
 
 namespace nb {
 
@@ -118,6 +124,27 @@ public:
     /// 丢弃会话(幂等)。
     void stitchAbort(const QString& session);
 
+    // ---- 截图入库(RGBA 直入;docs/06 §5.4 的"最后一项")----
+    //
+    // ⚠️ 这两条走**原生 RGBA 通道**,不是 call("ingest_capture_png") /
+    //    call("copy_image_png"):原路径是 PNG 编码 → base64(1.33× QString) →
+    //    JSON → 核心 base64 解码 → PNG 解码 → to_rgba8 → Vec,一张 1500×950 截图
+    //    实测瞬时峰值 299.8MB。改后只剩一次整帧拷贝。
+
+    /// 核心是否提供 RGBA 直入入库(旧 nbcore.dll 没有)。
+    bool hasRgbaIngest() const { return m_ingestCaptureRgba != nullptr; }
+
+    /// 截图入库(RGBA 直入)。返回**裸**响应对象:{"entry": {...}} 或 {"entry": null}
+    /// (后者 = 超过 maxImageMb 未入库,调用方仍应写剪贴板)。
+    ///
+    /// 失败返回空对象(原因见 lastError()/nbcore.log,与既有 captureCrop 同口径)。
+    /// ⚠️ 阻塞调用(PNG 编码 + 缩略图 + 落盘):大图几十毫秒到几百毫秒,
+    ///    **别在 UI 线程高频调用**(截图链路本就是用户动作触发的低频路径)。
+    QJsonObject ingestCaptureRgba(const QImage& image, const QString& source);
+
+    /// 把该图直接写进系统剪贴板(不经 PNG/base64)。返回是否成功。
+    bool copyRgbaToClipboard(const QImage& image);
+
     /// 对任意 QImage 直接 OCR(编辑器「取字」):不走落库通道,设置项全生效。
     /// ⚠️ 阻塞调用 —— det 推理 0.4~5s,**必须在非 UI 线程调用**。
     /// 失败/不可用时返回空串(错误文本见 lastError())。
@@ -167,6 +194,8 @@ private:
     NbStitchAppend m_stitchAppend = nullptr;
     NbStitchFinish m_stitchFinish = nullptr;
     NbStitchAbort m_stitchAbort = nullptr;
+    NbIngestCaptureRgba m_ingestCaptureRgba = nullptr;
+    NbCopyRgbaToClipboard m_copyRgbaToClipboard = nullptr;
     bool m_initialized = false;
     QString m_dataDir;
     /// 生效数据目录(设置里启用自定义目录时与 m_dataDir 不同;blobs 定位用)。

@@ -70,6 +70,12 @@ bool CoreBridge::init(bool /*startHidden*/, QString* error) {
     m_stitchAppend = reinterpret_cast<NbStitchAppend>(resolve("nb_stitch_append"));
     m_stitchFinish = reinterpret_cast<NbStitchFinish>(resolve("nb_stitch_finish"));
     m_stitchAbort = reinterpret_cast<NbStitchAbort>(resolve("nb_stitch_abort"));
+    // 截图入库的 RGBA 直入通道:同样是**可选**导出 —— 旧核心没有时宿主回退
+    // 到 ingest_capture_png(见 hasRgbaIngest),不会因为新宿主配旧 DLL 就崩。
+    m_ingestCaptureRgba =
+        reinterpret_cast<NbIngestCaptureRgba>(resolve("nb_ingest_capture_rgba"));
+    m_copyRgbaToClipboard =
+        reinterpret_cast<NbCopyRgbaToClipboard>(resolve("nb_copy_rgba_to_clipboard"));
     if (!m_init || !m_callFn || !m_freeString || !m_shutdown || !m_abi) {
         if (error) *error = QStringLiteral("nbcore.dll 导出缺失");
         return false;
@@ -333,6 +339,44 @@ void CoreBridge::stitchAbort(const QString& session) {
     if (!m_stitchAbort || session.isEmpty()) return;
     const QByteArray sessionUtf8 = session.toUtf8();
     m_stitchAbort(sessionUtf8.constData());
+}
+
+// ---- 截图入库(RGBA 直入)----
+
+QJsonObject CoreBridge::ingestCaptureRgba(const QImage& image, const QString& source) {
+    if (!m_ingestCaptureRgba || !m_freeString || image.isNull()) return {};
+    // 核心按 RGBA8888 紧凑排布读(与 captureCrop / ocrImage / stitchAppend 同口径)。
+    // ⚠️ convertToFormat 在原图已是 RGBA8888 时**返回同一份数据**(隐式共享,不拷贝),
+    //    故这里不额外付一份整帧;真正的一次拷贝在核心侧 bytes.to_vec()。
+    const QImage src = image.convertToFormat(QImage::Format_RGBA8888);
+    const QByteArray srcUtf8 = source.toUtf8();
+    char* out = nullptr;
+    const int rc = m_ingestCaptureRgba(
+        src.constBits(),
+        static_cast<unsigned long long>(src.sizeInBytes()),
+        static_cast<unsigned>(src.width()), static_cast<unsigned>(src.height()),
+        srcUtf8.constData(), &out);
+    if (rc != 0 || !out) {
+        if (out) m_freeString(out);
+        return {};
+    }
+    const QByteArray owned(out);
+    m_freeString(out);
+    // ⚠️ 返回体是**裸** {"entry": …}(core/nbcore/src/ffi.rs 的 nb_ingest_capture_rgba
+    //    直接 report_out_text(json!({"entry": stored}))),**没有** nb_call 那层
+    //    {"ok":…,"data":…} 信封 —— 与 nb_ocr_rgba 同一口径(那里曾因照抄信封解析,
+    //    导致"核心识别成功、宿主永远取到空串")。
+    return QJsonDocument::fromJson(owned).object();
+}
+
+bool CoreBridge::copyRgbaToClipboard(const QImage& image) {
+    if (!m_copyRgbaToClipboard || image.isNull()) return false;
+    const QImage src = image.convertToFormat(QImage::Format_RGBA8888);
+    const int rc = m_copyRgbaToClipboard(
+        src.constBits(),
+        static_cast<unsigned long long>(src.sizeInBytes()),
+        static_cast<unsigned>(src.width()), static_cast<unsigned>(src.height()));
+    return rc == 0;
 }
 
 QString CoreBridge::ocrImage(const QImage& image) {

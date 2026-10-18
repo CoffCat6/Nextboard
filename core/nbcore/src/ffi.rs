@@ -468,6 +468,105 @@ pub unsafe extern "C" fn nb_stitch_abort(session: *const c_char) -> i32 {
     report(result)
 }
 
+/// 截图入库:**RGBA 直入**(不走 base64 / PNG 往返)。
+///
+/// 为什么单独开原生导出(docs/06-memory-optimization.md §5.4 的"最后一项"):
+/// 原路径是宿主 `QImage → PNG → base64(QString,1.33×) → JSON → 核心 base64 解码
+/// → PNG 解码 → to_rgba8 → Vec`,一张 1500×950 截图的瞬时峰值实测 299.8MB(基线 152MB)。
+/// 本入口只做**一次**整帧拷贝(宿主切片 → Vec,`ingest_image` 需要所有权),
+/// PNG 编码/解码、base64、JSON 字符串全部消失。
+///
+/// ⚠️ **出参契约(与 nb_call 不同,改前端务必一起改)**:交出的是**裸**对象
+/// `{"entry": {...}}`(超大小上限时为 `{"entry": null}`),**没有** nb_call 那层
+/// `{"ok":…,"data":…}` 信封 —— 与 nb_ocr_rgba 同一口径。宿主 core_bridge.cpp
+/// 的 ingestCaptureRgba 对两种形态都做兼容解析,契约漂移不会静默变成"入库失败"。
+///
+/// ⚠️ 本函数**不写系统剪贴板**(与 ingest_capture_png 一致:先入库、后写剪贴板,
+/// 见第一代 docs/phase5.md §3.6)。宿主随后调 [`nb_copy_rgba_to_clipboard`] 用**同一块**
+/// 像素写剪贴板,避免再走一次"读 blob PNG → 解码 → 写 DIB"。
+///
+/// # Safety
+/// rgba 由宿主持有,本函数只读(len 必须恰为 width*height*4);
+/// source 可为 NULL(缺省 "capture");out_result 为可写指针槽位,
+/// 成功后宿主以 nb_free_string 释放。
+#[no_mangle]
+pub unsafe extern "C" fn nb_ingest_capture_rgba(
+    rgba: *const u8,
+    rgba_len: usize,
+    width: u32,
+    height: u32,
+    source: *const c_char,
+    out_result: *mut *mut c_char,
+) -> i32 {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if rgba.is_null() || rgba_len == 0 {
+            return Err(AppError::InvalidInput("截图入库:像素为空".into()));
+        }
+        let expected = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or_else(|| AppError::InvalidInput("截图入库:尺寸溢出".into()))?;
+        if rgba_len != expected {
+            return Err(AppError::InvalidInput(format!(
+                "截图入库:RGBA 长度 {rgba_len} 与尺寸 {width}x{height} 不匹配"
+            )));
+        }
+        let source = if source.is_null() {
+            "capture".to_owned()
+        } else {
+            cstr_to_string(source)?
+        };
+        let core = crate::core::Core::get()?;
+        // SAFETY: 调用方契约保证 rgba 指向 rgba_len 字节的可读缓冲
+        let bytes = std::slice::from_raw_parts(rgba, rgba_len);
+        // 唯一一次整帧拷贝:ingest_image 收 owned(Vec),编码 PNG / 生成缩略图都要它
+        let owned = bytes.to_vec();
+        let stored = crate::clip::ingest_image(core, owned, width, height, &source)?;
+        notify_host(WM_APP_CLIP_CHANGED);
+        Ok(serde_json::json!({ "entry": stored }).to_string())
+    }))
+    .unwrap_or_else(|_| Err(AppError::Panicked("nb_ingest_capture_rgba panic".into())));
+    report_out_text(result, out_result)
+}
+
+/// 把宿主内存里的 RGBA **直接**写进系统剪贴板(CF_DIBV5,不经 PNG/base64)。
+///
+/// 用途:截图入库后的"写剪贴板"一步。原路径是 `copy_entry(id)` → 读 blob PNG
+/// → 解码成 RGBA → 写 DIB,白白多一次整图解码;而宿主此刻**本来就持有**同一块像素。
+///
+/// 也用于"超过大小上限、未入库"的情形(第一代语义:未入库仅写剪贴板)——
+/// 原先走 `copy_image_png` 要 PNG 编码 + base64 往返。
+///
+/// # Safety
+/// rgba 由宿主持有,本函数只读(len 必须恰为 width*height*4)。
+#[no_mangle]
+pub unsafe extern "C" fn nb_copy_rgba_to_clipboard(
+    rgba: *const u8,
+    rgba_len: usize,
+    width: u32,
+    height: u32,
+) -> i32 {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if rgba.is_null() || rgba_len == 0 {
+            return Err(AppError::InvalidInput("写剪贴板:像素为空".into()));
+        }
+        let expected = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or_else(|| AppError::InvalidInput("写剪贴板:尺寸溢出".into()))?;
+        if rgba_len != expected {
+            return Err(AppError::InvalidInput(format!(
+                "写剪贴板:RGBA 长度 {rgba_len} 与尺寸 {width}x{height} 不匹配"
+            )));
+        }
+        // SAFETY: 调用方契约保证 rgba 指向 rgba_len 字节的可读缓冲
+        let bytes = std::slice::from_raw_parts(rgba, rgba_len);
+        crate::clip::write_rgba_to_clipboard(bytes, width, height)
+    }))
+    .unwrap_or_else(|_| Err(AppError::Panicked("nb_copy_rgba_to_clipboard panic".into())));
+    report(result)
+}
+
 // ---------- 内部工具 ----------
 
 /// PNG 字节 → (RGBA 像素, 宽, 高)。
@@ -1317,6 +1416,36 @@ mod contract_tests {
             v.get("data").is_none() && v.get("ok").is_none(),
             "OCR 返回体不应带 ok/data 信封(宿主按裸对象解析);实际: {raw}"
         );
+    }
+
+    /// nb_ingest_capture_rgba 同样交**裸** {"entry": …}(无 ok/data 信封)。
+    ///
+    /// 历史教训与 OCR 那条同源:宿主若照抄 nb_call 的解析去读 data.entry,
+    /// 结果就是"核心明明入库成功(日志里有条目 id),面板里却什么都没多"。
+    #[test]
+    fn ingest_rgba_payload_has_no_envelope() {
+        let raw = serde_json::json!({ "entry": serde_json::json!({ "id": "abc" }) }).to_string();
+        let v: serde_json::Value = serde_json::from_str(&raw).expect("必须是合法 JSON");
+        assert_eq!(
+            v.get("entry")
+                .and_then(|e| e.get("id"))
+                .and_then(|id| id.as_str()),
+            Some("abc")
+        );
+        assert!(
+            v.get("data").is_none() && v.get("ok").is_none(),
+            "RGBA 入库返回体不应带 ok/data 信封;实际: {raw}"
+        );
+    }
+
+    /// 超大小上限时 entry 为 **null**(不是缺少该键,也不是报错)。
+    /// 宿主据此区分"入库失败"与"入库成功但被上限挡下,仍要写剪贴板"。
+    #[test]
+    fn ingest_rgba_oversize_is_null_entry() {
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::json!({ "entry": null }).to_string()).unwrap();
+        assert!(v.get("entry").is_some(), "键必须存在");
+        assert!(v["entry"].is_null(), "超限用 null 表达,宿主据此仍写剪贴板");
     }
 
     /// 对照:nb_call **是**带信封的。两者不同是**有意为之**,

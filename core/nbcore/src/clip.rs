@@ -775,24 +775,35 @@ pub fn spawn_thumbnail_backfill(core: &'static Core) {
 /// (debug 构建),体积约 2.3 倍。v1 快速档仅留给将来的"编辑器临时底图"场景;
 /// 入库 blob 仍用默认档控制磁盘占用。
 pub fn encode_png_with(rgba: &[u8], width: u32, height: u32, fast: bool) -> AppResult<Vec<u8>> {
-    let buffer = image::RgbaImage::from_raw(width, height, rgba.to_vec())
+    // ⚠️ 不要构造 RgbaImage:它的 from_raw 需要 owned Vec,调用方手上是 &[u8],
+    //    于是必然多出一次**整帧拷贝**(4K 图 33MB,1500x950 也有 5.7MB)。
+    //    这里直接用编码器的 `write_image` 读切片 —— 输出字节完全一致,零额外拷贝。
+    //    (截图入库是每张截图必经路径,这份拷贝属瞬态峰值里最没必要的一份。)
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(4))
         .ok_or_else(|| crate::error::AppError::Internal("RGBA 数据长度与图片尺寸不匹配".into()))?;
+    if rgba.len() != expected {
+        return Err(crate::error::AppError::Internal(
+            "RGBA 数据长度与图片尺寸不匹配".into(),
+        ));
+    }
+    use image::ImageEncoder as _;
     let mut out = std::io::Cursor::new(Vec::new());
     if fast {
-        use image::ImageEncoder as _;
         image::codecs::png::PngEncoder::new_with_quality(
             &mut out,
             image::codecs::png::CompressionType::Fast,
             image::codecs::png::FilterType::Sub,
         )
-        .write_image(
-            buffer.as_raw(),
+        .write_image(rgba, width, height, image::ExtendedColorType::Rgba8)?;
+    } else {
+        image::codecs::png::PngEncoder::new(&mut out).write_image(
+            rgba,
             width,
             height,
             image::ExtendedColorType::Rgba8,
         )?;
-    } else {
-        buffer.write_to(&mut out, image::ImageFormat::Png)?;
     }
     Ok(out.into_inner())
 }
