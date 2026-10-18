@@ -70,6 +70,10 @@ public:
     /// 自动化验收:打开设置抽屉(等价点「设置」按钮,验证懒构建链路)。
     void openSettingsPanel();
 
+    /// 自动化验收:打开「新建待办」卡片(等价点头部按钮)。
+    /// 用于断言编辑卡片的**字段顺序**(标题在上、备注在下)。
+    void openTodoComposerForAcceptance();
+
     /// 弹面板并切到"待办"视图(docs/05-todo.md §4.3 气泡点击链路):
     /// 居中显示 + 通知 QML 清搜索词并切视图。落点在 PanelWindow 是因为
     /// "显示窗口"只有它有;视图切换由 QML 的 showTodos() 完成。
@@ -107,6 +111,10 @@ public:
     ///    "点抽屉外"的场景必须用 xFrac 把点挪进抽屉覆盖不到的左半区。
     /// 返回:是否找到目标且事件被派发(找不到返回 false)。
     bool clickByObjectName(const QString& objectName, qreal xFrac = 0.5);
+
+    /// 验收专用:按 objectName 取项,返回它在**场景坐标**里的左上角 y;找不到返回 -1。
+    /// 场景坐标是统一坐标系 —— 两个控件父级不同时,直接比各自的 y 没有意义。
+    qreal acceptanceItemSceneY(const QString& objectName) const;
 
     /// 验收:向面板投递一次真实按键(press + release),走与真实键盘相同的
     /// 链路(QQuickWidget → QML 场景的 deliverKeyEvent → activeFocusItem)。

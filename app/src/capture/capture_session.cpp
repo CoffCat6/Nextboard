@@ -1,4 +1,6 @@
 #include "capture_session.hpp"
+
+#include "note/note_registry.hpp"
 #include "capture/overlay_geometry.hpp"
 #include "editor/annotation_toolbar.hpp"
 #include "host/core_bridge.hpp"
@@ -108,6 +110,9 @@ void closeAllOverlays(std::function<void()> after = {}) {
     // 会话结束即停表:遮罩已释放,不再需要空闲保护
     if (g_idleTimer) g_idleTimer->stop();
     if (overlays.isEmpty()) {
+        // 没有遮罩也要恢复便签(某些取消路径可能已经收掉了遮罩):这是幂等的 ——
+        // 没隐藏过就什么都不做。
+        NoteRegistry::instance().restoreAfterCapture();
         if (after) QTimer::singleShot(0, qApp, std::move(after));
         return;
     }
@@ -120,6 +125,9 @@ void closeAllOverlays(std::function<void()> after = {}) {
     const auto countdown = [pending, after] {
         if (--*pending == 0) {
             delete pending;
+            // 遮罩全部销毁 = 截图会话真正结束:此刻放回便签(docs/20 §7.4)。
+            // 单一恢复点,不逐出口补 show() —— 那一定漏(unparkPinAfterEdit 的教训)。
+            NoteRegistry::instance().restoreAfterCapture();
             logMemory("capture-end");
             // 到这一刻遮罩已全部析构、缓冲已归还;转一次事件循环只为离开析构栈。
             if (after) QTimer::singleShot(0, qApp, after);
@@ -326,6 +334,13 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured) {
         return;
     }
     g_onCaptured = onCaptured;
+    // 桌面便签是置顶窗口,截图时不该被拍进画面(docs/20 §7.4)。隐藏是**产品约定**
+    // 而非"当前后端恰好没暴露"的补偿:xcap 现在的 GDI BitBlt 不带 CAPTUREBLT,
+    // 大概率本来就拍不到分层窗口,但换 DXGI/WGC 后端就会。代价只是两次调用。
+    //
+    // ⚠️ 位置必须在 pruneOverlays 的忙碌早退**之后**:放在前面的话,"截图进行中被
+    //    忽略"的那次触发会顺手隐藏便签,却没人负责恢复。
+    NoteRegistry::instance().hideAllForCapture();
     logMemory("capture-start");
 
     const QList<QScreen*> screens = QGuiApplication::screens();
@@ -377,6 +392,9 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured) {
             const CaptureDone done = g_onCaptured;
             g_onCaptured = {};
             finishCapture(shot, done);
+            // 全屏直通**不经过** closeAllOverlays(:101),便签的恢复必须在这里补 ——
+            // 漏了的表现是"按一次全屏截图热键,便签全部消失且再也回不来"。
+            NoteRegistry::instance().restoreAfterCapture();
             logMemory("capture-end");   // 全屏直通没有遮罩,closeAllOverlays 不会走
         }
         return;

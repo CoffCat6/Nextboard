@@ -25,6 +25,8 @@ namespace nb {
 
 static ClipEntryModel* s_entries = nullptr;
 
+ClipEntryModel* entryModelInstance() { return s_entries; }
+
 void setupQmlEnvironment() {
     // ⚠️ 字体必须**最先**装,且必须在 QQuickStyle 之前:
     //   ① 缺字回退替换表要在任何 QFont 解析前生效(QFont 文档:替换后需重建

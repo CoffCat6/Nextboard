@@ -6,6 +6,7 @@
 #include "host/auto_start.hpp"
 #include "host/core_bridge.hpp"
 #include "host/memory_probe.hpp"
+#include "note/note_registry.hpp"
 #include "pin/pin_window.hpp"
 
 #include <QJsonDocument>
@@ -808,6 +809,14 @@ void CoreFacade::openEntry(const QString& id) {
     emit toastMessage(QStringLiteral("已用系统默认程序打开"));
 }
 
+
+void CoreFacade::openTodoNote(const QString& id) {
+    // 注册表负责"已开则前置 / 未开则建窗 / 上限拒绝"全部判断(避免两处各判一遍)
+    NoteRegistry::instance().open(id);
+}
+
+void CoreFacade::expandAllTodoNotes() { NoteRegistry::instance().expandAll(); }
+void CoreFacade::collapseAllTodoNotes() { NoteRegistry::instance().collapseAll(); }
 
 void pinComposedImage(const QImage& image) {
     showPinWindow(PinContent{image, {}, {}});

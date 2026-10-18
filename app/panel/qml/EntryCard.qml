@@ -25,6 +25,9 @@ Rectangle {
     required property real todoRemindAt   // 提醒毫秒;0 = 无
     required property bool todoDone
     required property bool todoOverdue
+    /// 备注(docs/21):有内容时在标题下显示一行摘要(折叠,点击展开编辑)。
+    /// 空串 = 无备注(整行不渲染,不给卡片留空位)。
+    property string todoNote: ""
 
     /// 文本条目是否展开显示全文(长文本默认折叠 4 行)。
     property bool textExpanded: false
@@ -324,6 +327,32 @@ Rectangle {
             id: bodyLoader
             Layout.fillWidth: true
             sourceComponent: root.kind === "image" && root.imageUrl !== "" ? imageBody : textBody
+        }
+
+        // 待办备注(docs/21):标题之下、正文之上的一行摘要。
+        // 只在 todo 且有备注时渲染 —— 普通条目与无备注待办不多占一点高度。
+        // 折叠成 2 行:卡片是"扫一眼"的尺寸,备注全文进编辑卡片看。
+        Text {
+            id: notePreview
+            visible: root.kind === "todo" && root.todoNote !== ""
+            Layout.fillWidth: true
+            Layout.topMargin: -4        // 与标题贴紧(它是标题的补充说明)
+            text: root.todoNote
+            color: Theme.colors.textSecondary
+            font.family: Theme.fontFamily
+            font.pixelSize: Theme.metrics.fontCaption
+            font.strikeout: root.todoDone
+            opacity: root.todoDone ? 0.55 : 1.0
+            wrapMode: Text.Wrap
+            maximumLineCount: 2
+            elide: Text.ElideRight
+            // 明确让点击穿透到卡片(否则文本会吃掉 ClickableMouseArea 的点击)
+            MouseArea {
+                anchors.fill: parent
+                acceptedButtons: Qt.NoButton
+                // 不处理任何按钮 → 事件继续派发给下层(卡片)
+                propagateComposedEvents: true
+            }
         }
 
         RowLayout {

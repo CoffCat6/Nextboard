@@ -3,6 +3,7 @@
 
 pub mod entry;
 pub mod todo;
+pub mod todo_note;
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -39,10 +40,17 @@ const MIGRATION_V5: &str = include_str!("migrations/v5.sql");
 /// v6:待办(Todo)类型(kind 增 'todo',重建表)+ todo_meta 扩展表(docs/05-todo.md §2)。
 pub(crate) const MIGRATION_V6: &str = include_str!("migrations/v6.sql");
 
+/// v7:待办贴屏(桌面便签)窗口状态表 todo_note(docs/20-todo-sticky-note.md §3)。
+/// **只加表、不重建 clip_entries** —— 迁移风险低于 v6。
+pub(crate) const MIGRATION_V7: &str = include_str!("migrations/v7.sql");
+
+/// v8:待办「备注」列 + FTS 纳入备注(docs/21-todo-title-note.md)。
+pub(crate) const MIGRATION_V8: &str = include_str!("migrations/v8.sql");
+
 /// 当前库结构版本;新增迁移时递增并追加执行分支。
 /// ⚠️ 备份/恢复与导入用它做"版本闸门":比它新的备份包一律拒绝(本版代码读不懂
 ///    更新的 schema,放任打开会静默误读)—— 见 backup_export::stage_backup。
-pub(crate) const LATEST_VERSION: i64 = 6;
+pub(crate) const LATEST_VERSION: i64 = 8;
 
 /// 打开(或创建)数据库文件,启用 WAL 并执行迁移。
 pub fn open(path: &Path) -> AppResult<rusqlite::Connection> {
@@ -73,6 +81,12 @@ pub fn migrate(conn: &mut rusqlite::Connection) -> AppResult<()> {
     }
     if version < 6 {
         conn.execute_batch(MIGRATION_V6)?;
+    }
+    if version < 7 {
+        conn.execute_batch(MIGRATION_V7)?;
+    }
+    if version < 8 {
+        conn.execute_batch(MIGRATION_V8)?;
     }
     if version < LATEST_VERSION {
         conn.pragma_update(None, "user_version", LATEST_VERSION)?;

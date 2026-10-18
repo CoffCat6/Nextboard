@@ -265,6 +265,13 @@ void PanelWindow::openSettingsPanel() {
         QMetaObject::invokeMethod(qobject_cast<QObject*>(m_quick->rootObject()), "openSettings");
 }
 
+void PanelWindow::openTodoComposerForAcceptance() {
+    if (m_quick && m_quick->rootObject()) {
+        QMetaObject::invokeMethod(qobject_cast<QObject*>(m_quick->rootObject()),
+                                  "acceptanceOpenTodoComposer");
+    }
+}
+
 void PanelWindow::showCenteredOnTodos() {
     // 先切回列表形态(面板可能停在翻译页),再居中弹出并让 QML 切到待办视图。
     // ⚠️ 顺序要紧:setMode(Translate 之外的形态)会重设窗口尺寸/下限,
@@ -324,6 +331,12 @@ QQuickItem* PanelWindow::findAcceptanceItem(const QString& objectName) const {
     //    从 rootObject 递归找不到浮层里的按钮(实测 "找不到 objectName")。
     //    从 contentItem 出发能覆盖普通内容 + Overlay + 所有 popup。
     return findItemByName(win->contentItem(), objectName);
+}
+
+qreal PanelWindow::acceptanceItemSceneY(const QString& objectName) const {
+    QQuickItem* item = findAcceptanceItem(objectName);
+    if (!item) return -1.0;
+    return item->mapToScene(QPointF(0, 0)).y();
 }
 
 bool PanelWindow::clickByObjectName(const QString& objectName, qreal xFrac) {

@@ -114,4 +114,17 @@ void runStitchLiveFlow();
 /// 混乱"这一缺陷(根因是两端枚举顺序不同却按索引配对)。
 void reportMonitors();
 
+/// 待办编辑卡片的**字段顺序**验收(--todo-layout-flow):
+/// 文档要求"第一行标题、第二行备注"。这两块曾整体写反(备注跑到了标题上面),
+/// 而 QML 里两块控件看起来都能用 —— 只有肉眼才能发现,所以必须有断言把它钉住。
+/// 断言方式:打开编辑卡片,按 objectName 取两个输入框,比较它们在场景中的 y。
+/// 纯读回,不写库,无需 --data-dir。
+void runTodoLayoutFlow(PanelWindow& panel);
+
+/// 桌面便签交互验收(--note-flow,docs/20-todo-sticky-note.md §10.2):
+/// 播种 → 建窗 → 拖到右边缘吸附 → 开自动收起 → 鼠标移开/移回 → 改正文 → 删条目。
+/// 会**移动真实光标**(Enter/Leave 只能靠真光标触发),必须配 --data-dir。
+/// 日志前缀 NOTE STEP*,失败行含 PASS/FAIL。
+void runNoteAcceptanceFlow();
+
 } // namespace nb

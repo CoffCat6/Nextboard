@@ -23,6 +23,8 @@ Windows 桌面一体化效率板:剪贴板历史 + 截图(框选/全屏/编辑/�
 | [docs/02-migration-core.md](./docs/02-migration-core.md) | nbcore 改写路线:逐文件映射表、耦合点改造方案、Cargo 配置要点、FFI 方法表、测试策略、M1–M3 实施顺序 |
 | [docs/03-roadmap.md](./docs/03-roadmap.md) | 开发路线图:S0–S6 里程碑、验收门、依赖与并行、回退预案、backlog |
 | [docs/04-build-package-release.md](./docs/04-build-package-release.md) | 构建/打包/安装/发布规程:发布构建清单、运行期依赖与体积预算、NSIS 安装器规格、发布流程与检查单(**草案,待审查**) |
+| [docs/20-todo-sticky-note.md](./docs/20-todo-sticky-note.md) | 待办贴屏(桌面便签):数据模型(v7)、FFI 契约、窗口与贴边/半隐藏设计、实现记录与踩坑 |
+| [docs/21-todo-title-note.md](./docs/21-todo-title-note.md) | 待办「标题 + 备注」分离:数据模型(v8)、FTS 纳入备注、编辑卡片/列表/便签三处口径 |
 
 ## 上游项目
 
@@ -45,6 +47,8 @@ docs/design.md、phase5–11、memory-optimization 中的真机踩坑结论全�
 - [x] S4:编辑器(QGraphicsScene)+ 截图/贴图闭环 —— 实现完成,待真机回归
       (4.1 编辑器、4.2 两种框选确认模式与直通路径、4.3 全屏与一键贴图、
        4.4 截图翻译/取字)
+- [x] 待办贴屏 / 桌面便签(docs/20):v7 `todo_note` 表 + `app/src/note/`;
+      贴边吸附、半隐藏拉手、几何落库重启复原、托盘兜底入口;验收 `--note-flow` 全通过
 - [ ] S5–S6:见路线图(一体化素材库 → 内存收口 → 发布)
 
 ## 快速开始

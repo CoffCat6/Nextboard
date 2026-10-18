@@ -31,6 +31,9 @@ pub struct TodoItem {
     pub done_at: Option<i64>,
     /// 是否已过截止且未完成(列表查询按调用时刻计算)。
     pub overdue: bool,
+    /// 备注(docs/21):可多行的细节,与标题(text_content)分开存。
+    /// None = 无备注(与空串同义,库侧统一存 NULL)。
+    pub note_text: Option<String>,
 }
 
 impl Serialize for TodoItem {
@@ -63,6 +66,10 @@ impl Serialize for TodoItem {
         }
         if let Some(ms) = self.done_at {
             map.serialize_entry("doneAt", &ms)?;
+        }
+        // 备注:非空才下发(与 tags/dueAt 同一兼容手法),空备注整键省略
+        if let Some(text) = &self.note_text {
+            map.serialize_entry("noteText", text)?;
         }
         map.end()
     }
@@ -97,7 +104,7 @@ impl TodoFilter {
 const TODO_SELECT: &str = "SELECT e.id, e.kind, e.text_content, e.blob_path, e.file_paths, \
      e.width, e.height, e.hash, e.byte_size, e.preview, e.pinned, e.created_at, \
      e.last_used_at, e.source, e.tags, \
-     m.due_at, m.remind_at, m.notify_at, m.done_at, \
+     m.due_at, m.remind_at, m.notify_at, m.done_at, m.note_text, \
      m.due_at AS todo_due_at, m.done_at AS todo_done_at \
      FROM clip_entries e JOIN todo_meta m ON m.id = e.id";
 
@@ -126,6 +133,7 @@ fn row_to_item(row: &rusqlite::Row<'_>, now: i64) -> rusqlite::Result<TodoItem> 
         notify_at: row.get("notify_at")?,
         done_at,
         overdue: done_at.is_none() && due_at.is_some_and(|d| d < now),
+        note_text: row.get("note_text")?,
     })
 }
 
@@ -140,6 +148,7 @@ pub fn create(
     remind_at: Option<i64>,
     notify_at: Option<i64>,
     tags: Option<Vec<String>>,
+    note_text: Option<&str>,
     now: i64,
 ) -> AppResult<String> {
     let text = text.trim();
@@ -176,12 +185,17 @@ pub fn create(
         },
     )?;
     tx.execute(
-        "INSERT INTO todo_meta (id, due_at, remind_at, notify_at, done_at) \
-         VALUES (?1, ?2, ?3, ?4, NULL)",
-        params![id, due_at, remind_at, notify_at],
+        "INSERT INTO todo_meta (id, due_at, remind_at, notify_at, done_at, note_text) \
+         VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
+        params![id, due_at, remind_at, notify_at, normalize_note(note_text)],
     )?;
     tx.commit()?;
     Ok(id)
+}
+
+/// 备注归一化:trim 后为空一律存 NULL(理由见 update 里的注释)。
+fn normalize_note(note: Option<&str>) -> Option<String> {
+    note.map(str::trim).filter(|n| !n.is_empty()).map(str::to_owned)
 }
 
 /// 更新待办:正文与各时刻(`None` = 不改,`Some(None)` = 清空)。
@@ -197,6 +211,9 @@ pub fn update(
     remind_at: Option<Option<i64>>,
     notify_at: Option<Option<i64>>,
     tags: Option<Vec<String>>,
+    // 备注三态(与时刻同语义):None = 不改;Some(None)/Some("") = 清空;
+    // Some("文字") = 设置。
+    note_text: Option<Option<&str>>,
 ) -> AppResult<()> {
     let now = now_ms();
     let tx = conn.transaction()?;
@@ -244,6 +261,14 @@ pub fn update(
         tx.execute(
             "UPDATE clip_entries SET tags = ?1 WHERE id = ?2",
             params![stored, id],
+        )?;
+    }
+    if let Some(v) = note_text {
+        // 空串统一存 NULL(与 tags 的"空数组 = 无标签"同一口径):否则
+        // "有备注但是空串"会让卡片多渲染一行空白,且 FTS 里多一条空 token。
+        tx.execute(
+            "UPDATE todo_meta SET note_text = ?1 WHERE id = ?2",
+            params![normalize_note(v), id],
         )?;
     }
     if let Some(v) = due_at {
@@ -309,7 +334,8 @@ pub fn list(
     let tag = tag.map(str::trim).filter(|t| !t.is_empty());
     let sql = format!(
         "{TODO_SELECT} {filter_clause} \
-         AND (:like IS NULL OR e.text_content LIKE :like ESCAPE '\\') \
+         AND (:like IS NULL OR e.text_content LIKE :like ESCAPE '\\'
+              OR m.note_text LIKE :like ESCAPE '\\') \
          AND (:tag IS NULL OR EXISTS (SELECT 1 FROM json_each(e.tags) \
                                       WHERE json_each.value = :tag)) \
          AND (:due_max IS NULL OR (m.due_at IS NOT NULL AND m.due_at <= :due_max)) \
@@ -334,7 +360,8 @@ pub fn list(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let count_sql = format!(
         "SELECT COUNT(*) FROM todo_meta m JOIN clip_entries e ON e.id = m.id {filter_clause} \
-         AND (:like IS NULL OR e.text_content LIKE :like ESCAPE '\\') \
+         AND (:like IS NULL OR e.text_content LIKE :like ESCAPE '\\'
+              OR m.note_text LIKE :like ESCAPE '\\') \
          AND (:tag IS NULL OR EXISTS (SELECT 1 FROM json_each(e.tags) \
                                       WHERE json_each.value = :tag)) \
          AND (:due_max IS NULL OR (m.due_at IS NOT NULL AND m.due_at <= :due_max))"
@@ -415,8 +442,13 @@ pub fn set_done_bulk(conn: &Connection, ids: &[String], done: bool) -> AppResult
 }
 
 /// 删除待办:条目与扩展表一起删(调用方负责清理 blobs —— 待办无 blob,此处无需)。
+///
+/// 三张表都要走(todo_meta 时刻 + todo_note 便签窗口状态,docs/20 §3.3):
+/// 便签行漏删会留下指向已删条目的孤儿行 —— `todo_note::list` 有自愈兜底,
+/// 但那是"读路径宽容",不是"写路径可以漏"。
 pub fn delete(conn: &Connection, id: &str) -> AppResult<()> {
     let n = conn.execute("DELETE FROM todo_meta WHERE id = ?1", params![id])?;
+    conn.execute("DELETE FROM todo_note WHERE id = ?1", params![id])?;
     conn.execute("DELETE FROM clip_entries WHERE id = ?1", params![id])?;
     if n == 0 {
         return Err(AppError::InvalidInput("待办不存在".into()));
@@ -428,11 +460,22 @@ pub fn delete(conn: &Connection, id: &str) -> AppResult<()> {
 /// 否则 todo_meta 会留孤儿行)。条目不存在时静默通过(调用方另行报错)。
 pub fn delete_meta(conn: &Connection, id: &str) -> AppResult<()> {
     conn.execute("DELETE FROM todo_meta WHERE id = ?1", params![id])?;
+    // 便签窗口状态同理(非 todo 条目恒无此行,自然是空操作)。
+    conn.execute("DELETE FROM todo_note WHERE id = ?1", params![id])?;
     Ok(())
 }
 
 /// 清空**已完成**的待办(归档清理;"清空历史"不含待办,见 entry::clear)。
+///
+/// ⚠️ 顺序要紧:先按 `done_at` 删便签行与条目,最后才清 todo_meta ——
+///    一旦先清 meta,"哪些是已完成的"这个判据就没了(实测若照搬 v6 的写法,
+///    加一行便签清理就会写成"删全部便签")。
 pub fn clear_done(conn: &Connection) -> AppResult<()> {
+    conn.execute(
+        "DELETE FROM todo_note WHERE id IN \
+         (SELECT id FROM todo_meta WHERE done_at IS NOT NULL)",
+        [],
+    )?;
     conn.execute(
         "DELETE FROM clip_entries WHERE kind = 'todo' AND id IN \
          (SELECT id FROM todo_meta WHERE done_at IS NOT NULL)",
@@ -592,7 +635,7 @@ mod tests {
         notify: Option<i64>,
         now: i64,
     ) -> String {
-        create(conn, text, due, remind, notify, None, now).expect("create")
+        create(conn, text, due, remind, notify, None, None, now).expect("create")
     }
 
     fn plain_entry(id: &str, text: &str, now: i64) -> ClipEntry {
@@ -904,14 +947,96 @@ mod tests {
         assert_eq!(left, 0, "不应留孤儿 meta 行");
     }
 
+    // ---- 备注(docs/21:标题/备注分离) ----
+
+    #[test]
+    fn note_roundtrip_and_blank_normalizes_to_null() {
+        let mut conn = crate::store::memory();
+        let now = now_ms();
+        let id = create(&mut conn, "标题", None, None, None, None, Some("第一行\n第二行"), now)
+            .expect("create with note");
+        let item = get(&conn, &id).expect("get").expect("exists");
+        assert_eq!(item.note_text.as_deref(), Some("第一行\n第二行"), "多行备注应原样保留");
+        assert_eq!(item.entry.text_content.as_deref(), Some("标题"), "标题独立存放");
+
+        // 空白备注归一化成 NULL(与 tags 空数组同一口径)
+        update(&mut conn, &id, None, None, None, None, None, Some(Some("   \n  ")))
+            .expect("blank");
+        let item = get(&conn, &id).expect("get").expect("exists");
+        assert!(item.note_text.is_none(), "全空白应存 NULL,不是空串: {:?}", item.note_text);
+
+        // 清空
+        update(&mut conn, &id, None, None, None, None, None, Some(Some("有内容")))
+            .expect("set");
+        update(&mut conn, &id, None, None, None, None, None, Some(None)).expect("clear");
+        assert!(get(&conn, &id).expect("get").expect("exists").note_text.is_none());
+    }
+
+    #[test]
+    fn note_is_omitted_from_json_when_absent() {
+        let mut conn = crate::store::memory();
+        let now = now_ms();
+        let plain = create(&mut conn, "无备注", None, None, None, None, None, now).expect("c1");
+        let with_note =
+            create(&mut conn, "有备注", None, None, None, None, Some("细节"), now).expect("c2");
+        let (items, _) = list(&conn, TodoFilter::All, None, None, None, 50, 0).expect("list");
+        for item in &items {
+            let json = serde_json::to_value(item).expect("serialize");
+            if item.entry.id == plain {
+                assert!(json.get("noteText").is_none(), "空备注整键省略(与 tags 同手法)");
+            } else if item.entry.id == with_note {
+                assert_eq!(json["noteText"], serde_json::json!("细节"));
+                assert_eq!(json["textContent"], serde_json::json!("有备注"));
+            }
+        }
+    }
+
+    #[test]
+    fn note_is_searchable_via_list() {
+        // 备注纳入 FTS 的回归:中文用户把细节写在备注里,搜不到就等于没写。
+        let mut conn = crate::store::memory();
+        let now = now_ms();
+        create(&mut conn, "写周报", None, None, None, None, Some("季度 OKR 复盘材料"), now)
+            .expect("create");
+        let (items, total) = entry::list(&conn, Some("OKR"), None, None, None, None, 50, 0)
+            .expect("search note");
+        assert_eq!(total, 1, "备注内容应可被搜索命中");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].text_content.as_deref(), Some("写周报"));
+
+        // 改备注后索引要跟着变(靠 todo_meta_fts_update)
+        let id = items[0].id.clone();
+        update(&mut conn, &id, None, None, None, None, None, Some(Some("改成别的词")))
+            .expect("update note");
+        let (_, old_total) =
+            entry::list(&conn, Some("OKR"), None, None, None, None, 50, 0).expect("old");
+        let (_, new_total) =
+            entry::list(&conn, Some("别的词"), None, None, None, None, 50, 0).expect("new");
+        assert_eq!(old_total, 0, "旧备注词不该再命中");
+        assert_eq!(new_total, 1, "新备注词应命中");
+    }
+
+    #[test]
+    fn note_inserts_into_fts_for_new_todo() {
+        // 新建待办时 meta 行在条目之后插入,那一刻 INSERT 触发器读不到 note_text ——
+        // 靠 todo_meta_fts_insert 补。不补的话"刚建的待办按备注搜不到"。
+        let mut conn = crate::store::memory();
+        let now = now_ms();
+        create(&mut conn, "新待办", None, None, None, None, Some("独一无二的记号词"), now)
+            .expect("create");
+        let (items, total) =
+            entry::list(&conn, Some("记号词"), None, None, None, None, 50, 0).expect("search");
+        assert_eq!(total, 1, "新建待办的备注必须立刻可搜: {items:?}");
+    }
+
     // ---- 校验与边界 ----
 
     #[test]
     fn create_rejects_blank_text() {
         let mut conn = crate::store::memory();
         let now = now_ms();
-        assert!(create(&mut conn, "   ", None, None, None, None, now).is_err());
-        assert!(create(&mut conn, "ok", None, None, None, None, now).is_ok());
+        assert!(create(&mut conn, "   ", None, None, None, None, None, now).is_err());
+        assert!(create(&mut conn, "ok", None, None, None, None, None, now).is_ok());
     }
 
     #[test]
@@ -922,11 +1047,11 @@ mod tests {
         mark_reminded(&conn, &id).expect("mark");
 
         // 改到未来 → 标志复位,可再次提醒
-        update(&mut conn, &id, None, None, Some(Some(now + DAY)), None, None).expect("future");
+        update(&mut conn, &id, None, None, Some(Some(now + DAY)), None, None, None).expect("future");
         assert_eq!(due_reminds(&conn, now, 8).expect("s1").len(), 0);
 
         // 改到过去 → 视为立即提醒(下一轮命中)
-        update(&mut conn, &id, None, None, Some(Some(now - 1000)), None, None).expect("past");
+        update(&mut conn, &id, None, None, Some(Some(now - 1000)), None, None, None).expect("past");
         assert_eq!(due_reminds(&conn, now, 8).expect("s2").len(), 1);
         // 模拟调度线程本轮已消费:扫描是纯查询,触发标记由调度侧显式写(§4.1)
         mark_reminded(&conn, &id).expect("mark after scan");
@@ -947,12 +1072,12 @@ mod tests {
         let mut conn = crate::store::memory();
         let now = now_ms();
         let id = create_at(&mut conn, "任务", Some(now + DAY), Some(now + 3600_000), None, now);
-        update(&mut conn, &id, None, Some(None), Some(None), None, None).expect("clear");
+        update(&mut conn, &id, None, Some(None), Some(None), None, None, None).expect("clear");
         let item = get(&conn, &id).expect("get").expect("exists");
         assert!(item.due_at.is_none() && item.remind_at.is_none(), "清空时刻未生效");
 
         entry::insert(&conn, &plain_entry("clip", "普通", now)).expect("insert");
-        assert!(update(&mut conn, "clip", Some("改"), None, None, None, None).is_err());
+        assert!(update(&mut conn, "clip", Some("改"), None, None, None, None, None).is_err());
         assert!(set_done(&conn, "clip", true).is_err());
     }
 

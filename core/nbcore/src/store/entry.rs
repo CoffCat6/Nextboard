@@ -344,7 +344,9 @@ pub fn list(
              LEFT JOIN todo_meta m ON m.id = e.id
              WHERE (?1 IS NULL OR e.text_content LIKE ?1 ESCAPE '\\'
                     OR (e.kind = 'file' AND e.file_paths LIKE ?1 ESCAPE '\\')
-                    OR (e.kind = 'image' AND e.ocr_text LIKE ?1 ESCAPE '\\'))
+                    OR (e.kind = 'image' AND e.ocr_text LIKE ?1 ESCAPE '\\')
+                    OR (e.kind = 'todo' AND e.id IN
+                        (SELECT id FROM todo_meta WHERE note_text LIKE ?1 ESCAPE '\\')))
                AND (?2 IS NULL OR e.kind = ?2)
                AND (?3 IS NULL OR e.pinned = ?3)
                AND (?4 IS NULL OR EXISTS (SELECT 1 FROM json_each(e.tags)
@@ -363,7 +365,9 @@ pub fn list(
         "SELECT COUNT(*) FROM clip_entries e
          WHERE (?1 IS NULL OR e.text_content LIKE ?1 ESCAPE '\\'
                 OR (e.kind = 'file' AND e.file_paths LIKE ?1 ESCAPE '\\')
-                OR (e.kind = 'image' AND e.ocr_text LIKE ?1 ESCAPE '\\'))
+                OR (e.kind = 'image' AND e.ocr_text LIKE ?1 ESCAPE '\\')
+                OR (e.kind = 'todo' AND e.id IN
+                    (SELECT id FROM todo_meta WHERE note_text LIKE ?1 ESCAPE '\\')))
            AND (?2 IS NULL OR e.kind = ?2)
            AND (?3 IS NULL OR e.pinned = ?3)
            AND (?4 IS NULL OR EXISTS (SELECT 1 FROM json_each(e.tags)
@@ -543,6 +547,9 @@ pub fn clear(conn: &Connection) -> AppResult<Vec<String>> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
     tx.execute("DELETE FROM clip_entries", [])?;
     tx.execute("DELETE FROM todo_meta", [])?;
+    // 便签窗口状态同样要清(docs/20 §3.3):它也是"无外键、应用层维护一致性"的
+    // 扩展表,漏了会留下指向已删条目的孤儿行(读路径虽有自愈,但那是兜底不是许可)。
+    tx.execute("DELETE FROM todo_note", [])?;
     tx.commit()?;
     Ok(paths)
 }
@@ -610,6 +617,10 @@ pub fn delete_bulk(conn: &Connection, ids: &[String]) -> AppResult<BulkDeleteRes
             //    (待办列表/计数全部读 meta)。DELETE FROM clip_entries 的
             //    触发器只管 FTS,不管 meta,所以这里显式删。
             tx.execute("DELETE FROM todo_meta WHERE id = ?1", params![id])?;
+            // 便签窗口状态与 meta 同事务删(docs/20 §3.3):三条扩展表路径
+            // (delete / delete_bulk / clear)必须一致,否则"批量删除"会留下
+            // 便签行,而 list() 的自愈清理只在下次读时才发生。
+            tx.execute("DELETE FROM todo_note WHERE id = ?1", params![id])?;
             deleted.push(id.clone());
             if let Some(Some(path)) = rows.into_iter().next() {
                 blobs.push(path);

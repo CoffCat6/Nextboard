@@ -1154,9 +1154,20 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
             let remind_at = ms_opt(req, "remindAt")?;
             let notify_at = ms_opt(req, "notifyAt")?;
             let tags = tags_opt(req)?;
+            // 备注(docs/21):可选,空串等同不设
+            let note_text = str_opt(req, "noteText");
             let id = {
                 let mut db = core.db.lock()?;
-                todo::create(&mut db, &text, due_at, remind_at, notify_at, tags, crate::now_ms())?
+                todo::create(
+                    &mut db,
+                    &text,
+                    due_at,
+                    remind_at,
+                    notify_at,
+                    tags,
+                    note_text.as_deref(),
+                    crate::now_ms(),
+                )?
             };
             notify_host(WM_APP_CLIP_CHANGED); // 列表新增条目,复用既有刷新信号
             Ok(serde_json::json!({ "id": id }))
@@ -1169,9 +1180,24 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
             let remind_at = ms_opt_opt(req, "remindAt")?;
             let notify_at = ms_opt_opt(req, "notifyAt")?;
             let tags = tags_opt(req)?;
+            // 备注三态(键缺失 = 不改;null/空串 = 清空;字符串 = 设置)
+            let note_text = str_opt_opt(req, "noteText");
+            // Some(Option<String>) → Option<Option<&str>>(store 只读不持有)
+            let note_ref = note_text
+                .as_ref()
+                .map(|inner| inner.as_deref());
             {
                 let mut db = core.db.lock()?;
-                todo::update(&mut db, &id, text.as_deref(), due_at, remind_at, notify_at, tags)?;
+                todo::update(
+                    &mut db,
+                    &id,
+                    text.as_deref(),
+                    due_at,
+                    remind_at,
+                    notify_at,
+                    tags,
+                    note_ref,
+                )?;
             }
             notify_host(WM_APP_CLIP_CHANGED);
             Ok(serde_json::Value::Null)
@@ -1272,6 +1298,37 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
             todo::mark_bubble_shown(&db, &ids)?;
             Ok(serde_json::Value::Null)
         }
+        // ---- 待办贴屏(桌面便签,docs/20-todo-sticky-note.md §4) ----
+        // 形状与 todo_list **同一扁平口径**(宿主走单一解析路径):
+        // 顶层 = 条目全字段 + todo 徽标,另加一个 note 对象。
+        "todo_note_list" => {
+            let core = crate::core::Core::get()?;
+            let db = core.db.lock()?;
+            let items = crate::store::todo_note::list(&db)?;
+            Ok(serde_json::json!({ "items": items }))
+        }
+        "todo_note_save" => {
+            let core = crate::core::Core::get()?;
+            let id = str_req(req, "id")?;
+            let patch = note_patch(req)?;
+            let state = {
+                let db = core.db.lock()?;
+                crate::store::todo_note::save(&db, &id, &patch)?
+            };
+            // 刻意**不发** CLIP_CHANGED:便签几何/折叠态变化与列表内容无关,
+            // 发一次会让整页列表白刷(委托重建、滚动位置复位)。状态同步走
+            // NoteRegistry 直接读返回值完成。
+            Ok(serde_json::to_value(state)?)
+        }
+        "todo_note_delete" => {
+            let core = crate::core::Core::get()?;
+            let id = str_req(req, "id")?;
+            let db = core.db.lock()?;
+            // 幂等:行不存在也返回成功(宿主关窗路径不应因"行已没了"而报错)。
+            crate::store::todo_note::delete_for_entry(&db, &id)?;
+            Ok(serde_json::Value::Null)
+        }
+
         // 「清空已完成」(归档清理;与 clear_history 分离 —— 见 store::todo::clear_done)
         "todo_clear_done" => {
             let core = crate::core::Core::get()?;
@@ -1320,6 +1377,60 @@ fn ms_opt_opt(req: &serde_json::Value, key: &str) -> AppResult<Option<Option<i64
             .as_i64()
             .map(|ms| Some(Some(ms)))
             .ok_or_else(|| AppError::InvalidInput(format!("{key} 应为毫秒时间戳整数或 null"))),
+    }
+}
+
+/// 便签窗口状态的补丁参数(docs/20 §4):**键缺失 = 不改**,显式值 = 设置。
+///
+/// 数值类字段在这里**原样收集**,夹紧统一由 `store::todo_note::save` 做 ——
+/// 两处各夹一遍会出现"宿主以为存的是 300、库里其实是 1200"这种对不上。
+fn note_patch(req: &serde_json::Value) -> AppResult<crate::store::todo_note::NotePatch> {
+    use crate::store::todo_note::{NoteEdge, NotePatch};
+    let int = |key: &str| -> AppResult<Option<i64>> {
+        match req.get(key) {
+            None => Ok(None),
+            Some(v) => v
+                .as_i64()
+                .map(Some)
+                .ok_or_else(|| AppError::InvalidInput(format!("{key} 应为整数"))),
+        }
+    };
+    let flag = |key: &str| -> AppResult<Option<bool>> {
+        match req.get(key) {
+            None => Ok(None),
+            Some(v) => v
+                .as_bool()
+                .map(Some)
+                .ok_or_else(|| AppError::InvalidInput(format!("{key} 应为布尔值"))),
+        }
+    };
+    let edge = match str_opt(req, "edge") {
+        None => None,
+        Some(text) => Some(NoteEdge::parse(&text)?),
+    };
+    Ok(NotePatch {
+        x: int("x")?,
+        y: int("y")?,
+        w: int("w")?,
+        h: int("h")?,
+        screen: req.get("screen").and_then(|v| v.as_str()).map(str::to_owned),
+        edge,
+        auto_hide: flag("autoHide")?,
+        collapsed: flag("collapsed")?,
+        top_most: flag("topMost")?,
+        visible: flag("visible")?,
+        opacity: int("opacity")?,
+        font_size: int("fontSize")?,
+    })
+}
+
+/// 三态字符串(update 用):键缺失 = None(不改);null = Some(None)(清空);
+/// 字符串 = Some(Some(s))(设置;空串也按"设置空值"处理,由 store 归一化成 NULL)。
+fn str_opt_opt(req: &serde_json::Value, key: &str) -> Option<Option<String>> {
+    match req.get(key) {
+        None => None,
+        Some(serde_json::Value::Null) => Some(None),
+        Some(v) => Some(v.as_str().map(str::to_owned)),
     }
 }
 

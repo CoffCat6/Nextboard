@@ -369,10 +369,14 @@ void ClipEntryModel::todoUpdateTimes(const QString& id, const QVariantMap& times
 }
 
 QVariantMap ClipEntryModel::todoSave(const QString& id, const QString& text,
-                                     const QVariantMap& times, const QStringList& tags) {
+                                     const QVariantMap& times, const QStringList& tags,
+                                     const QString& noteText) {
     const bool editing = !id.isEmpty();
     QVariantMap req;
     req.insert("text", text);
+    // 备注:编辑时**总是**下发(空串 = 明确清空);新建时只在非空时下发
+    // —— 与 tags 同一取舍:core 对缺键视为"不改",不下发就清不掉旧备注。
+    if (editing || !noteText.isEmpty()) req.insert("noteText", noteText);
     if (editing) req.insert("id", id);
     applyTimeFields(req, times, "dueAt");
     applyTimeFields(req, times, "remindAt");
@@ -407,6 +411,8 @@ QVariantMap ClipEntryModel::todoMeta(const QString& id) {
     if (kind != QLatin1String("todo")) return {};
     QVariantMap out;
     out.insert("text", data.value("textContent").toString());
+    // 备注(docs/21):空 = 无备注
+    out.insert("noteText", data.value("noteText").toString());
     out.insert("dueAt", static_cast<qint64>(data.value("dueAt").toDouble()));
     out.insert("remindAt", static_cast<qint64>(data.value("remindAt").toDouble()));
     out.insert("notifyAt", static_cast<qint64>(data.value("notifyAt").toDouble()));
@@ -580,6 +586,9 @@ void ClipEntryModel::applyPage(const QVariantMap& resp, bool append) {
             r.todoDueAt = static_cast<qint64>(badge.value("dueAt").toDouble());
             r.todoDone = badge.value("done").toBool();
             r.todoOverdue = badge.value("overdue").toBool();
+            // 备注在**顶层** noteText(todo_get/todo_list/todo_note_list 同一口径),
+            // 不在 todo 徽标里 —— 徽标只放卡片正面必需的最小集(docs/05 §2.3)。
+            r.todoNote = e.value("noteText").toString();
             // 提醒时刻只有 todo_list / todo_get 下发(树标里没有):编辑预填要用
             r.todoRemindAt = static_cast<qint64>(e.value("remindAt").toDouble());
         }

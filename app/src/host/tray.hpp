@@ -24,12 +24,17 @@ private:
     /// 重建「今日待办」二级菜单的条目(docs/05-todo.md §6.6):
     /// 每次一级菜单 aboutToShow 时调用 —— 不搞后台轮询,打开菜单才拉数。
     void refreshTodoSubmenu();
+    /// 重建「桌面便签」二级菜单(docs/20 §7.2):列出已打开的便签,附"全部展开/收起"。
+    /// 便签是 Qt::Tool(不占任务栏、不进 Alt+Tab),这是唯一的找回入口。
+    void refreshNoteSubmenu();
 
     PanelWindow& m_panel;
     CoreBridge& m_core;
     class QMenu* m_menu = nullptr;
     /// 「今日待办」二级菜单:内容在每次菜单展开时重建(§6.6)。
     class QMenu* m_todoMenu = nullptr;
+    /// 「桌面便签」二级菜单:每次一级菜单展开时重建(与今日待办同一钩子)。
+    class QMenu* m_noteMenu = nullptr;
     /// 「暂停/恢复监听」菜单项:文案随状态切换(见 tray.cpp —— 刻意**不用**
     /// 勾选态表达状态,理由在那里)。
     QAction* m_pauseAction = nullptr;

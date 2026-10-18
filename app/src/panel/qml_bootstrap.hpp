@@ -15,6 +15,12 @@ class QBoxLayout;
 namespace nb {
 
 class PanelWindow;
+class ClipEntryModel;
+
+/// QML 侧那个唯一的列表模型实例(由 setupQmlEnvironment 创建)。
+/// **验收专用**:让 --note-flow 能走"面板编辑卡片的真实保存路径",
+/// 而不是裸调 todo_update 绕开组装逻辑。setupQmlEnvironment 之前返回 nullptr。
+ClipEntryModel* entryModelInstance();
 
 /// 在 QApplication 之后、PanelWindow 创建前调用一次。
 void setupQmlEnvironment();

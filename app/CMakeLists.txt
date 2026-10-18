@@ -40,6 +40,7 @@ add_executable(nextboard WIN32
     src/host/tray.cpp
     src/host/hotkeys.cpp
     src/host/acceptance.cpp
+    src/host/note_flow.cpp
     src/host/capture_toolbar_flow.cpp
     src/host/stitch_flow.cpp
     src/host/stitch_live_flow.cpp
@@ -56,6 +57,8 @@ add_executable(nextboard WIN32
     src/editor/tool_icons.cpp
     src/editor/editor_window.cpp
     src/pin/pin_window.cpp
+    src/note/note_window.cpp
+    src/note/note_registry.cpp
 )
 
 # ---- 主面板 QML(qt_add_qml_module → qrc,无运行期文件依赖) ----

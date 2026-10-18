@@ -50,6 +50,11 @@
 
 ## 2. 数据模型与迁移
 
+> **v8 补充(2026-10-18)**:待办已拆成「标题 + 备注」—— `clip_entries.text_content`
+> 明确为**标题**(必填),备注存 `todo_meta.note_text`(可空、可多行,已纳入 FTS)。
+> 设计见 [21-todo-title-note.md](./21-todo-title-note.md);本文档其余部分(时刻/调度/
+> 排序/UI 分组)不受影响。
+
 ### 2.1 决策:待办即条目(kind = 'todo')+ 独立扩展表
 
 `clip_entries.kind` 增 `'todo'`,待办专属**时刻字段**放扩展表 `todo_meta(id = 条目 id)`。
@@ -208,6 +213,11 @@ todo 调度线程 → notify_host(WM_APP_TODO_DUE)
 ---
 
 ## 6. UI 设计
+
+> 桌面便签(待办贴屏)是**独立功能**,已实现(v7 `todo_note` 表 + `app/src/note/`),
+> 设计与实现记录见 [20-todo-sticky-note.md](./20-todo-sticky-note.md);本节只覆盖面板内的
+> 待办视图。两者的数据关系:便签**不是**另一种条目,而是 `kind='todo'` 条目的
+> 第二个视图(1:1,主键即条目 id),时刻仍在 `todo_meta`。
 
 ### 6.1 头部入口
 

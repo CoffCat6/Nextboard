@@ -1,6 +1,7 @@
 #include "tray.hpp"
 #include "capture/capture_session.hpp"
 #include "../app_font.hpp"
+#include "note/note_registry.hpp"
 #include "panel/core_facade.hpp"
 #include "panel/panel_window.hpp"
 
@@ -108,6 +109,26 @@ void Tray::buildMenu() {
         else CoreFacade::instance().openTodoEntry(id);
     });
 
+    // ---- 「便签」二级菜单(docs/20 §7.2)----
+    // ⚠️ 这是**必需的兜底**,不是锦上添花:便签是 Qt::Tool 窗口,不占任务栏、
+    //    不进 Alt+Tab,被别的置顶窗口盖住时就再也点不到。core_facade.cpp 里
+    //    "漏一次用户就再也找不回来"的教训对便签同样成立。
+    m_noteMenu = new QMenu(QStringLiteral("桌面便签"), m_menu);
+    m_noteMenu->setObjectName(QStringLiteral("nbTrayTodoMenu"));
+    m_noteMenu->addAction(QStringLiteral("暂无便签"))->setEnabled(false);
+    m_menu->addMenu(m_noteMenu);
+    connect(m_noteMenu, &QMenu::triggered, this, [this](QAction* action) {
+        const QString cmd = action->data().toString();
+        if (cmd == QLatin1String("expand-all")) {
+            CoreFacade::instance().expandAllTodoNotes();
+        } else if (cmd == QLatin1String("collapse-all")) {
+            CoreFacade::instance().collapseAllTodoNotes();
+        } else if (!cmd.isEmpty()) {
+            // 点某张便签:展开并前置(已开着的窗口由注册表负责抬到最前)
+            CoreFacade::instance().openTodoNote(cmd);
+        }
+    });
+
     m_menu->addAction("打开翻译", [] { CoreFacade::instance().openTranslateCentered(); });
     m_menu->addSeparator();
     // 截图 / 贴图入口(对齐第一代托盘):截图前先收起面板,否则面板会被拍进画面;
@@ -136,6 +157,7 @@ void Tray::buildMenu() {
         m_delayAction->setText(
             QStringLiteral("延时截图（%1 秒）").arg(captureDelaySeconds()));
         refreshTodoSubmenu();
+        refreshNoteSubmenu();
     });
     // 口径与热键一致(默认"最近复制",可在设置里切换为"图片优先")
     m_menu->addAction("贴图（最近内容）", [] { CoreFacade::instance().pinLatest(); });
@@ -164,6 +186,45 @@ void Tray::buildMenu() {
     m_menu->addAction(QStringLiteral("退出"), [] {
         QApplication::quit();
     });
+}
+
+void Tray::refreshNoteSubmenu() {
+    m_noteMenu->clear();
+    const QVariantList notes = NoteRegistry::instance().describe();
+    if (notes.isEmpty()) {
+        m_noteMenu->addAction(QStringLiteral("暂无便签"))->setEnabled(false);
+        m_noteMenu->addSeparator();
+        QAction* const hint = m_noteMenu->addAction(
+            QStringLiteral("（在待办卡片右键「贴到桌面」）"));
+        hint->setEnabled(false);
+        return;
+    }
+    // 逐张列出:id 作为 data,点击即展开前置(即便窗口被盖住也能找回来)
+    for (const QVariant& raw : notes) {
+        const QVariantMap note = raw.toMap();
+        const QString id = note.value(QStringLiteral("id")).toString();
+        // 摘要从 core 现取(便签窗口自身不缓存正文给托盘看):一次主键查询,
+        // 且能顺带发现"条目已被删"的残留(那种情况下面会显示占位文案)。
+        const QVariantMap got = CoreFacade::instance().call(
+            QStringLiteral("todo_get"), {{QStringLiteral("id"), id}});
+        QString label = QStringLiteral("(已失效)");
+        if (got.value(QStringLiteral("ok")).toBool()) {
+            const QString text = got.value(QStringLiteral("data")).toMap()
+                                     .value(QStringLiteral("textContent")).toString();
+            if (!text.isEmpty()) {
+                label = text.section(QLatin1Char('\n'), 0, 0).left(20);
+                if (text.section(QLatin1Char('\n'), 1).size() > 0) label += QStringLiteral("…");
+            }
+        }
+        if (note.value(QStringLiteral("collapsed")).toBool()) {
+            label = QStringLiteral("〔收起〕") + label;
+        }
+        QAction* const entry = m_noteMenu->addAction(label);
+        entry->setData(id);
+    }
+    m_noteMenu->addSeparator();
+    m_noteMenu->addAction(QStringLiteral("全部展开"))->setData(QStringLiteral("expand-all"));
+    m_noteMenu->addAction(QStringLiteral("全部收起"))->setData(QStringLiteral("collapse-all"));
 }
 
 void Tray::refreshTodoSubmenu() {

@@ -50,6 +50,7 @@ public:
         TodoRemindRole,  // 待办:提醒时刻毫秒(编辑预填/推迟用);无 = 0
         TodoDoneRole,    // 待办:是否已完成(划线归档)
         TodoOverdueRole, // 待办:未完成且已过截止
+    TodoNoteRole,    // 待办:备注(docs/21);无 = 空串
     };
     Q_ENUM(Roles)
 
@@ -109,8 +110,9 @@ public:
     /// 新建/编辑待办:id 为空 = 新建,否则编辑;成功后重拉并返回 {ok, id?}。
     /// ⚠️ 编辑时 tags **总是**下发(空数组 = 清空标签),否则"删光标签保存"会静默无效。
     Q_INVOKABLE QVariantMap todoSave(const QString& id, const QString& text,
-                                     const QVariantMap& times, const QStringList& tags);
-    /// 待办编辑预填:{text, dueAt, remindAt, notifyAt}(毫秒,无则 0);
+                                     const QVariantMap& times, const QStringList& tags,
+                                     const QString& noteText = QString());
+    /// 待办编辑预填:{text, noteText, dueAt, remindAt, notifyAt}(毫秒,无则 0);
     /// 非 todo / 不存在返回空 map(QML 侧判空)。
     Q_INVOKABLE QVariantMap todoMeta(const QString& id);
     /// 条目 id → 当前行号(托盘「今日待办」点击定位用);不在当前行集返回 -1。
@@ -190,6 +192,7 @@ private:
         qint64 todoRemindAt = 0;  // 0 = 无提醒
         bool todoDone = false;
         bool todoOverdue = false;
+        QString todoNote;         // 备注(docs/21);空串 = 无备注
     };
     QVector<Row> m_rows;
     QString m_view = "all";

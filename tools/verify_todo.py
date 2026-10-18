@@ -17,11 +17,20 @@
 import ctypes
 import json
 import os
+import re
 import shutil
+import sys
 import sqlite3
 import tempfile
 import time
 from pathlib import Path
+
+# windows 控制台默认 GBK,输出里的 ✅/中文会抛 UnicodeEncodeError,断言全过却让脚本
+# 以非 0 退出。强制 UTF-8,失败就退回可替换模式。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:  # pragma: no cover - 老 Python / 非 TTY
+    pass
 
 # 路径按**脚本位置**推导(仓库根 = tools/ 的上一级):此前写死绝对路径,
 # 换机器/换目录即失效 —— 入库后必须可移植。
@@ -76,7 +85,12 @@ def main():
     cols = [r[1] for r in con.execute("PRAGMA table_info(todo_meta)")]
     con.close()
     print("user_version:", ver, "| todo_meta 列:", cols)
-    assert ver == 6, ver
+    # 版本号从 core 源码读,不写死:每加一次迁移(v6→v7 就撞过一次)都要改这里,
+    # 而它真正要钉住的是"迁移跑到了最新",不是"等于某个具体数字"。
+    latest = int(re.search(r"const\s+LATEST_VERSION\s*:\s*i64\s*=\s*(\d+)",
+                           (REPO_ROOT / "core" / "nbcore" / "src" / "store" / "mod.rs")
+                           .read_text(encoding="utf-8")).group(1))
+    assert ver == latest, f"user_version={ver} 应为 {latest}"
     assert "todo_meta" in tabs, tabs
     assert "bubble_shown" in cols and "reminded" in cols, cols
     print("  ✅ v6 迁移:todo_meta 建好、版本号正确")

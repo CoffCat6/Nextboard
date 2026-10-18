@@ -47,6 +47,11 @@ Rectangle {
     property real acceptanceTargetMs: 0
     property string acceptanceInputText: ""
 
+    /// 验收:打开「新建待办」卡片(等价点头部按钮)。只做这一件事。
+    function acceptanceOpenTodoComposer() {
+        root.openTodoComposer(null)
+    }
+
     function acceptanceOpenPicker() {
         openTodoComposer(null)
         openTimePicker(todoDueField)          // 等价用户点「截止」字段
@@ -840,6 +845,8 @@ Rectangle {
         // 条目被翻页/筛选排除时会拿不到,编辑一下就把正文清空了。
         const snapshot = entry && entry.text ? entry.text : ""
         todoInput.text = entry ? snapshot : ""
+        // 备注回填走 todo_get(快照里没有备注字段;条目可能被分页挡掉,故不查行集)
+        todoNoteInput.text = ""
         // 时刻与标签走 todo_get 一次取全(meta 为空 = 非待办/不存在 → 全空)
         const meta = entry ? Entries.todoMeta(entry.entryId) : null
         todoPrefilling = true
@@ -848,6 +855,7 @@ Rectangle {
         const r = meta && meta.remindAt > 0 ? meta.remindAt : 0
         const n = meta && meta.notifyAt > 0 ? meta.notifyAt : 0
         todoRemindField.apply((r > 0 && n > 0) ? Math.min(r, n) : Math.max(r, n))
+        todoNoteInput.text = meta && meta.noteText ? meta.noteText : ""
         todoPrefilling = false
         // 回填**不算**用户手动设置:此后改截止,提醒应跟随新的默认联动
         remindManuallySet = false
@@ -938,7 +946,7 @@ Rectangle {
     function commitTodoComposer() {
         const text = todoInput.text.trim()
         if (text === "") {
-            todoError.text = "写点什么吧 —— 正文不能为空"
+            todoError.text = "标题不能为空"
             return
         }
         // 提醒/通知合并为一个 UI 时刻:写同值 —— 到点时面板高亮 + 托盘气泡
@@ -956,7 +964,9 @@ Rectangle {
             if (t.length > 0 && tags.indexOf(t) < 0) tags.push(t)
         }
         todoError.text = ""
-        const resp = Entries.todoSave(todoEditId, text, times, tags)
+        // 备注(docs/21):可空,多行原样提交
+        const noteText = todoNoteInput.text
+        const resp = Entries.todoSave(todoEditId, text, times, tags, noteText)
         if (resp.ok !== true) {
             // core 原文直接进错误行(如"正文超过 4KB"),卡片不关、输入不丢
             todoError.text = resp.message ? resp.message : "保存失败"
@@ -1993,6 +2003,7 @@ Rectangle {
                     todoRemindAt: rowWrap.todoRemindAt
                     todoDone: rowWrap.todoDone
                     todoOverdue: rowWrap.todoOverdue
+                    todoNote: model.todoNote ? model.todoNote : ""
                     // 键盘光标行:与"菜单打开"同用强调语言(两者都是"正在被操作的对象"),
                     // 但键盘光标只在无浮层时出现 —— 有菜单时焦点语义归菜单。
                     menuOpen: (root.menuTarget !== null
@@ -2312,6 +2323,10 @@ Rectangle {
                 addAction("推迟 1 小时", function() { root.postponeTodo(entry.entryId, 3600 * 1000) })
                 addAction("推迟到明天", function() { root.postponeTodo(entry.entryId, 24 * 3600 * 1000) })
                 addAction("编辑待办…", function() { root.openTodoComposer(entry) })
+                // 桌面便签(docs/20):把这条待办贴成常驻桌面的小窗。
+                // 便签是**待办的第二个视图**(不是贴图):可编辑、勾完成、贴边半隐藏,
+                // 几何/收起态落库,重启复原。
+                addAction("贴到桌面（便签）", function() { Core.openTodoNote(entry.entryId) })
                 addSep()
             }
 
@@ -2840,7 +2855,9 @@ Rectangle {
                 color: Theme.colors.textPrimary
             }
 
-            // 正文:多行;Enter 提交、Shift+Enter 换行(§6.2)。
+            // 标题(docs/21):**第一行**,必填,Enter 提交。
+            // ⚠️ 与下面的备注框语义相反 —— 备注多行、Enter 换行,写反了就会
+            //    "打一句话就提交"或"按回车提交不了"(两处都踩过)。
             // ⚠️ TextEdit 是基础项,没有 `background` 属性(那是 Control 的):
             //    直接写会让整个 Main.qml 加载失败。用 Rectangle 包一层做底板。
             Rectangle {
@@ -2852,6 +2869,8 @@ Rectangle {
                 border.color: todoInput.activeFocus ? Theme.colors.accent : Theme.colors.border
                 TextEdit {
                     id: todoInput
+                    // 验收用:断言"标题在备注上方"(2026-10-18 曾把两块写反)
+                    objectName: "todoTitleInput"
                     anchors.fill: parent
                     anchors.margins: 8
                     wrapMode: TextEdit.Wrap
@@ -2883,6 +2902,88 @@ Rectangle {
                         root.commitTodoComposer()
                     }
                     Keys.onEscapePressed: root.closeTodoComposer()
+                }
+            }
+
+            // 备注(docs/21):可多行、默认可空。标题是一句话,细节写这里。
+            // 折叠态只占一行高度:卡片本身不大,常驻一个多行框会把时间/标签挤出视野;
+            // 有内容或有焦点时自动展开,避免"写了却看不见"。
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 2
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 6
+                    Text {
+                        text: "备注"
+                        color: Theme.colors.textSecondary
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.metrics.fontCaption
+                    }
+                    Text {
+                        visible: !parent.noteExpanded
+                        text: (todoNoteInput.text.length > 0
+                               ? "（" + todoNoteInput.text.split("\n").length + " 行）"
+                               : "（可选，点右侧展开）")
+                        color: Theme.colors.textFaint
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.metrics.fontCaption
+                    }
+                    Item { Layout.fillWidth: true }
+                    // ⚠️ 不能用 ReadableCheckBox:它只在 SettingsDrawer.qml 内部定义,
+                    //    不是模块级类型 —— 引用会整份 Main.qml 加载失败
+                    //    ("ReadableCheckBox is not a type"),面板直接空白。
+                    //    这里用主面板已有的 ThemedButton,状态靠属性 + 文案表达。
+                    property bool noteExpanded:
+                        todoNoteInput.text.length > 0 || todoNoteInput.activeFocus
+                    ThemedButton {
+                        id: todoNoteToggle
+                        text: parent.noteExpanded ? "收起" : "展开"
+                        variant: "ghost"
+                        onClicked: {
+                            // 收起时把焦点交还标题框,避免正文框仍持有隐式焦点却不可见
+                            if (parent.noteExpanded) todoInput.forceActiveFocus()
+                            parent.noteExpanded = !parent.noteExpanded
+                        }
+                    }
+                }
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: Math.max(todoNoteInput.implicitHeight + 16, 44)
+                    visible: parent.noteExpanded
+                    color: Theme.colors.surfaceSecondary
+                    radius: Theme.metrics.radiusInput
+                    border.width: Theme.metrics.borderWidth
+                    border.color: todoNoteInput.activeFocus
+                                  ? Theme.colors.accent : Theme.colors.border
+                    TextEdit {
+                        id: todoNoteInput
+                        // 验收用:与标题框一起校验**纵向顺序**
+                        objectName: "todoNoteInput"
+                        anchors.fill: parent
+                        anchors.margins: 8
+                        wrapMode: TextEdit.Wrap
+                        color: Theme.colors.textPrimary
+                        selectionColor: Theme.colors.accent
+                        selectedTextColor: Theme.colors.accentText
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.metrics.fontBody
+                        // ⚠️ 备注**不能**把 Enter 当提交:它是多行输入,
+                        //    与标题框(Enter 提交)语义相反。
+                        Keys.onReturnPressed: function(event) {
+                            event.accepted = true
+                            todoNoteInput.insert(todoNoteInput.cursorPosition, "\n")
+                        }
+                        Text {
+                            visible: todoNoteInput.text === "" && !todoNoteInput.activeFocus
+                            anchors.top: parent.top
+                            anchors.left: parent.left
+                            text: "补充说明、清单、链接…"
+                            color: Theme.colors.textFaint
+                            font.family: Theme.fontFamily
+                            font.pixelSize: Theme.metrics.fontBody
+                        }
+                    }
                 }
             }
 

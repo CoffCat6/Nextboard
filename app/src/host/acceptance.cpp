@@ -943,5 +943,32 @@ void runAutoStartFlow() {
     QApplication::quit();
 }
 
-} // namespace nb
 
+// ---- 待办编辑卡片字段顺序(--todo-layout-flow)----
+void runTodoLayoutFlow(PanelWindow& panel) {
+    // 打开新建卡片(等价点头部「待办」按钮),然后比较两个输入框的纵向位置。
+    // ⚠️ 用 mapToScene 而不是 y:两者的父级不同(标题框在 Rectangle 里、备注框在
+    //    ColumnLayout 里),直接比 y 是在比两个不同坐标系下的值,毫无意义。
+    QTimer::singleShot(3500, &panel, [&panel] {
+        panel.openTodoComposerForAcceptance();
+        QTimer::singleShot(600, &panel, [&panel] {
+            const qreal titleY = panel.acceptanceItemSceneY(QStringLiteral("todoTitleInput"));
+            const qreal noteY = panel.acceptanceItemSceneY(QStringLiteral("todoNoteInput"));
+            const bool bothPresent = titleY >= 0 && noteY >= 0;
+            qInfo() << "TODO-LAYOUT 标题 y:" << titleY << "备注 y:" << noteY
+                    << "两者都存在:" << bothPresent;
+            if (!bothPresent) {
+                qWarning().noquote()
+                    << "TODO-LAYOUT FAIL 找不到标题/备注输入框(objectName 缺失?)";
+            } else if (!(titleY < noteY)) {
+                qWarning().noquote()
+                    << "TODO-LAYOUT FAIL 标题必须排在备注**上面**(当前标题 y 不小于备注 y)";
+            } else {
+                qInfo().noquote() << "TODO-LAYOUT PASS 标题在第一行、备注在第二行";
+            }
+            QApplication::quit();
+        });
+    });
+}
+
+} // namespace nb

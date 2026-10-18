@@ -764,12 +764,39 @@ fn import_snapshot(
             ],
         )?;
         // 待办扩展行随条目(1:1;重铸 id 时同样换键)。
+        // ⚠️ 便签窗口状态(todo_note)也要跟着搬(docs/20 §3.4):只搬 todo_meta 的话
+        //    "导入备份后待办都在、桌面便签一张不剩"—— 这正是 v6 待办导入时踩过的同一处。
         if row.kind == "todo" {
+            if let Some(note) = read_todo_note(&staged_conn, &row.id)? {
+                tx.execute(
+                    "INSERT OR REPLACE INTO todo_note
+                       (id, x, y, w, h, screen, edge, auto_hide, collapsed, top_most,
+                        visible, opacity, font_size, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                    params![
+                        new_id,
+                        note.0,
+                        note.1,
+                        note.2,
+                        note.3,
+                        note.4,
+                        note.5,
+                        note.6,
+                        note.7,
+                        note.8,
+                        note.9,
+                        note.10,
+                        note.11,
+                        note.12
+                    ],
+                )?;
+            }
             if let Some(meta) = read_todo_meta(&staged_conn, &row.id)? {
                 tx.execute(
                     "INSERT OR REPLACE INTO todo_meta
-                       (id, due_at, remind_at, notify_at, done_at, reminded, notified, bubble_shown)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                       (id, due_at, remind_at, notify_at, done_at, reminded, notified,
+                        bubble_shown, note_text)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                     params![
                         new_id,
                         meta.0,
@@ -778,7 +805,8 @@ fn import_snapshot(
                         meta.3,
                         meta.4,
                         meta.5,
-                        meta.6
+                        meta.6,
+                        meta.7
                     ],
                 )?;
             }
@@ -852,14 +880,95 @@ fn read_staged_rows(conn: &Connection) -> AppResult<Vec<StagedRow>> {
 }
 
 #[allow(clippy::type_complexity)]
+/// staged 里的便签窗口状态(docs/20 §3.4)。返回 13 元组避免为导入再定义一个结构体
+/// (与 read_todo_meta 的取舍一致:只在本文件内用一次)。
+///
+/// 顺序:x, y, w, h, screen, edge, auto_hide, collapsed, top_most, visible,
+///       opacity, font_size, updated_at
+#[allow(clippy::type_complexity)]
+fn read_todo_note(
+    conn: &Connection,
+    id: &str,
+) -> AppResult<
+    Option<(
+        i64,
+        i64,
+        i64,
+        i64,
+        String,
+        String,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+    )>,
+> {
+    // 旧备份(v7 之前)没有这张表 —— 查询会报 "no such table"。这里**宽容处理**:
+    // 表不存在 = 该备份没有便签数据,返回 None 而不是让整次导入失败。
+    let sql = "SELECT x, y, w, h, screen, edge, auto_hide, collapsed, top_most, \
+               visible, opacity, font_size, updated_at FROM todo_note WHERE id = ?1";
+    let mut stmt = match conn.prepare(sql) {
+        Ok(stmt) => stmt,
+        Err(_) => return Ok(None),
+    };
+    let mut rows = stmt.query(params![id])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    Ok(Some((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+        row.get(9)?,
+        row.get(10)?,
+        row.get(11)?,
+        row.get(12)?,
+    )))
+}
+
+/// staged 里的待办扩展行。
+/// 顺序:due_at, remind_at, notify_at, done_at, reminded, notified, bubble_shown, note_text
+#[allow(clippy::type_complexity)]
 fn read_todo_meta(
     conn: &Connection,
     id: &str,
-) -> AppResult<Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>, i64, i64, i64)>> {
-    let mut stmt = conn.prepare(
-        "SELECT due_at, remind_at, notify_at, done_at, reminded, notified, bubble_shown
-         FROM todo_meta WHERE id = ?1",
-    )?;
+) -> AppResult<
+    Option<(
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        i64,
+        i64,
+        i64,
+        Option<String>,
+    )>,
+> {
+    // ⚠️ 旧备份(v8 之前)的 todo_meta 没有 note_text 列 —— 查询会报 no such column。
+    //    与 read_todo_note 同一取舍:列不存在 = 该备份没有备注,返回 None 让整次导入
+    //    继续,而不是因为少一列就整包失败。
+    let has_note = conn
+        .prepare("SELECT note_text FROM todo_meta LIMIT 0")
+        .is_ok();
+    let sql = if has_note {
+        "SELECT due_at, remind_at, notify_at, done_at, reminded, notified, bubble_shown,
+                note_text
+         FROM todo_meta WHERE id = ?1"
+    } else {
+        "SELECT due_at, remind_at, notify_at, done_at, reminded, notified, bubble_shown,
+                NULL
+         FROM todo_meta WHERE id = ?1"
+    };
+    let mut stmt = conn.prepare(sql)?;
     let mut rows = stmt.query(params![id])?;
     if let Some(row) = rows.next()? {
         return Ok(Some((
@@ -870,6 +979,7 @@ fn read_todo_meta(
             row.get(4)?,
             row.get(5)?,
             row.get(6)?,
+            row.get(7)?,
         )));
     }
     Ok(None)
@@ -1010,7 +1120,13 @@ mod tests {
             s
         };
         let v: serde_json::Value = serde_json::from_str(&manifest_bytes).unwrap();
-        assert_eq!(v["schema_version"], 6);
+        // 不写死版本号:迁移一升级(v6→v7 就撞过一次)这条断言就会误红,
+        // 而它真正要钉住的是"manifest 版本 = 核心当前 schema 版本",不是"等于 6"。
+        assert_eq!(
+            v["schema_version"],
+            crate::store::LATEST_VERSION,
+            "manifest 的 schema_version 必须跟随核心当前版本"
+        );
         assert_eq!(v["entry_count"], 2);
         let blob_bytes = {
             let mut blob = archive.by_name("blobs/a.png").unwrap();

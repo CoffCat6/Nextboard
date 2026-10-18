@@ -14,6 +14,13 @@
 import re
 import sqlite3
 import sys
+
+# windows 控制台默认 GBK,输出里的 ✅/❌/中文会抛 UnicodeEncodeError —— 实测断言
+# 全过却在最后一行 print 上崩,退出码非 0 被当成"检查失败"。这里强制 UTF-8。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:  # pragma: no cover - 老 Python / 非 TTY
+    pass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -53,7 +60,8 @@ if ver != EXPECTED_VERSION:
 triggers = sorted(r[0] for r in con.execute(
     "SELECT name FROM sqlite_master WHERE type='trigger'"))
 print("triggers:", triggers)
-for t in ("clip_fts_insert", "clip_fts_delete", "clip_fts_update"):
+for t in ("clip_fts_insert", "clip_fts_delete", "clip_fts_update",
+          "todo_meta_fts_insert", "todo_meta_fts_update"):
     if t not in triggers:
         fail.append(f"缺少 FTS 触发器 {t}(搜索/索引同步会静默失效)")
 
@@ -74,6 +82,26 @@ tables = sorted(r[0] for r in con.execute(
     "SELECT name FROM sqlite_master WHERE type='table'"))
 if "todo_meta" not in tables:
     fail.append("缺少 todo_meta 表")
+# v7 便签窗口状态(docs/20 §3.2):表或索引缺失 → 贴屏功能整块失效(便签不落库)
+if "todo_note" not in tables:
+    fail.append("缺少 todo_note 表(v7 迁移未执行)")
+if "idx_todo_note_screen" not in indexes:
+    fail.append("缺少索引 idx_todo_note_screen")
+# 便签扩展表的孤儿行体检:指向已删条目的行(级联漏了就靠这里暴露)
+if "todo_note" in tables:
+    orphan = con.execute(
+        "SELECT COUNT(*) FROM todo_note n "
+        "LEFT JOIN clip_entries e ON e.id = n.id "
+        "WHERE e.id IS NULL OR e.kind != 'todo'").fetchone()[0]
+    print("todo_note 孤儿行:", orphan)
+    if orphan:
+        fail.append(f"todo_note 有 {orphan} 行孤儿(条目已删/非待办,级联漏了)")
+# 备注列(v8):丢了这一列,待办只剩标题,备注静默消失
+meta_cols = [r[1] for r in con.execute("PRAGMA table_info(todo_meta)")]
+if "note_text" not in meta_cols:
+    fail.append("todo_meta 缺少 note_text 列(v8 迁移未执行)")
+print("todo_meta 列:", meta_cols)
+
 cols = [r[1] for r in con.execute("PRAGMA table_info(clip_entries)")]
 print("clip_entries 列数:", len(cols), cols)
 for c in ("source", "tags", "ocr_text", "file_paths"):

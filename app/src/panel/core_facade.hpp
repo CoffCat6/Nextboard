@@ -171,6 +171,14 @@ public:
     /// (托盘「今日待办」子菜单点击某条,docs/05-todo.md §6.6)。
     Q_INVOKABLE void openTodoEntry(const QString& id) { emit todoOpenRequested(id); }
 
+    /// 把一条待办贴到桌面(桌面便签,docs/20-todo-sticky-note.md)。
+    /// 已开着则展开前置;达上限(20 张)时 toast 提示并拒绝 —— 绝不静默淘汰旧便签。
+    Q_INVOKABLE void openTodoNote(const QString& id);
+
+    /// 托盘「便签」子菜单 / 热键的兜底入口:全部展开 / 全部收起。
+    Q_INVOKABLE void expandAllTodoNotes();
+    Q_INVOKABLE void collapseAllTodoNotes();
+
     /// 请求重新注册全局快捷键(设置里改完热键后调用)。
     /// 本类不认识 Hotkeys 实例,故只发信号,由 main.cpp 接线。
     Q_INVOKABLE void reloadHotkeys() { emit hotkeysChanged(); }

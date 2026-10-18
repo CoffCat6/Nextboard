@@ -40,6 +40,7 @@ static void fileMessageHandler(QtMsgType type, const QMessageLogContext& ctx, co
 #include "host/core_bridge.hpp"
 #include "host/memory_probe.hpp"
 #include "host/tray.hpp"
+#include "note/note_registry.hpp"
 #include "host/hotkeys.hpp"
 #include "host/acceptance.hpp"
 #include "host/auto_start.hpp"
@@ -126,7 +127,9 @@ int main(int argc, char* argv[]) {
                 || arg == QLatin1String("--capture-toolbar-flow")
                 || arg == QLatin1String("--autostart-flow")
                 || arg == QLatin1String("--stitch-settings-flow")
-                || arg == QLatin1String("--stitch-live-flow")) {
+                || arg == QLatin1String("--stitch-live-flow")
+                || arg == QLatin1String("--note-flow")
+                || arg == QLatin1String("--todo-layout-flow")) {
                 const QString dir = QDir(QCoreApplication::applicationDirPath())
                                         .filePath(QStringLiteral("acceptance-data"));
                 const bool created = QDir().mkpath(dir);
@@ -259,6 +262,8 @@ int main(int argc, char* argv[]) {
     bool stitchFlow = false;
     bool stitchSettingsFlow = false;
     bool stitchLiveFlow = false;
+    bool noteFlow = false;
+    bool todoLayoutFlow = false;
     for (int i = 1; i < argc; ++i) {
         const QString arg = QString::fromLocal8Bit(argv[i]);
         if (arg == QLatin1String("--screenshot") && i + 1 < argc)
@@ -315,6 +320,12 @@ int main(int argc, char* argv[]) {
         // 长截图真实采集验收:真窗口 + 真滚动 + 真采屏。会移动鼠标抓屏,故隔离数据目录。
         else if (arg == QLatin1String("--stitch-live-flow"))
             stitchLiveFlow = true;
+        // 桌面便签交互验收(docs/20 §10.2):会移动真实光标,故隔离数据目录。
+        else if (arg == QLatin1String("--note-flow"))
+            noteFlow = true;
+        // 编辑卡片字段顺序验收(docs/21):纯读回,不写库
+        else if (arg == QLatin1String("--todo-layout-flow"))
+            todoLayoutFlow = true;
     }
     // 待办交互验收(--todo-flow):真实点击驱动整条链路,逻辑见 host/acceptance.cpp
     if (todoFlow) nb::runTodoAcceptanceFlow(panel);
@@ -335,6 +346,8 @@ int main(int argc, char* argv[]) {
     if (stitchFlow) nb::runStitchFlow();
     if (stitchSettingsFlow) nb::runStitchSettingsFlow();
     if (stitchLiveFlow) nb::runStitchLiveFlow();
+    if (noteFlow) nb::runNoteAcceptanceFlow();
+    if (todoLayoutFlow) nb::runTodoLayoutFlow(panel);
     if (!shotPath.isEmpty()) {
         QTimer::singleShot(5000, &panel, [path = shotPath, queryText, openSettings,
                                           translateText, &panel] {
@@ -374,6 +387,28 @@ int main(int argc, char* argv[]) {
     // nbcore 通知 HWND = 主面板窗口;WM_APP → PanelWindow::clipChanged
     // → ClipEntryModel::refresh(200ms 去抖)。
     core.setNotifyHwnd(panel.nativeHandle());
+
+    // ---- 桌面便签(docs/20-todo-sticky-note.md)----
+    // 启动恢复:只为 todo_note.visible=1 的行建窗(visible=0 是"几何记忆")。
+    // ⚠️ 必须在 setNotifyHwnd 之后:恢复时会读库,而库通知目标此刻才就位。
+    nb::NoteRegistry::instance().restoreAll();
+    // 面板改动(改标题/备注/完成/删除)→ 便签同步。
+    //
+    // ⚠️ 必须接 **PanelWindow::clipChanged**,不是 CoreFacade::clipChanged
+    //    (2026-10-18 修"编辑待办后便签不刷新,要关掉重贴才变"):
+    //    core 的 WM_APP_CLIP_CHANGED 由 PanelWindow::nativeEvent 转发成
+    //    PanelWindow::clipChanged —— **所有** sqlite 写入(含 todo_update /
+    //    todo_set_done / todo_delete)都走这一条;
+    //    而 CoreFacade::clipChanged 只在宿主 C++ 主动调 notifyClipChanged() 的
+    //    两处(截图入库、编辑器提交)发,面板内的编辑根本不经过它。
+    //    接错信号的症状正是"便签永远停在打开那一刻的内容"。
+    QObject::connect(&panel, &nb::PanelWindow::clipChanged, &panel,
+                     [] { nb::NoteRegistry::instance().syncFromCore(); });
+    // 屏幕增删/分辨率变化:全部重夹回各自可用区(拔副屏后不留虚空的窗口)
+    QObject::connect(qApp, &QGuiApplication::screenAdded, &panel,
+                     [] { nb::NoteRegistry::instance().reclampAll(); });
+    QObject::connect(qApp, &QGuiApplication::screenRemoved, &panel,
+                     [] { nb::NoteRegistry::instance().reclampAll(); });
 
     const int rc = QApplication::exec();
 
