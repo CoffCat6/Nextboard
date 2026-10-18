@@ -714,6 +714,12 @@ void OverlayWidget::applyAdjustment(const QPoint& pos) {
 
 void OverlayWidget::paintEvent(QPaintEvent*) {
     QPainter painter(this);
+    // ⚠️ 守卫必须有:showFullScreen() 之后的第一帧里,窗口/后备缓冲可能尚未就绪,
+    // begin() 返回 false(engine == 0),后续 draw* 全部空转并刷出
+    // "QPainter::begin: Paint device returned engine == 0" + "Painter not active"。
+    // docs/06 §10 记录的现象(疑似首帧黑屏)即由此而来 —— 实测缺的正是这一帧,
+    // 丢掉它由 Qt 重发即可,冻结底图不会因此丢失。
+    if (!painter.isActive()) return;
     const qreal scale = dpr();
 
     // 冻结底图是**物理像素**,窗口坐标是**逻辑像素**:
