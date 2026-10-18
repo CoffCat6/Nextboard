@@ -235,8 +235,14 @@ Rectangle {
     /// 复制条目内容;成功即收起面板,便于直接粘贴到目标应用(第一代 use-entries.copy 语义)。
     function copyEntryAndHide() {
         const resp = Entries.copyEntry(root.entryId)
-        if (resp.ok) panelWindow.hidePanel()
-        else Core.showToast("复制失败:" + (resp.error ? resp.error.message : ""))
+        if (!resp.ok) {
+            Core.showToast("复制失败:" + (resp.error ? resp.error.message : ""))
+            return
+        }
+        panelWindow.hidePanel()
+        // 自动粘贴(N2):是否真的粘由设置 copyAutoPaste 决定(C++ 现读),
+        // 这里无条件调一次 —— 关掉时它立即返回。
+        Core.autoPasteIfEnabled()
     }
 
     /// 图片条目:编辑器会遮住面板,先收起再打开(第一代同语义)。

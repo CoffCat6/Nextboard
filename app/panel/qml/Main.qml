@@ -406,6 +406,73 @@ Rectangle {
         }
     }
 
+    // ---- 键盘导航(↑↓ / Enter / PageUp·PageDown) ----
+    /// 键盘光标所在行号;-1 = 无光标(尚未按过方向键)。
+    ///
+    /// 为什么归 QML 而不是模型:它是**纯视图态**(与滚动位置、hover 同层),
+    /// 模型 reset 后行号必然失效 —— 所以每次刷新都要夹回(clampKeyboardCursor),
+    /// 而不是让模型去维护一个"光标 id"。
+    property int kbIndex: -1
+
+    /// 列表当前是否该接管方向键:浮层(菜单/筛选/标签卡/待办卡/抽屉)打开时
+    /// **不接管** —— 那些浮层里有自己的焦点与按键语义,抢过来会误触发复制。
+    ///
+    /// ⚠️ 必须写成**函数**而不是 readonly property:这些卡片/列表都在本对象**之后**
+    ///    创建,根对象的属性绑定在构造期就求值,那时 id 还是 null —— 绑定会静默算成
+    ///    false(或抛一次 TypeError)且不自我修复,表现为"方向键永远没反应"。
+    function listKeysUsable() {
+        return panelWindow.mode === "list" && !selectMode && !filterPopupOpen
+            && menuTarget === null
+            && !(settingsDrawerLoader.item && settingsDrawerLoader.item.opened)
+            && !tagEditorCard.visible && !tagRenameCard.visible
+            && !todoComposerCard.visible && !bulkDeleteCard.visible
+            && !bulkTagCard.visible && !clearDoneCard.visible
+    }
+
+    /// 行数变化后把光标夹回有效范围(条目被删/筛选变化后行号会失效)。
+    /// 光标原本就在列表外(-1)则保持不变 —— 不要因为一次刷新就"凭空选中一条"。
+    function clampKeyboardCursor() {
+        if (kbIndex < 0) return
+        if (list.count === 0) { kbIndex = -1; return }
+        if (kbIndex >= list.count) kbIndex = list.count - 1
+    }
+
+    /// 移动键盘光标并保证该行可见。
+    function moveKeyboardCursor(delta) {
+        if (list.count === 0) return
+        if (kbIndex < 0) {
+            // 首次按方向键:↓ 从第一条开始,↑ 从最后一条开始(与 Win+V 的直觉一致)
+            kbIndex = delta > 0 ? 0 : list.count - 1
+        } else {
+            const next = Math.max(0, Math.min(list.count - 1, kbIndex + delta))
+            if (next === kbIndex) return
+            kbIndex = next
+        }
+        list.positionViewAtIndex(kbIndex, ListView.Contain)
+    }
+
+    /// 键盘 Home/End:首条 / 末条。
+    function jumpKeyboardCursor(toEnd) {
+        if (list.count === 0) return
+        kbIndex = toEnd ? list.count - 1 : 0
+        list.positionViewAtIndex(kbIndex, ListView.Contain)
+    }
+
+    /// 复制第 row 行并收起面板(N1 + N2 的公共出口)。
+    /// 收起后按设置决定是否自动粘贴 —— 判断在 C++(autoPasteIfEnabled 现读设置),
+    /// 这里无条件调一次即可。
+    function copyRowAndHide(row) {
+        const id = Entries.idAt(row)
+        if (id === "") return
+        const resp = Entries.copyEntry(id)
+        if (!resp.ok) {
+            Core.showToast("复制失败:" + (resp.error ? resp.error.message : ""))
+            return
+        }
+        panelWindow.hidePanel()
+        Core.autoPasteIfEnabled()
+    }
+
     /// 全选当前视图的**已加载行**(Ctrl+A / 工具条按钮共用)。
     /// ⚠️ 行数上限 = 已加载行数,不追页:工具条会提示范围,见 selectedCountText。
     function selectAllLoaded() {
@@ -914,13 +981,21 @@ Rectangle {
     // 与卡片内的同名逻辑等价,但只作用于**快照里的 id** —— 不依赖委托实例是否还在。
     function copyEntryAndHide(id) {
         const resp = Entries.copyEntry(id)
-        if (resp.ok) panelWindow.hidePanel()
-        else Core.showToast("复制失败:" + (resp.error ? resp.error.message : ""))
+        if (!resp.ok) {
+            Core.showToast("复制失败:" + (resp.error ? resp.error.message : ""))
+            return
+        }
+        panelWindow.hidePanel()
+        Core.autoPasteIfEnabled()
     }
     function copyPathAndHide(text) {
         const resp = Core.call("copy_text_to_clipboard", { text: text })
-        if (resp.ok) panelWindow.hidePanel()
-        else Core.showToast("复制失败:" + (resp.error ? resp.error.message : ""))
+        if (!resp.ok) {
+            Core.showToast("复制失败:" + (resp.error ? resp.error.message : ""))
+            return
+        }
+        panelWindow.hidePanel()
+        Core.autoPasteIfEnabled()
     }
     function editEntryAfterHide(id) {
         panelWindow.hidePanel()
@@ -991,13 +1066,50 @@ Rectangle {
             event.accepted = true
             return
         }
+        // ---- 键盘导航(N1):↑↓ 选行 / Enter 复制 / PgUp·PgDn 翻页 / Home·End ----
+        // 搜索框有焦点时**不接管**:方向键在输入框里是移光标,抢走会让用户改不了错字。
+        // ⚠️ 判定用 activeFocus 而不是 text !== "":用户可能留着搜索词却想翻列表。
+        const listFocused = root.listKeysUsable() && !searchInput.activeFocus
+        if (listFocused) {
+            const noMods = !(event.modifiers & (Qt.ControlModifier | Qt.AltModifier
+                                              | Qt.ShiftModifier | Qt.MetaModifier))
+            if (noMods && event.key === Qt.Key_Down) {
+                root.moveKeyboardCursor(1); event.accepted = true; return
+            }
+            if (noMods && event.key === Qt.Key_Up) {
+                root.moveKeyboardCursor(-1); event.accepted = true; return
+            }
+            if (noMods && event.key === Qt.Key_PageDown) {
+                root.moveKeyboardCursor(5); event.accepted = true; return
+            }
+            if (noMods && event.key === Qt.Key_PageUp) {
+                root.moveKeyboardCursor(-5); event.accepted = true; return
+            }
+            if (noMods && event.key === Qt.Key_Home && root.kbIndex >= 0) {
+                root.jumpKeyboardCursor(false); event.accepted = true; return
+            }
+            if (noMods && event.key === Qt.Key_End && root.kbIndex >= 0) {
+                root.jumpKeyboardCursor(true); event.accepted = true; return
+            }
+            // Enter = 复制光标行并收起(与单击卡片同语义:不走多选、不改卡片状态)
+            if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+                    && root.kbIndex >= 0) {
+                root.copyRowAndHide(root.kbIndex)
+                event.accepted = true
+                return
+            }
+        }
         if ((event.modifiers & Qt.ControlModifier)
                 && !(settingsDrawerLoader.item && settingsDrawerLoader.item.opened)
                 && panelWindow.mode !== "translate"
                 && event.key >= Qt.Key_1 && event.key <= Qt.Key_9) {
             const resp = Entries.copyByIndex(event.key - Qt.Key_1)
-            if (resp.ok) panelWindow.hidePanel()
-            else Core.showToast("复制失败:" + (resp.error ? resp.error.message : ""))
+            if (resp.ok) {
+                panelWindow.hidePanel()
+                Core.autoPasteIfEnabled()
+            } else {
+                Core.showToast("复制失败:" + (resp.error ? resp.error.message : ""))
+            }
             event.accepted = true
         }
     }
@@ -1142,6 +1254,15 @@ Rectangle {
                                 font: searchInput.font
                             }
                             onTextEdited: Entries.setQuery(text)
+                            // 在搜索框里按 ↓ 直接进入列表(Win+V / Spotlight 的通行习惯):
+                            // 输入完关键词后不该还要先用鼠标点一下列表。
+                            // ⚠️ 这里**只**接管 ↓:↑ 在输入框里保持默认(移光标/不动),
+                            //    否则用户在搜索词里按 ↑ 会突然跳走焦点,很难理解。
+                            Keys.onDownPressed: function(event) {
+                                if (!root.listKeysUsable()) return
+                                root.moveKeyboardCursor(1)
+                                event.accepted = true
+                            }
                         }
 
                         Text {
@@ -1872,9 +1993,12 @@ Rectangle {
                     todoRemindAt: rowWrap.todoRemindAt
                     todoDone: rowWrap.todoDone
                     todoOverdue: rowWrap.todoOverdue
+                    // 键盘光标行:与"菜单打开"同用强调语言(两者都是"正在被操作的对象"),
+                    // 但键盘光标只在无浮层时出现 —— 有菜单时焦点语义归菜单。
                     menuOpen: (root.menuTarget !== null
                                && root.menuTarget.entryId === rowWrap.entryId)
                               || root.highlightTodoId === rowWrap.entryId
+                              || (root.listKeysUsable() && root.kbIndex === rowWrap.index)
                     menuOpenElsewhere: root.menuTarget !== null
                     // ---- 条目多选 ----
                     selectMode: root.selectMode
@@ -2023,6 +2147,16 @@ Rectangle {
                 KeyCap { label: "1-9" }
                 Text {
                     text: "复制条目"
+                    color: Theme.colors.textSecondary
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.metrics.fontMicro
+                }
+                // ↑↓ / Enter 是键盘导航(N1)的唯一提示位:没有它用户不会想到
+                // 可以用键盘选条 —— 提示成本低于在每张卡片上画序号。
+                KeyCap { label: "↑↓" }
+                KeyCap { label: "Enter" }
+                Text {
+                    text: "选中并复制"
                     color: Theme.colors.textSecondary
                     font.family: Theme.fontFamily
                     font.pixelSize: Theme.metrics.fontMicro
@@ -2228,10 +2362,22 @@ Rectangle {
         onAboutToShow: rebuild()
     }
 
-    // 面板收起时收掉菜单:否则下次呼出会残留菜单与点击屏障
+    // 面板收起时收掉菜单与键盘光标:否则下次呼出会残留菜单与点击屏障,
+    // 键盘光标也会停在"上次那条"上 —— 用户按 ↑/Enter 时以为是第一条。
     Connections {
         target: panelWindow
-        function onPanelHidden() { root.closeEntryMenu() }
+        function onPanelHidden() {
+            root.closeEntryMenu()
+            root.kbIndex = -1
+        }
+    }
+
+    // 列表行集变化(刷新/筛选/翻页)后把键盘光标夹回有效范围。
+    // ⚠️ 用 onCountChanged 而不是 onRowsInserted:模型 reset 时插入/删除信号
+    //    未必成对出现,而 count 一定跟着变 —— 这是唯一可靠的"行集已变"信号。
+    Connections {
+        target: Entries
+        function onCountChanged() { root.clampKeyboardCursor() }
     }
 
     // ---- 菜单外部点击屏障 ----
