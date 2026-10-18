@@ -1122,8 +1122,61 @@ nbcore.log 的配置警告"。**但宿主日志可见性只有新增命令能做
 | 翻译页首次打开 +49MB | 一次性 | 懒构建已到位;TranslateView 内部瘦身需先定位 |
 | 缩略图 640 边降尺寸 / 贴图缩放降质 | 省 15~20% 纹理 | **损害画质/交互,明确不做** |
 | QML 树地板 71.6MB / 长期隐藏卸载整棵 QML | 数十 MB | 呼出重建 + 丢搜索词/滚动位置,交互代价大 |
-| **遮罩窗口的 QPainter 引擎错误**(既有) | 不影响内存 | 复测中发现:`capture-start` 后日志出现一批 `QPainter::begin: Paint device returned engine == 0, type: 3` 与随后的 `Painter not active`。**改前改后都存在**(真实数据目录日志里也有 1 次),根因是半透明全屏遮罩在原生窗口就绪前就往 QPixmap 后备缓冲绘制 —— 属 Qt 窗口时序问题,与本次改动无关。建议另开一项:确认是否只是刷屏告警,还是真的丢了首帧绘制(自截看遮罩是否正常)。 |
+| ~~遮罩窗口的 QPainter 引擎错误~~ | 不影响内存 | **2026-10-18 定性完成:是无害探测,首帧没有丢**。详见 §10.1 |
 | `settings.rs:1584/1618` 两个测试用 `%TEMP%` | 非产品问题 | **已顺手修掉**(改 `CARGO_MANIFEST_DIR/target/tmp`),套件在沙箱/CI 也能全绿 |
+
+---
+
+### 10.1 遮罩首帧 `QPainter` 告警的定性(2026-10-18)
+
+**结论:是无害的平台层探测,首帧画面没有丢,不需要修。**
+
+#### 现象
+
+日志里每次 `capture-start` 后固定出现一批:1 条
+`QPainter::begin: Paint device returned engine == 0, type: 3`,随后 19 条
+`QPainter::xxx: Painter not active`(三屏时 3+57 条)。124/133 次会话命中。
+
+#### 定位过程
+
+| 探针 | 结果 |
+| --- | --- |
+| 单窗口最小复现 | **不复现** |
+| 三窗口 + `raise/activateWindow`(产品同序) | 复现,但**我们自己的 `paintEvent` 里 `beginFail == 0`** |
+| 全局事件过滤器看谁收到 `QEvent::Paint` | 失败的那次投递对象是 **`QWidgetWindow`**(QPA 平台窗口对象),**不是** `QWidget` |
+
+调用点特征(事件过滤器实打实打出来的):
+
+```
+PaintEvent -> obj=... class=QWidget        visible=1   <- 我们的遮罩,active=1,绘制成功
+PaintEvent -> obj=... class=QWidgetWindow  visible=-1   <- 平台窗口对象
+QPainter::begin: Paint device returned engine == 0, type: 3   <- 发生在这里
+```
+
+`QWidgetWindow` 是 QPA 的 `QWindow` 实现,它的 paint 发生在窗口表面(`QPlatformWindow`)
+尚未就绪时 —— 此时 `QPainter` 拿到的 pixmap 没有引擎。这是 Qt 内部的**探测性绘制**,
+与产品代码无关,也不受我们设置的任何 widget 属性影响。
+
+#### 是不是真的丢了首帧
+
+**不是。** 用屏幕抓取(与用户眼睛看到的同一条路径)验证:遮罩铺一块纯红底图后,
+在 `showFullScreen()` 返回后**立刻**(0ms)、16ms、60ms 三个时点抓屏,红色占比均
+**100.0%**,稳定后同样 100.0%。即首帧已经是完整画面,那些告警只是噪音。
+
+#### 已做的处理
+
+`OverlayWidget::paintEvent` 与倒计时遮罩加了 `if (!painter.isActive()) return;`
+(`🐛 fix(capture): 遮罩首帧绘制加引擎就绪守卫`)。作用仅限于:
+
+- 若将来某个平台/后端下我们**自己的** paint 真的引擎未就绪,不会继续 apply 一串
+  无操作的 draw 调用(那些调用本身也会刷告警);
+- **挡不住** `QWidgetWindow` 那批 —— 它不在我们的代码路径上,也没有公开 API 可挡。
+
+#### 若一定要让日志干净
+
+唯一可行的做法是在日志层过滤(而非修代码):`main.cpp` 的 `fileMessageHandler`
+里对 `Paint device returned engine == 0` / `Painter not active` 两类消息降级或丢弃。
+但要清楚代价:**这会一并掩盖真实的绘制失败**,排障时反而更麻烦。当前选择保留。
 
 ---
 
