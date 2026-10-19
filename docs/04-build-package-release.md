@@ -4,7 +4,7 @@
 | --- | --- |
 | 版本 | v1.1 |
 | 日期 | 2026-10-09 |
-| 状态 | 打包与安装器**已实现并实测**(`tools/package.ps1` + `tools/installer.nsi`,见 §10);§8 决策按推荐项落地,待用户最终确认 |
+| 状态 | 打包与安装器**已实现并实测**(`tools/package.ps1` + `tools/installer.nsi`,见 §10);§8 的代码签名(D6)与发布渠道(D10)**仍待用户拍板**,其余按推荐项落地 |
 | 关联 | [03-roadmap.md](./03-roadmap.md) S6.4/S6.7 · [01-architecture.md](./01-architecture.md) · [progress.md](./progress.md) |
 
 ---

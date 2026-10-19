@@ -749,8 +749,8 @@ ocr_probe(rapidocr) → {"backend":"rapidocr","available":true, "languages":[]}
 | **1** | **`rapid-ocr-rs` 依赖形态**:当前是**本地绝对路径** `C:/Users/15601/Desktop/...`,**换机不可构建** → 必须改 git 依赖或 vendor 入仓 | 🔴 高 |
 | **2** | **`onnxruntime.dll` 未随包**:需定发布位置 + 写进 `package.ps1` 白名单与 `$must` | 🔴 高 |
 | **3** | **模型未随包**:`models/ocr/` 四件同样需入发布包 | 🔴 高 |
-| **4** | **设置页无后端选择器**(B3.5):后端目前只能靠 `save_settings` 写入,用户点不到 | 🟡 中 |
-| **5** | `ocr_scale`/语言项对 RapidOCR 语义分叉的设置页显隐(B3.6) | 🟡 中 |
+| ~~**4**~~ | ~~**设置页无后端选择器**(B3.5)~~ | ✅ **已解决**:`SettingsDrawer.qml` 已有 `ocrBackendCombo`(带 objectName 验收钩子,走 `ocr_probe` 显示可用性)+ `ocrProfileCombo` + `ocrSessionCombo` |
+| **5** | `ocr_scale`/语言项对 RapidOCR 语义分叉的设置页显隐(B3.6) | 🟡 中(见 §15.6 第 2 项的最新进度) |
 | **6** | 12px 小字差异的取舍(T-B2.9') | 🟢 低 |
 
 ---
@@ -861,8 +861,8 @@ $ dist/Nextboard-0.2.0/nbocr-e2e.exe <sample> rapidocr
 
 | # | 待办 |
 | --- | --- |
-| 1 | **设置页后端选择器**(B3.5):目前后端只能由 `save_settings` 写入,**用户点不到** |
-| 2 | `ocr_scale`/语言项对 RapidOCR 的显隐(B3.6) |
+| ~~1~~ | ~~**设置页后端选择器**(B3.5)~~ → ✅ **已做**:见 `SettingsDrawer.qml` 的「文字识别」分组(后端 / 识别偏好 / 引擎驻留三个下拉) |
+| 2 | `ocr_scale`/语言项对 RapidOCR 的显隐(B3.6) —— ⬜ 未做(语义已明确:`ocr/mod.rs` 注明 RapidOCR 自带 `max_side_len`、不消费 `ocr_scale`,中英混排一体不分语言;落地方式见下) |
 | 3 | 12px 小字差异取舍(T-B2.9') |
 
 ---
