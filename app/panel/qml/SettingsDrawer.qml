@@ -31,6 +31,12 @@ AppDrawer {
     /// 渲染后端是否被改过(同样重启生效;与数据目录分开提示,便于合并文案)。
     property bool renderDirty: false
 
+    /// 当前选的是否「系统内置」OCR 后端 —— 决定识别语言/放大倍数两个控件是否显示。
+    /// 语义依据(core 侧注释):RapidOCR 自带 max_side_len 不消费 ocr_scale,且中英混排
+    /// 一体不分语言;这两个字段对它无效,显示出来只会让人"调了没反应"。
+    readonly property bool builtinOcr:
+        ocrBackendCombo.backendCodes[ocrBackendCombo.currentIndex] === "system"
+
     /// OCR 当前后端是否可用(由 core 的 ocr_probe 回填)。
     /// 不可用时 HintLabel 转成警示色并给出可读原因(缺模型 / 缺 DLL / 缺语言包)。
     property bool ocrBackendAvailable: true
@@ -347,6 +353,21 @@ AppDrawer {
         }
     }
 
+    /// 导出到用户选定的位置。format 决定**内容**(核心按它渲染),后缀/过滤器
+    /// 只决定默认文件名与对话框过滤 —— 两者必须一起给,否则会出现"选了 JSON
+    /// 却存成 .md"这种后缀与内容不符的产物。
+    function exportAs(format, filter, suffix) {
+        const path = Core.saveFileDialog(
+            "选择导出保存位置",
+            filter,
+            "nextboard-export-" + new Date().toISOString().slice(0, 10) + suffix)
+        if (path === "") return
+        exportRunning = true
+        exportHint.text = "正在导出…"
+        exportHint.isError = false
+        Core.exportEntries(path, format)
+    }
+
     function openAndLoad() {
         open()
         const resp = Core.call("get_settings")
@@ -367,8 +388,15 @@ AppDrawer {
         ocrProfileCombo.currentIndex = profileIdx < 0 ? 1 : profileIdx
         const modeIdx = ocrSessionCombo.modeCodes.indexOf(s.ocrSessionMode)
         ocrSessionCombo.currentIndex = modeIdx < 0 ? 2 : modeIdx
+        // OCR 语言/放大:未知值回退默认(auto / 2),与 core 的 Default 同口径
+        const langIdx = ocrLanguageCombo.languageCodes.indexOf(s.ocrLanguage)
+        ocrLanguageCombo.currentIndex = langIdx < 0 ? 0 : langIdx
+        const scale = (s.ocrScale === undefined || s.ocrScale === null) ? 2 : s.ocrScale
+        ocrScaleSpin.value = Math.min(Math.max(scale, 1), 4)
         root.refreshOcrProbe()
         maxImage.value = s.maxImageMb
+        // 文本上限:缺失时按 core 默认 1024(与 settings.rs 的 Default 一致)
+        maxTextKb.value = (s.maxTextKb === undefined || s.maxTextKb === null) ? 1024 : s.maxTextKb
         monitorCheck.checked = s.monitorEnabled === true
         autoPasteCheck.checked = s.copyAutoPaste === true
         // 单一出口(§18.4):由 regionAutoConfirm 推导 ——
@@ -475,6 +503,11 @@ AppDrawer {
         s.ocrProfile = ocrProfileCombo.profileCodes[ocrProfileCombo.currentIndex]
         s.ocrSessionMode = ocrSessionCombo.modeCodes[ocrSessionCombo.currentIndex]
         s.maxImageMb = maxImage.value
+        s.maxTextKb = maxTextKb.value
+        // OCR 语言/放大只在「系统内置」时显示,但**始终照写**:切换后端时值要保住,
+        // 否则从内置切到 RapidOCR 再切回来,用户设定的语言会被清成默认。
+        s.ocrLanguage = ocrLanguageCombo.languageCodes[ocrLanguageCombo.currentIndex]
+        s.ocrScale = ocrScaleSpin.value
         s.monitorEnabled = monitorCheck.checked
         s.copyAutoPaste = autoPasteCheck.checked
         // 单一出口 → 回写成 regionAutoConfirm(direct=true / toolbar=false)。
@@ -729,6 +762,18 @@ AppDrawer {
                     onValueModified: root.scheduleSave()
                 }
 
+                // 文本条目上限:此前**只有字段没有控件**(settings.max_text_kb 一直吃默认 1024),
+                // 复制大段日志/JSON 时撞上限只能看到"文本超过大小上限,未入库"却无从修改。
+                Label { text: "单条文本上限(KB)"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
+                ReadableSpinBox {
+                    id: maxTextKb
+                    objectName: "maxTextKbSpin"   // 验收钩子
+                    Layout.fillWidth: true
+                    from: 1; to: 4096; stepSize: 64
+                    editable: true
+                    onValueModified: root.scheduleSave()
+                }
+
                 ReadableCheckBox {
                     id: monitorCheck
                     text: "剪贴板监听"
@@ -941,23 +986,35 @@ AppDrawer {
 
                 FieldLabel { text: "导出" }
                 HintLabel {
-                    text: "把全部剪贴板历史导出为 Markdown 单文件;图片以 base64 内嵌,可直接在 Typora/Obsidian 等编辑器查看。"
+                    text: "Markdown:人读,图片以 base64 内嵌,可直接在 Typora/Obsidian 打开。"
+                        + "JSON / CSV:给别的工具吃,图片只记库内相对路径(不内嵌)。"
                 }
-                ThemedButton {
+                RowLayout {
                     Layout.fillWidth: true
-                    variant: "secondary"
-                    text: exportRunning ? "导出中…" : "导出为 Markdown…"
-                    enabled: !exportRunning
-                    onClicked: {
-                        const path = Core.saveFileDialog(
-                            "选择导出保存位置",
-                            "Markdown (*.md)",
-                            "nextboard-export-" + new Date().toISOString().slice(0, 10) + ".md")
-                        if (path === "") return
-                        exportRunning = true
-                        exportHint.text = "正在导出…"
-                        exportHint.isError = false
-                        Core.exportEntries(path)
+                    spacing: Theme.metrics.spacingSm
+                    ThemedButton {
+                        objectName: "exportMarkdownButton"   // 验收钩子
+                        Layout.fillWidth: true
+                        variant: "secondary"
+                        text: exportRunning ? "导出中…" : "Markdown…"
+                        enabled: !exportRunning
+                        onClicked: root.exportAs("markdown", "Markdown (*.md)", ".md")
+                    }
+                    ThemedButton {
+                        objectName: "exportJsonButton"   // 验收钩子
+                        Layout.fillWidth: true
+                        variant: "secondary"
+                        text: exportRunning ? "导出中…" : "JSON…"
+                        enabled: !exportRunning
+                        onClicked: root.exportAs("json", "JSON (*.json)", ".json")
+                    }
+                    ThemedButton {
+                        objectName: "exportCsvButton"   // 验收钩子
+                        Layout.fillWidth: true
+                        variant: "secondary"
+                        text: exportRunning ? "导出中…" : "CSV…"
+                        enabled: !exportRunning
+                        onClicked: root.exportAs("csv", "CSV (*.csv);;所有文件 (*)", ".csv")
                     }
                 }
                 HintLabel {
@@ -1303,6 +1360,44 @@ AppDrawer {
                     id: ocrBackendHint
                     text: root.ocrBackendHintText
                     color: root.ocrBackendAvailable ? Theme.colors.textSecondary : Theme.colors.danger
+                }
+                // ---- 仅「系统内置」后端有效 ----
+                // 显隐依据(core 侧注释,不是猜测):
+                //   ocr/rapid.rs:16-17 —— RapidOCR 自带 max_side_len,故**不应用** ocr_scale 放大;
+                //   RapidOCR 中英混排一体,ocr_language 对它无效。
+                // 之前这两个字段没有控件、两套参数语义分叉(docs/10 §15.6 B3.6);现在按后端
+                // 显隐:选了 RapidOCR 就不显示,免得用户调了没反应还以为是 bug。
+                FieldLabel {
+                    text: "识别语言(仅系统内置)"
+                    visible: root.builtinOcr
+                }
+                ReadableComboBox {
+                    id: ocrLanguageCombo
+                    objectName: "ocrLanguageCombo"   // 验收钩子
+                    Layout.fillWidth: true
+                    visible: root.builtinOcr
+                    /// 与 core settings::validate 同口径:auto 或语言标签(字母数字/-/_)
+                    readonly property var languageCodes: ["auto", "zh-Hans-CN", "en-US", "ja-JP"]
+                    model: ["自动识别(按系统语言)", "简体中文", "英语(美国)", "日语"]
+                    onActivated: root.scheduleSave()
+                }
+                FieldLabel {
+                    text: "放大倍数(仅系统内置)"
+                    visible: root.builtinOcr
+                }
+                ReadableSpinBox {
+                    id: ocrScaleSpin
+                    objectName: "ocrScaleSpin"   // 验收钩子
+                    Layout.fillWidth: true
+                    visible: root.builtinOcr
+                    from: 1; to: 4
+                    editable: true
+                    onValueModified: root.scheduleSave()
+                }
+                HintLabel {
+                    visible: root.builtinOcr
+                    text: "小字号截图放大后识别更准,代价是耗时随倍数上升。"
+                    color: Theme.colors.textSecondary
                 }
                 FieldLabel { text: "识别偏好(仅 RapidOCR)" }
                 ReadableComboBox {
