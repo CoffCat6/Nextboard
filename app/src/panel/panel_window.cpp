@@ -16,6 +16,9 @@
 #include <QQuickItem>
 #include <QQuickWidget>
 #include <QQuickWindow>
+#include <QJsonArray>
+#include <QJsonObject>
+#include <QResizeEvent>
 #include <QScreen>
 #include <QTimer>
 #include <QUrl>
@@ -38,6 +41,9 @@ constexpr int TRANSLATE_W = 520;
 constexpr int TRANSLATE_H = 660;
 constexpr int TRANSLATE_MIN_W = 420;   // 低于此宽度翻译双栏信息会挤成一团
 constexpr int TRANSLATE_MIN_H = 500;
+/// 用户改完尺寸后多久写回设置(毫秒)。拖动缩放期间每帧都有 resizeEvent,
+/// 立即写就是每秒几十次 sqlite 事务。
+constexpr int PANEL_SIZE_SAVE_DELAY_MS = 500;
 } // namespace
 
 PanelWindow::PanelWindow(CoreBridge& core, QWidget* parent)
@@ -49,6 +55,12 @@ PanelWindow::PanelWindow(CoreBridge& core, QWidget* parent)
     // 失焦自动隐藏(延迟复查,第一代 lib.rs 同参数)。
     // 仅在窗口**曾获得过焦点**之后启用:启动时 activateWindow 可能失败
     // (系统前台锁),此时若无脑 hide 会让应用"启动即退出"。
+    // 尺寸落库防抖:用户拖边框时 resizeEvent 每帧都来,500ms 内无新事件才算"松手"。
+    m_sizeSaveTimer = new QTimer(this);
+    m_sizeSaveTimer->setSingleShot(true);
+    m_sizeSaveTimer->setInterval(PANEL_SIZE_SAVE_DELAY_MS);
+    connect(m_sizeSaveTimer, &QTimer::timeout, this, [this] { savePanelSize(); });
+
     m_blurTimer = new QTimer(this);
     m_blurTimer->setSingleShot(true);
     m_blurTimer->setInterval(BLUR_HIDE_DELAY_MS);
@@ -70,14 +82,47 @@ void PanelWindow::setMode(Mode mode) {
     logMemory(mode == Mode::Translate ? "mode-translate" : "mode-list");
 }
 
+/// 读回用户上次调过的列表尺寸。
+///
+/// 三道回退(任一不满足就回到内置默认 800×600):
+///   ① 设置里没有记录 / 不是二元组 → 默认;
+///   ② 超出屏幕可用区(用户把外接屏拔了)→ 默认 —— 否则面板会大过当前屏幕,
+///      底部按钮够不到;
+///   ③ 小于最小尺寸 → 由 setMinimumSize 兜住(这里不判断,交给 Qt)。
+QSize PanelWindow::preferredPanelSize() const {
+    const QJsonObject resp = m_core.call("get_settings");
+    const QJsonArray arr = resp.value("ok").toBool()
+                               ? resp.value("data").toObject().value("panelSize").toArray()
+                               : QJsonArray{};
+    if (arr.size() != 2) return QSize(PANEL_W, PANEL_H);
+    const QSize want(arr.at(0).toInt(), arr.at(1).toInt());
+    if (!want.isValid()) return QSize(PANEL_W, PANEL_H);
+    // 放不下就回默认:可用区取"光标所在屏",与呼出摆位用的是同一块屏
+    QScreen* screen = QGuiApplication::screenAt(QCursor::pos());
+    if (!screen) screen = QGuiApplication::primaryScreen();
+    if (screen) {
+        const QRect avail = screen->availableGeometry();
+        if (want.width() > avail.width() || want.height() > avail.height())
+            return QSize(PANEL_W, PANEL_H).boundedTo(avail.size());
+    }
+    return want;
+}
+
 void PanelWindow::applyModeSize(Mode mode) {
     const bool translate = (mode == Mode::Translate);
     const QSize minSize = translate ? QSize(TRANSLATE_MIN_W, TRANSLATE_MIN_H)
                                     : QSize(PANEL_MIN_W, PANEL_MIN_H);
+    // 列表形态优先用记住的尺寸;翻译形态固定(内容驱动的最优尺寸,不该被记住)
     const QSize target = translate ? QSize(TRANSLATE_W, TRANSLATE_H)
-                                   : QSize(PANEL_W, PANEL_H);
+                                   : preferredPanelSize();
     // ⚠️ 顺序:必须先设新下限再 resize —— 翻译尺寸宽 520 小于列表下限 620,
     // 若先 resize,窗口会被旧下限顶成 620 宽(高度同理)。
+    // 闸门:本次 resize 是程序设定的,不算用户操作(否则会写回设置形成回环)
+    m_applyingSize = true;
+    struct Guard {
+        bool& flag;
+        ~Guard() { flag = false; }
+    } guard{m_applyingSize};
     setMinimumSize(minSize);
     if (!isVisible()) {
         resize(target);
@@ -97,6 +142,33 @@ void PanelWindow::applyModeSize(Mode mode) {
                             qMax(avail.top(), avail.bottom() - height() + 1)));
     }
     move(topLeft);
+}
+
+void PanelWindow::resizeEvent(QResizeEvent* e) {
+    QWidget::resizeEvent(e);
+    // 只记列表形态:翻译形态的尺寸是内容驱动的最优值,记下来会让"下次打开翻译页"
+    // 变成用户上次意外拖出的比例;程序自己 resize(切形态/恢复尺寸)不算。
+    if (m_applyingSize || m_mode != Mode::List) return;
+    // 与最小尺寸一致时很可能只是"最小化/还原"链路,不覆盖用户留下的更大尺寸
+    if (!isVisible()) return;
+    scheduleSavePanelSize();
+}
+
+void PanelWindow::scheduleSavePanelSize() {
+    if (m_sizeSaveTimer) m_sizeSaveTimer->start();
+}
+
+void PanelWindow::savePanelSize() {
+    // 存的是**用户看到并调过的列表尺寸**;高度/宽度都夹到设置校验接受的范围,
+    // 免得一次异常尺寸让后续所有 save_settings 都被核心拒绝(连带别的字段存不进去)。
+    if (m_mode != Mode::List) return;
+    const QSize sz = size();
+    if (!sz.isValid()) return;
+    const QJsonArray arr{sz.width(), sz.height()};
+    const QJsonObject resp = m_core.call("save_settings", {{"panelSize", arr}});
+    if (!resp.value("ok").toBool()) {
+        qWarning() << "panel: 保存面板尺寸失败" << resp.value("error").toObject();
+    }
 }
 
 void PanelWindow::prepareHiddenStart() {

@@ -82,6 +82,7 @@ protected:
     void wheelEvent(QWheelEvent* e) override;
     void mouseDoubleClickEvent(QMouseEvent* e) override;
     /// ESC 关闭(第一代语义:关闭走工具条 ✕ 或 ESC);工具条已展开时先收起工具条。
+    /// 方向键微调位置(1px,Shift = 10px;docs/18 §3.6)。
     void keyPressEvent(QKeyEvent* e) override;
     /// 右键唤出 / 收起工具条(取代原"悬停显示")。
     void contextMenuEvent(QContextMenuEvent* e) override;

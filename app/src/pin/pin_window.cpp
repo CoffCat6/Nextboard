@@ -486,7 +486,24 @@ void PinWindow::keyPressEvent(QKeyEvent* e) {
             close();
         return;
     }
-    QWidget::keyPressEvent(e);
+    // 方向键微调位置(docs/18 §3.6;Snipaste 习惯):1px,按住 Shift 为 10px。
+    // 直接 move() 而**不走** m_dragging —— 拖动状态由鼠标独占,键盘不该改动它,
+    // 否则松手时的 mouseReleaseEvent 会把"键盘挪过的那张"当成还在拖。
+    QPoint delta;
+    switch (e->key()) {
+        case Qt::Key_Left:  delta = QPoint(-1, 0); break;
+        case Qt::Key_Right: delta = QPoint(1, 0); break;
+        case Qt::Key_Up:    delta = QPoint(0, -1); break;
+        case Qt::Key_Down:  delta = QPoint(0, 1); break;
+        default:
+            QWidget::keyPressEvent(e);
+            return;
+    }
+    const int step = (e->modifiers() & Qt::ShiftModifier) ? 10 : 1;
+    move(pos() + delta * step);
+    // 键盘移动后贴图仍要能用 ESC 关:某些环境下 move() 会打断焦点(工具条弹层
+    // 关闭后的焦点回收见 eventFilter),这里不做额外处理,只保证窗口不被带走。
+    e->accept();
 }
 
 void PinWindow::mousePressEvent(QMouseEvent* e) {

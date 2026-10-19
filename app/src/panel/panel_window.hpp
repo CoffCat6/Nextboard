@@ -144,6 +144,8 @@ public:
 
 protected:
     void showEvent(QShowEvent* e) override;
+    /// 无边框边缘缩放会改尺寸:列表形态下记下来(走短延时,避免拖动中高频写库)。
+    void resizeEvent(QResizeEvent* e) override;
     bool nativeEvent(const QByteArray& eventType, void* message, qint64* result) override;
     bool event(QEvent* e) override;
 
@@ -165,7 +167,17 @@ private:
     /// 切换形态(含尺寸/下限调整、翻译页的"停留"抑制)。
     void setMode(Mode mode);
     /// 按形态设置最小尺寸与窗口尺寸;已显示时保持窗口中心不动并夹回屏幕可用区。
+    /// 列表形态会优先用设置里记住的 panelSize(见 restorePanelSize)。
     void applyModeSize(Mode mode);
+    /// 从 settings.panelSize 读回用户上次调过的列表尺寸;无记录/非法/放不下时
+    /// 各自回退(见实现处注释),不阻塞启动。
+    QSize preferredPanelSize() const;
+    /// 把当前列表尺寸写回 settings.panelSize。只在**用户改过尺寸**时调用
+    /// (无边框窗口的边缘缩放会触发 resizeEvent,鼠标拖动时每秒几十次 —— 必须在
+    /// 松手后再存,否则是往 sqlite 里灌高频写)。
+    void savePanelSize();
+    /// 本次用户缩放产生的新尺寸(拖动中不写库,等一个短延时确认已松手)。
+    void scheduleSavePanelSize();
     /// 把窗口摆到光标处(以光标为中心并夹回可用区)。每次呼出都调用。
     void placeAtCursor();
     /// 把窗口摆在光标所在屏的中央(并夹回可用区)。托盘等"人在别处"的入口用。
@@ -194,6 +206,12 @@ private:
     Mode m_mode = Mode::List;
     /// nativeEvent 用的 HWND 缓存(创建期间禁止 winId() 调用,防递归)。
     HWND m_cachedHwnd = nullptr;
+    /// 尺寸落库的防抖计时器(鼠标拖动缩放期间不写库)。
+    QTimer* m_sizeSaveTimer = nullptr;
+    /// 是否正处于"程序自己设尺寸"的过程 —— 期间的 resizeEvent 不算用户操作。
+    /// 没有这个闸门,applyModeSize 的 resize 会被当成用户缩放而写回,形成
+    /// "程序写入 → 触发 resize → 再写回"的回环。
+    bool m_applyingSize = false;
 };
 
 } // namespace nb

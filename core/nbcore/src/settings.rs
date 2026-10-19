@@ -115,6 +115,17 @@ pub struct Settings {
     /// 又被重置。记录几何后"上次多大就多大"。宽高需在合理区间;x/y 允许为负
     /// (多屏时屏可能位于负坐标区)。
     pub editor_geometry: Vec<i64>,
+    /// 主面板「列表」形态的尺寸(二元组 w,h;空 = 尚未记录,用内置默认 800×600)。
+    ///
+    /// 动机与 editor_geometry 同源:面板此前把 800×600 写死在 panel_window.cpp 里,
+    /// 用户拖过一次边框、下次呼出又被重置。窗口本身支持无边框边缘缩放
+    /// (WM_NCHITTEST),能调却记不住,属"能改但白改"。
+    ///
+    /// ⚠️ 只记**列表形态**的尺寸:翻译形态(520×660)是内容驱动的最优尺寸,
+    ///    记下来会让"第二次打开翻译页"变成用户上次意外拖出的奇怪比例。
+    /// ⚠️ 不记位置:x/y 由呼出时的光标位置决定(showAtCursor),记位置会让热键
+    ///    呼出行为变得不可预测。
+    pub panel_size: Vec<i64>,
     /// 延时截图等待秒数（托盘「延时截图」入口用；1~10，默认 3）。
     /// 用途：先按下入口，再去展开菜单/等悬浮提示出现，倒计时结束才开始框选。
     pub capture_delay_secs: i64,
@@ -458,7 +469,8 @@ impl Default for Settings {
             region_auto_confirm: true,
             region_right_click_cancel: true,
             capture_bar_alpha: 217,        // 半透档(docs/17 §17.5):默认不挡原图又看得清按钮
-            editor_geometry: Vec::new(),   // 空 = 尚未记录,首次按默认尺寸居中
+            editor_geometry: Vec::new(),
+            panel_size: Vec::new(),   // 空 = 尚未记录,首次按默认尺寸居中
             // 默认"松手即复制"：截图后立刻可粘贴，不经过编辑器
             region_skip_editor: true,
             capture_delay_secs: 3,
@@ -651,6 +663,22 @@ impl Settings {
         }
         if !(1..=4).contains(&self.ocr_scale) {
             return Err(AppError::InvalidInput("OCR 放大倍数须在 1 ~ 4 之间".into()));
+        }
+        // 面板尺寸:空 = 未记录(用内置默认);非空必须是二元组且在合理区间。
+        // 下限与 panel_window.cpp 的 PANEL_MIN_W/H 同源语义(低于它头部会挤变形),
+        // 上限给足 4K 屏;这里**不引用 C++ 常量**(跨语言无共享头),故注释互指。
+        if !self.panel_size.is_empty() {
+            if self.panel_size.len() != 2 {
+                return Err(AppError::InvalidInput(
+                    "面板尺寸须为 [宽, 高] 二元组".into(),
+                ));
+            }
+            let (w, h) = (self.panel_size[0], self.panel_size[1]);
+            if !(620..=10000).contains(&w) || !(380..=10000).contains(&h) {
+                return Err(AppError::InvalidInput(
+                    "面板宽高须在 620×380 ~ 10000×10000 之间".into(),
+                ));
+            }
         }
         self.validate_translate()?;
         Ok(())
@@ -1586,6 +1614,25 @@ mod tests {
         // 尺寸越界拒绝
         assert!(with_geom(vec![0, 0, 100, 800]).validate().is_err());
         assert!(with_geom(vec![0, 0, 1280, 100]).validate().is_err());
+    }
+
+    #[test]
+    fn validate_checks_panel_size() {
+        let with_size = |v: Vec<i64>| Settings {
+            panel_size: v,
+            ..Default::default()
+        };
+        // 空 = 尚未记录,合法(用内置默认 800×600)
+        assert!(with_size(Vec::new()).validate().is_ok());
+        assert!(with_size(vec![1024, 720]).validate().is_ok());
+        // 边界值:最小值恰好合法
+        assert!(with_size(vec![620, 380]).validate().is_ok());
+        // 元素个数必须为二(四元组是 editor_geometry 的口径,别混)
+        assert!(with_size(vec![800]).validate().is_err());
+        assert!(with_size(vec![100, 100, 800, 600]).validate().is_err());
+        // 低于下限拒绝:面板头部会挤变形(与 panel_window.cpp 的 PANEL_MIN_* 同语义)
+        assert!(with_size(vec![619, 600]).validate().is_err());
+        assert!(with_size(vec![800, 379]).validate().is_err());
     }
 
     #[test]

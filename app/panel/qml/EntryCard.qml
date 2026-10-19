@@ -32,6 +32,50 @@ Rectangle {
     /// 文本条目是否展开显示全文(长文本默认折叠 4 行)。
     property bool textExpanded: false
 
+    /// 当前搜索词(父级注入 = 搜索框文本)。非空时折叠态正文里的命中片段加底色,
+    /// 让"为什么这条会被搜出来"一眼可见 —— 搜索框改了值,绑定自动重算。
+    property string query: ""
+
+    /// 参与高亮的正文:note 是"补充说明",不参与检索口径,故不参与高亮。
+    readonly property string highlightableText:
+        (kind === "text" || kind === "file" || kind === "todo") ? (text || preview || "") : ""
+
+    /// 是否走富文本高亮。仅在搜索词非空且有正文时开 —— 空词时不切 RichText,
+    /// 保留原纯文本路径(1MB 长文本在纯文本下也不做正则扫描)。
+    readonly property bool highlighting:
+        query.trim().length > 0 && highlightableText.length > 0
+
+    /// 把正文按搜索词切段:命中段包一层底色 span,其余原样转义。
+    ///
+    /// ⚠️ 截断到 4000 字符再扫描:单条文本上限 1024KB,在这上面跑正则 + 拼富文本
+    ///    会在滚动时逐帧重建,实测可感知卡顿;折叠态只显示 4 行,后面看不到。
+    /// ⚠️ 必须**先按原串切段、再逐段转义**,不能先整体转义再找 —— 搜索词里若含
+    ///    `<` `&` 之类,转义后位置与长度都变了,匹配会错位甚至切碎实体。
+    /// ⚠️ 用 RegExp 而不是 indexOf 循环:大小写不敏感(FTS 口径)靠 `gi` 一次拿到,
+    ///    免得自己做 toLowerCase 映射时踩"某些字符转小写后长度变化"的偏移错位。
+    function highlightedRichText(s) {
+        const raw = s.length > 4000 ? s.slice(0, 4000) : s
+        const term = query.trim()
+        if (term.length === 0) return Theme.escapeHtml(raw)
+        // 搜索词转义成字面量(否则 `.` `*` 会被当通配)
+        const re = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi")
+        const open = '<span style="background-color:' + Theme.colors.accentSoft
+                   + ';color:' + Theme.colors.textPrimary + '">'
+        let out = ""
+        let last = 0
+        let guard = 0
+        let m = re.exec(raw)
+        while (m !== null && guard++ < 500) {
+            if (m.index > last) out += Theme.escapeHtml(raw.slice(last, m.index))
+            out += open + Theme.escapeHtml(m[0]) + '</span>'
+            last = m.index + m[0].length
+            if (m[0].length === 0) re.lastIndex++    // 零长匹配防死循环
+            m = re.exec(raw)
+        }
+        out += Theme.escapeHtml(raw.slice(last))
+        return out
+    }
+
     /// 内容类型的界面文案:kind 是存库标识,徽标展示中文(与导航标签页同口径)。
     readonly property string kindLabel:
         kind === "text" ? "文本" : kind === "image" ? "图片"
@@ -562,7 +606,11 @@ Rectangle {
                 id: collapsedText
                 visible: !root.textExpanded
                 width: parent.width
-                text: root.text || root.preview || ""
+                // 搜索命中高亮时走 RichText;否则保持纯文本(不付富文本布局的代价)
+                text: root.highlighting
+                      ? root.highlightedRichText(root.highlightableText)
+                      : (root.text || root.preview || "")
+                textFormat: root.highlighting ? Text.RichText : Text.PlainText
                 color: Theme.colors.textPrimary
                 // 待办完成后正文划线 + 弱化(§6.3:归档展示)
                 font.strikeout: root.kind === "todo" && root.todoDone
