@@ -208,6 +208,37 @@ void step5(const QString& id, QWidget* window);
 void step6(const QString& id, QWidget* window);
 
 // ---- STEP4.6:菜单项真实触发 ----
+/// 挑一条**不是屏幕交界处**的贴边方向,供"半隐藏"类断言使用。
+///
+/// 交界处不做半隐藏(产品行为,见 docs/20 §13.12),所以在三屏机上随便挑一条边
+/// 可能正好是交界 —— 断言"已收起"会失败,而那其实是**正确**的。
+/// 这里按主屏两侧的邻屏情况挑:左边外有屏就选右边,反之亦然。
+/// 测试侧的交界判定,与产品 NoteWindow::edgeOutsideIsAnotherScreen 同口径。
+/// 不直接调产品私有函数(它在 private 区),这里按屏幕的**可用区几何**复算 ——
+/// 若两份口径漂移,可以把产品那句 qInfo 与这里的日志对照。
+bool edgeOutsideIsAnotherScreenForTest(QWidget* window, const QString& edge) {
+    QScreen* screen = QGuiApplication::screenAt(window->geometry().center());
+    if (!screen || edge == QLatin1String("none")) return false;
+    const QRect avail = screen->availableGeometry();
+    const int y = avail.center().y();
+    const QPoint probe = (edge == QLatin1String("left"))
+        ? QPoint(avail.left() - 2, y) : QPoint(avail.right() + 2, y);
+    QScreen* other = QGuiApplication::screenAt(probe);
+    return other != nullptr && other != screen;
+}
+
+QString collapsibleEdgeFor(QScreen* screen) {
+    if (!screen) return QStringLiteral("right");
+    const QRect avail = screen->availableGeometry();
+    const int y = avail.center().y();
+    const bool leftBusy = QGuiApplication::screenAt(QPoint(avail.left() - 2, y)) != nullptr;
+    const bool rightBusy = QGuiApplication::screenAt(QPoint(avail.right() + 2, y)) != nullptr;
+    if (!leftBusy) return QStringLiteral("left");
+    if (!rightBusy) return QStringLiteral("right");
+    // 两侧都是屏(整机没有外缘):返回空,调用方跳过半隐藏断言
+    return QString();
+}
+
 void step46(const QString& id, QWidget* window) {
     // 回归两处实测缺陷:
     //  ① 收起态点「取消贴边」→ collapsed 若留在 1,窗口会停在按边算出的屏外位置,
@@ -216,17 +247,28 @@ void step46(const QString& id, QWidget* window) {
     popNoteMenu(window, QPoint(window->width() / 2, kNoteShadowMargin + 10));
     QMenu* edgeMenu = submenu(window, QStringLiteral("贴到屏幕边缘"));
     check(edgeMenu != nullptr, QStringLiteral("STEP4.6 有「贴到屏幕边缘」子菜单"));
-    check(triggerChild(edgeMenu, QStringLiteral("贴左边")),
-          QStringLiteral("STEP4.6 触发「贴左边」"));
+    // 挑一条**不在屏幕交界处**的边:交界处不做半隐藏,后面"强制收起"的断言
+    // 在那里必然失败 —— 那会是**正确行为**被当成缺陷。
+    QScreen* here = QGuiApplication::screenAt(window->geometry().center());
+    const QString usableEdge = collapsibleEdgeFor(here);
+    const QString edgeLabel = usableEdge == QLatin1String("left")
+        ? QStringLiteral("贴左边") : QStringLiteral("贴右边");
+    qInfo() << "STEP4.6 选用贴边方向:" << usableEdge;
+    check(!usableEdge.isEmpty(), QStringLiteral("STEP4.6 本机至少有一条可收起的边"));
+    check(triggerChild(edgeMenu, edgeLabel),
+          QStringLiteral("STEP4.6 触发贴边菜单项"));
 
-    QTimer::singleShot(400, qApp, [id, window] {
+    QTimer::singleShot(400, qApp, [id, window, usableEdge] {
         auto* note = qobject_cast<NoteWindow*>(window);
         const QVariantMap row = noteRowFromCore(id);
         const QRect avail = screenAvailFor(window);
-        check(row.value(QStringLiteral("edge")).toString() == QLatin1String("left"),
-              QStringLiteral("STEP4.6 贴左边已落库"));
-        check(qAbs(window->geometry().left() - avail.left()) <= kNoteShadowMargin + 2,
-              QStringLiteral("STEP4.6 窗口左边贴住可用区左边"));
+        check(row.value(QStringLiteral("edge")).toString() == usableEdge,
+              QStringLiteral("STEP4.6 贴边方向已落库"));
+        check((usableEdge == QLatin1String("left")
+                   ? qAbs(window->geometry().left() - avail.left())
+                   : qAbs(window->geometry().right() + 1 - kNoteShadowMargin
+                          - (avail.right() + 1))) <= kNoteShadowMargin + 2,
+              QStringLiteral("STEP4.6 窗口贴住可用区对应边"));
 
         // ---- 缺陷 ①:收起态 + 取消贴边 ----
         note->collapse(/*animate=*/false, /*force=*/true);
@@ -408,11 +450,13 @@ void step45(const QString& id, QWidget* window) {
 
 void step2b(const QString& id, QWidget* window, const QRect& avail);
 void step2a(const QString& id, QWidget* window, const QRect& avail);
+void step3b(const QString& id, QWidget* window, const QRect& avail);
 
-// ---- STEP2b:另外三条边也必须能吸附(回归"只能贴右边")----
+// ---- STEP2b:每条**受支持的边**都必须能吸附(回归"只能贴右边")----
 //
 // 生产反馈:便签只能贴右边。逐边从屏幕中间拖一次,断言 edge 落库 + 对应边贴住。
 // 每边一个 300ms 回调(拖动合成是同步的,只需等落库)。
+// ⚠️ 只覆盖左/右:上下边已从产品面下线(2026-10-19 用户裁定),不再测也不再有入口。
 void step3(const QString& id, QWidget* window, const QRect& avail);
 
 void step2a(const QString& id, QWidget* window, const QRect& avail) {
@@ -474,17 +518,29 @@ void step2a(const QString& id, QWidget* window, const QRect& avail) {
             dragWindowTo(window, home.center() - QPoint(window->width() / 2,
                                                         window->height() / 2));
             QTimer::singleShot(300, qApp, [id, window, home] {
-                step2b(id, window, home);
+                // ⚠️ 必须贴**左边**:本机主屏左侧接着 S24 PRO(x=-1080..0),
+                //    收起时窗口被推出左边界,旧实现的锚点正好落进邻屏 —— 那才是
+                //    用户看到的"相邻屏之间来回横跳"。贴右边在单侧无邻屏的机器上
+                //    锚点落在屏幕外的虚空里,screenAt() 返回空,缺陷反而复现不出来。
+                // 9 秒后再进 STEP2b —— 那边要用窗口当前状态继续往下测。
+                dragEdgeTo(window, QStringLiteral("left"), home);
+                QTimer::singleShot(300, qApp, [id, window, home] {
+                    step3b(id, window, home);
+                    QTimer::singleShot(9000, qApp, [id, window, home] {
+                        step2b(id, window, home);
+                    });
+                });
             });
         });
     });
 }
 
 void step2b(const QString& id, QWidget* window, const QRect& avail) {
-    static const char* kNames[3] = {"left", "top", "bottom"};
+    // 只测左右(2026-10-19:上下边已从产品面下线)。
+    static const char* kNames[2] = {"left", "right"};
     auto chain = std::make_shared<std::function<void(int)>>();
     *chain = [id, window, avail, chain](int index) {
-        if (index >= 3) {
+        if (index >= 2) {
             // 回到右边再进 STEP3(STEP3/4 的拉手几何按右边设计)
             dragEdgeTo(window, QStringLiteral("right"), avail);
             QTimer::singleShot(300, qApp, [id, window, avail] {
@@ -511,12 +567,9 @@ void step2b(const QString& id, QWidget* window, const QRect& avail) {
             if (expect == QLatin1String("left"))
                 check(qAbs(geo.left() - avail.left()) <= kNoteShadowMargin + 2,
                       QStringLiteral("STEP2b 左边贴住可用区"));
-            if (expect == QLatin1String("top"))
-                check(qAbs(geo.top() - avail.top()) <= kNoteShadowMargin + 2,
-                      QStringLiteral("STEP2b 上边贴住可用区"));
-            if (expect == QLatin1String("bottom"))
-                check(qAbs(geo.bottom() - avail.bottom()) <= kNoteShadowMargin + 2,
-                      QStringLiteral("STEP2b 下边贴住可用区"));
+            if (expect == QLatin1String("right"))
+                check(qAbs(geo.right() + 1 - kNoteShadowMargin - (avail.right() + 1)) <= 2,
+                      QStringLiteral("STEP2b 右边贴住可用区"));
             (*chain)(index + 1);
         });
     };
@@ -560,6 +613,81 @@ void step3(const QString& id, QWidget* window, const QRect& avail) {
               QStringLiteral("STEP3 屏内只留拉手一条(且不为 0)"));
         step4(id, window, avail);
     });
+}
+
+// ---- STEP3b:贴在某块屏的一边后,反复收起/展开**不该换屏** ----
+//
+// 用户实测缺陷(2026-10-19):便签贴在一块屏的一边,而这块屏旁边还连着另一块屏时,
+// 自动收起会在两块屏之间来回横跳。根因是收起态用**几何锚点**认屏 —— 收起是程序
+// 把窗口推出屏幕的动作,锚点落到了邻屏上,于是 next 次展开按邻屏的边算,
+// 又落回原屏,来回振荡。
+//
+// 验收判据(不依赖内部实现):连续 3 轮 收起→展开,库里的 screen 必须**一直不变**,
+// 且每轮展开后的几何必须等于第一轮的几何(位置不漂移)。
+void step3b(const QString& id, QWidget* window, const QRect& avail) {
+    auto* note = qobject_cast<NoteWindow*>(window);
+    const QVariantMap before = noteRowFromCore(id);
+    const QString screenBefore = before.value(QStringLiteral("screen")).toString();
+    const QString edgeBefore = before.value(QStringLiteral("edge")).toString();
+    const QRect geoBefore = window->geometry();
+    qInfo() << "STEP3b 起点: screen:" << screenBefore << "edge:" << edgeBefore
+            << "geo:" << geoBefore;
+    // 只有贴边 + autoHide 才可能走到收起路径;先把状态摆好。
+    // ⚠️ 若这条边是屏幕交界处,产品**拒绝**收起(见 docs/20 §13.12)——
+    //    此时断言"已收起"会失败,而那是正确行为。断言改由 junction 分支覆盖。
+    const QVariantMap rowNow = noteRowFromCore(id);
+    const bool atJunction = edgeOutsideIsAnotherScreenForTest(
+        window, rowNow.value(QStringLiteral("edge")).toString());
+    note->setAutoHide(true);
+    qInfo() << "STEP3b 该边是否屏幕交界:" << atJunction;
+
+    auto chain = std::make_shared<std::function<void(int)>>();
+    *chain = [id, window, avail, screenBefore, geoBefore, chain](int round) {
+        if (round >= 3) {
+            const QVariantMap row = noteRowFromCore(id);
+            const QRect geo = window->geometry();
+            qInfo() << "STEP3b 三轮后: screen:" << row.value(QStringLiteral("screen"))
+                    << "geo:" << geo;
+            check(row.value(QStringLiteral("screen")).toString() == screenBefore,
+                  QStringLiteral("STEP3b 收起/展开三轮后归属屏未变(不横跳)"));
+            // ⚠️ QRect 没有 operator-:逐轴比较左上角(尺寸不变)
+            check(qAbs(geo.x() - geoBefore.x()) <= 2
+                      && qAbs(geo.y() - geoBefore.y()) <= 2,
+                  QStringLiteral("STEP3b 展开后位置不漂移"));
+            return;
+        }
+        auto* note = qobject_cast<NoteWindow*>(window);
+        // 收起:鼠标先移开(收起计时器依赖"鼠标不在窗口上")
+        movePointerTo(window, avail.center(), /*expectInside=*/false);
+        QTimer::singleShot(1300, qApp, [id, window, screenBefore, chain, round] {
+            const QVariantMap collapsed = noteRowFromCore(id);
+            // 交界处:产品**拒绝**收起(见 docs/20 §13.12)。断言反过来 ——
+            // 不但不该收起,还得把 autoHide 关掉(否则是"勾着却永不生效"的假状态)。
+            if (edgeOutsideIsAnotherScreenForTest(
+                    window, collapsed.value(QStringLiteral("edge")).toString())) {
+                check(!collapsed.value(QStringLiteral("collapsed")).toBool(),
+                      QStringLiteral("STEP3b 第 %1 轮交界处未收起(正确行为)").arg(round + 1));
+                check(!collapsed.value(QStringLiteral("autoHide")).toBool(),
+                      QStringLiteral("STEP3b 第 %1 轮交界处已关掉 autoHide").arg(round + 1));
+                (*chain)(round + 1);
+                return;
+            }
+            check(collapsed.value(QStringLiteral("collapsed")).toBool(),
+                  QStringLiteral("STEP3b 第 %1 轮已收起").arg(round + 1));
+            // 收起态也必须保持原归属屏 —— 这一条正是缺陷的正面判据
+            check(collapsed.value(QStringLiteral("screen")).toString() == screenBefore,
+                  QStringLiteral("STEP3b 第 %1 轮收起后归属屏未变").arg(round + 1));
+            // 展开:指针移进拉手(窗口在屏内的那一端)
+            const QRect avail = availUnder(window);
+            const QString edge = collapsed.value(QStringLiteral("edge")).toString();
+            const QPoint sliver = (edge == QLatin1String("left"))
+                ? QPoint(avail.left() + 3, window->geometry().center().y())
+                : QPoint(avail.right() - 3, window->geometry().center().y());
+            movePointerTo(window, sliver, /*expectInside=*/true);
+            QTimer::singleShot(900, qApp, [chain, round] { (*chain)(round + 1); });
+        });
+    };
+    (*chain)(0);
 }
 
 // ---- STEP2:拖到右边缘 5px 内 → 吸附 ----

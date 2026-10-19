@@ -243,6 +243,13 @@ void NoteWindow::applyState(const QVariantMap& note, bool restoreCollapsed) {
         m_opacityPercent = note.value(QStringLiteral("opacity"), 100).toInt();
         m_fontSize = note.value(QStringLiteral("fontSize"), 0).toInt();
         m_screen = note.value(QStringLiteral("screen")).toString();
+        // 上下边已从产品面下线(2026-10-19 用户裁定)。历史数据里若还存着
+        // top/bottom,读入时归一成 none —— 否则窗口会按一条界面上根本没有的
+        // 边去算收起几何,用户看到的是"便签自己跑到屏幕外"。
+        if (m_edge != QLatin1String("none") && m_edge != QLatin1String("left")
+            && m_edge != QLatin1String("right")) {
+            m_edge = QStringLiteral("none");
+        }
         if (restoreCollapsed) {
             m_collapsed = note.value(QStringLiteral("collapsed"), false).toBool();
         }
@@ -268,9 +275,23 @@ void NoteWindow::applyState(const QVariantMap& note, bool restoreCollapsed) {
     applyOpacity();
     refreshFooter();
     refreshAffordances();
+    // 恢复前先判一次:若这张便签正收在**屏幕交界处**,按旧数据恢复会得到一个
+    // 跨在两块屏上的"半隐藏"窗口(它其实大半可见,鼠标一进就展开,再移出又收起,
+    // 表现为闪烁)。这种情况直接展开并按当前屏的边重新吸附。
+    if (m_collapsed && edgeOutsideIsAnotherScreen(screenForNote(), m_edge)) {
+        m_collapsed = false;
+        saveState({{QStringLiteral("collapsed"), false}});
+    }
     if (m_collapsed) {
         // 收起态直接落到收起位置(不播动画:恢复布局时一片窗口同时滑动很吵)
         move(collapsedPosition());
+    }
+    // 归一后可能是"没有边却处于收起态"(历史 top/bottom 数据),落库纠正,
+    // 免得下次启动又读到同一个非法组合。
+    if (m_edge == QLatin1String("none") && m_collapsed) {
+        m_collapsed = false;
+        saveState({{QStringLiteral("edge"), QStringLiteral("none")},
+                   {QStringLiteral("collapsed"), false}});
     }
 }
 
@@ -311,13 +332,10 @@ void NoteWindow::paintEvent(QPaintEvent*) {
         painter.setBrush(overdue ? QColor(0xE5, 0x48, 0x4D) : QColor(0x8D, 0x99, 0xA6));
         const qreal cx = width() / 2.0;
         const qreal cy = height() / 2.0;
-        if (m_edge == QLatin1String("left") || m_edge == QLatin1String("right")) {
-            const qreal w = 3, h = 34;
-            painter.drawRoundedRect(QRectF(cx - w / 2, cy - h / 2, w, h), 1.5, 1.5);
-        } else {
-            const qreal w = 34, h = 3;
-            painter.drawRoundedRect(QRectF(cx - w / 2, cy - h / 2, w, h), 1.5, 1.5);
-        }
+        // 只有左右两种收起方向 → 拉手恒为**竖条**(贴着屏幕侧的窄边)。
+        // 横条是上下边时代的产物,已随那两个方向一起下线。
+        const qreal w = 3, h = 34;
+        painter.drawRoundedRect(QRectF(cx - w / 2, cy - h / 2, w, h), 1.5, 1.5);
     }
 }
 
@@ -348,13 +366,17 @@ void NoteWindow::refreshAffordances() {
     m_title->setText(firstLine);
     // 钉住按钮:仅当吸附在某条边(且不是下边)时才有意义 —— 没吸附时"不自动隐藏"
     // 是恒真的,按钮亮着会让人以为点了没反应。
-    const bool canAutoHide = m_edge != QLatin1String("none") && m_edge != QLatin1String("bottom");
+    const bool atJunction = m_edge != QLatin1String("none")
+                            && edgeOutsideIsAnotherScreen(screenForNote(), m_edge);
+    const bool canAutoHide = m_edge != QLatin1String("none") && !atJunction;
     m_pinButton->setEnabled(canAutoHide);
     m_pinButton->setText(m_autoHide ? QStringLiteral("📌") : QStringLiteral("📍"));
-    m_pinButton->setToolTip(canAutoHide
-                                ? (m_autoHide ? QStringLiteral("已钉住:鼠标移开不收起")
-                                              : QStringLiteral("贴边自动收起(点击钉住)"))
-                                : QStringLiteral("先贴到屏幕边缘,才能自动收起"));
+    m_pinButton->setToolTip(
+        canAutoHide
+            ? (m_autoHide ? QStringLiteral("已钉住:鼠标移开不收起")
+                          : QStringLiteral("贴边自动收起(点击钉住)"))
+            : (atJunction ? QStringLiteral("这块屏的这一侧紧接着另一块屏,交界处不做自动收起")
+                          : QStringLiteral("先贴到屏幕边缘,才能自动收起")));
     update();
 }
 
@@ -407,43 +429,83 @@ void NoteWindow::refreshFooter() {
 
 // ---- 几何 / 吸附 / 半隐藏 ----
 
-/// 窗口的"归属点":收起时窗口大部分在屏幕外,**中心点已经不属于任何屏** ——
-/// 用中心找屏会退化到主屏,多屏机上表现为"便签自己跑到别的屏去了"。
-/// 所以找屏一律用可见锚点:收起态取露在屏内那一端的中心,展开态取窗口中心。
+/// 窗口的"归属点":用来判断这张便签**属于哪块屏**。
+///
+/// 收起态窗口有一大半在屏幕外,中心点已经不属于任何屏。
+/// ⚠️ 必须取**留在屏内**的那一端,而不是"贴边那一端"(2026-10-19 修,用户实测):
+///    原实现按 edge 取的是贴边侧的坐标 —— 左贴时取 geo.left()+4,而收起后窗口
+///    是**往左推出屏幕**的,于是这个点落在左邻屏上;多屏相邻时便签会在两块屏
+///    之间来回认主(每认一次就按新屏的边重算收起几何),表现为反复横跳。
+///    正确语义:贴左边 → 屏内那一端是**右**边;贴右边 → 屏内那一端是**左**边。
 static QPoint anchorFor(const QRect& geo, bool collapsed, const QString& edge) {
     if (!collapsed) return geo.center();
-    if (edge == QLatin1String("left")) return QPoint(geo.left() + 4, geo.center().y());
-    if (edge == QLatin1String("right")) return QPoint(geo.right() - 4, geo.center().y());
-    if (edge == QLatin1String("top")) return QPoint(geo.center().x(), geo.top() + 4);
-    if (edge == QLatin1String("bottom")) return QPoint(geo.center().x(), geo.bottom() - 4);
+    if (edge == QLatin1String("left")) return QPoint(geo.right() - 4, geo.center().y());
+    if (edge == QLatin1String("right")) return QPoint(geo.left() + 4, geo.center().y());
+    // 上/下边已从产品面下线(见 docs/20 §6.2 修订),这里保留镜像逻辑只为兼容
+    // 历史数据里可能还存着 edge=top/bottom 的便签 —— 读到时按"屏内那一端"纠正。
+    if (edge == QLatin1String("top")) return QPoint(geo.center().x(), geo.bottom() - 4);
+    if (edge == QLatin1String("bottom")) return QPoint(geo.center().x(), geo.top() + 4);
     return geo.center();
 }
 
-QRect NoteWindow::availableRect() const {
-    // ⚠️ **位置永远优先于记忆的屏名**(2026-10-18 修:便签"只能贴右边、拖不到别的屏")。
-    //
-    // 原实现先按 m_screen(库里的 QScreen::name())找屏,只有找不到才看位置。
-    // 结果是窗口一旦在 A 屏建起来,A 屏名就一直有效 —— 于是它算出的可用区永远
-    // 是 A 屏的:①dragTo() 用它夹取,拖动被死死限制在 A 屏内(拖不到副屏);
-    // ②snapAfterMove() 拿 A 屏的边做吸附判定,窗口拖到副屏后"左边"根本不在
-    // 可用区内,四边里只有恰好重合的那条能命中 —— 用户看到的就是"只能贴右边"。
-    //
-    // 正确的优先级:窗口**现在在哪** > 记忆的屏名 > 光标屏 > 主屏。
-    // m_screen 只作为"位置不可用时的兜底"(例如收起态大部分在屏外,但那时
-    // anchorFor 取的可见锚点仍然落在正确的屏上,所以它其实也够用)。
-    QScreen* screen = QGuiApplication::screenAt(anchorFor(geometry(), m_collapsed, m_edge));
-    if (!screen && !m_screen.isEmpty()) {
+/// 这张便签**属于哪块屏**。
+///
+/// 优先级(按"谁更可信"排):
+///   ① 展开态:窗口中心在哪块屏,就属于哪块屏 —— 位置是权威,屏名只是记忆;
+///   ② 收起态:**记忆的屏名优先**。收起后窗口被**故意**推到屏外,几何不再能代表
+///      "用户把它贴在哪块屏",此时拿几何去找屏必然认错(多屏相邻时尤其致命:
+///      一认错就按新屏的边重算收起几何,于是两块屏之间反复横跳)。
+///   ③ 兜底:光标屏 → 主屏。
+QScreen* NoteWindow::screenForNote() const {
+    if (m_collapsed) {
         for (QScreen* candidate : QGuiApplication::screens()) {
-            if (candidate->name() == m_screen) {
-                screen = candidate;
-                break;
-            }
+            if (!m_screen.isEmpty() && candidate->name() == m_screen) return candidate;
         }
+        // 记忆的屏没了(副屏被拔):退到锚点,再退到光标屏
+        if (QScreen* byAnchor = QGuiApplication::screenAt(
+                anchorFor(geometry(), true, m_edge))) {
+            return byAnchor;
+        }
+        if (QScreen* byCursor = QGuiApplication::screenAt(QCursor::pos())) return byCursor;
+        return QGuiApplication::primaryScreen();
     }
-    if (!screen) screen = QGuiApplication::screenAt(QCursor::pos());
-    if (!screen) screen = QGuiApplication::primaryScreen();
+    if (QScreen* here = QGuiApplication::screenAt(geometry().center())) return here;
+    for (QScreen* candidate : QGuiApplication::screens()) {
+        if (!m_screen.isEmpty() && candidate->name() == m_screen) return candidate;
+    }
+    if (QScreen* byCursor = QGuiApplication::screenAt(QCursor::pos())) return byCursor;
+    return QGuiApplication::primaryScreen();
+}
+
+bool NoteWindow::edgeOutsideIsAnotherScreen(QScreen* screen, const QString& edge) const {
+    if (!screen) return false;
+    const QRect avail = screen->availableGeometry();
+    // 取样点:贴边那条线上、纵向取窗口中点(纵向落在窗外也算 —— 只要邻屏在这一侧
+    // 有像素,就说明这一侧不是桌面外缘)。
+    const int y = avail.top() + avail.height() / 2;
+    QPoint probe;
+    if (edge == QLatin1String("left")) {
+        probe = QPoint(avail.left() - 2, y);
+    } else if (edge == QLatin1String("right")) {
+        probe = QPoint(avail.right() + 2, y);
+    } else {
+        return false;
+    }
+    // ⚠️ 用 screenAt 而不是"遍历所有屏的矩形 contains":
+    //    screenAt 走的是系统口径(含缩放/排列),自己比矩形容易在混合 DPI 下错位。
+    // ⚠️ 命中的是自己 → 说明这条边外侧仍是自己(不该发生),按"不是连接处"处理。
+    QScreen* other = QGuiApplication::screenAt(probe);
+    return other != nullptr && other != screen;
+}
+
+QRect NoteWindow::availableRect() const {
     // ⚠️ 用 availableGeometry 而不是 geometry:后者含任务栏区域,
     //    贴上去会被任务栏盖住(docs/20 §6.2 第 1 条)。
+    //
+    // ⚠️ 归属屏只看**便签所在的那一块**,不看虚拟桌面:边缘 = 当前屏幕的边缘,
+    //    不是所有显示器拼起来的外轮廓。用户实测的"贴到一边后自动收起来回横跳"
+    //    就出在这条上 —— 详见 screenForNote 的注释。
+    QScreen* screen = screenForNote();
     return screen ? screen->availableGeometry() : QRect(0, 0, 1920, 1080);
 }
 
@@ -458,9 +520,12 @@ QRect NoteWindow::virtualBounds() const {
 }
 
 void NoteWindow::adoptScreenUnderWindow() {
-    // 位置是权威:窗口中心落在哪块屏上,它就在哪块屏上。
-    // 中心不可靠时(收起态)用可见锚点 —— 与 availableRect 同一口径。
-    QScreen* screen = QGuiApplication::screenAt(anchorFor(geometry(), m_collapsed, m_edge));
+    // ⚠️ **收起态不改归属屏**(2026-10-19 修,用户实测"两块屏之间来回横跳")。
+    //    收起是程序把窗口推到屏外的动作,不是用户把便签挪了屏 —— 这时按几何
+    //    重新认主必然认到邻屏,下一次展开/收起就按邻屏的边算,于是来回跳。
+    //    归属屏只在两种时刻更新:用户拖动/缩放结束、屏幕布局变化。
+    if (m_collapsed) return;
+    QScreen* screen = QGuiApplication::screenAt(geometry().center());
     if (!screen) return;
     if (screen->name() != m_screen) {
         m_screen = screen->name();
@@ -483,15 +548,13 @@ void NoteWindow::clampToScreen() {
 QPoint NoteWindow::expandedPosition() const {
     const QRect avail = availableRect();
     QPoint pos = this->pos();
-    // 吸附边决定哪一侧对齐(用户可能刚改了 edge 而窗口还没挪)
+    // 吸附边决定哪一侧对齐(用户可能刚改了 edge 而窗口还没挪)。
+    // 只有左右:上下边已从产品面下线,走到这里说明数据异常 —— 保持原位即可,
+    // 不再按一条界面上没有的边去摆窗口(那正是"便签跑到屏幕外"的成因之一)。
     if (m_edge == QLatin1String("left")) {
         pos.setX(avail.left() - kNoteShadowMargin);
     } else if (m_edge == QLatin1String("right")) {
         pos.setX(avail.right() - width() + kNoteShadowMargin + 1);
-    } else if (m_edge == QLatin1String("top")) {
-        pos.setY(avail.top() - kNoteShadowMargin);
-    } else if (m_edge == QLatin1String("bottom")) {
-        pos.setY(avail.bottom() - height() + kNoteShadowMargin + 1);
     }
     return pos;
 }
@@ -506,9 +569,8 @@ QPoint NoteWindow::collapsedPosition() const {
         pos.setX(avail.left() - width() + visible);
     } else if (m_edge == QLatin1String("right")) {
         pos.setX(avail.right() - visible + 1);
-    } else if (m_edge == QLatin1String("top")) {
-        pos.setY(avail.top() - height() + visible);
     }
+    // 只有左右可收起(collapse() 已挡住其余情况),这里不再有纵向分支。
     return pos;
 }
 
@@ -559,9 +621,21 @@ void NoteWindow::expand(bool animate) {
 void NoteWindow::collapse(bool animate, bool force) {
     if (m_collapsed) return;
     if (!m_autoHide && !force) return;
+    // 屏幕连接处**不做半隐藏**(2026-10-19 用户实测:连接处贴边会闪烁且收不回去)。
+    // 理由见 edgeOutsideIsAnotherScreen:这里往边外推不是"藏起来",而是"推到邻屏上",
+    // 鼠标随即又落回窗口 → expand → 弹回 → leave → collapse → 死循环。
+    if (edgeOutsideIsAnotherScreen(screenForNote(), m_edge)) {
+        // 用户可能刚把它拖到连接处,而库里还留着 autoHide=true —— 明确告知一次,
+        // 否则"勾了自动收起却没反应"会被当成坏功能。
+        if (!m_junctionNoticed) {
+            m_junctionNoticed = true;
+            showTransientHint(QStringLiteral("屏幕交界处不做自动收起"));
+        }
+        return;
+    }
     // 没贴边就没有"收起方向"可言 —— 强行收起只会把窗口挪到一个说不通的位置,
-    // 这条即使 force 也保留。
-    if (m_edge == QLatin1String("none") || m_edge == QLatin1String("bottom")) return;
+    // 这条即使 force 也保留。(上下边已下线,left/right 是唯一可收起的两种。)
+    if (m_edge == QLatin1String("none")) return;
     m_collapsed = true;
     saveState({{QStringLiteral("collapsed"), true}});
     startSlide(collapsedPosition(), animate);
@@ -570,6 +644,13 @@ void NoteWindow::collapse(bool animate, bool force) {
 
 void NoteWindow::setAutoHide(bool on) {
     if (m_autoHide == on) return;
+    // 屏幕连接处开启自动收起没有意义(见 collapse):明确拒绝并说明,
+    // 而不是让用户勾上之后"什么都不发生"。
+    if (on && edgeOutsideIsAnotherScreen(screenForNote(), m_edge)) {
+        showTransientHint(QStringLiteral("屏幕交界处不做自动收起"));
+        refreshAffordances();
+        return;
+    }
     m_autoHide = on;
     if (!on && m_collapsed) expand();
     saveState({{QStringLiteral("autoHide"), on}});
@@ -579,7 +660,6 @@ void NoteWindow::setAutoHide(bool on) {
     // leaveEvent,如果只依赖 Enter/Leave,便签会一直摊着不动 —— 用户看到的是
     // "勾了自动收起但毫无反应"。这里补一次计时。
     if (on && !m_collapsed && m_edge != QLatin1String("none")
-        && m_edge != QLatin1String("bottom")
         && !rect().contains(mapFromGlobal(QCursor::pos()))) {
         m_collapseTimer->start();
     }
@@ -588,27 +668,27 @@ void NoteWindow::setAutoHide(bool on) {
 bool NoteWindow::snapAfterMove() {
     const QRect avail = availableRect();
     const QRect geo = geometry();
-    // 四条边的距离(用窗口**内容区**对齐:阴影留白是视觉余量,不是几何)
+    // 只判**左右**两条边(2026-10-19 按用户实测裁定下线上下边):
+    //   上边是标题栏/全屏区,贴上去之后几乎无法稳定触发(松手位置稍高就把窗口
+    //   顶出可用区);下边是任务栏,半隐藏会与任务栏自动隐藏抢鼠标。
+    //   实际使用以左右为主,只留左右也让"贴边"这一动作有唯一确定的方向。
     const int dLeft = qAbs(geo.left() - avail.left());
     const int dRight = qAbs(geo.right() - avail.right());
-    const int dTop = qAbs(geo.top() - avail.top());
-    const int dBottom = qAbs(geo.bottom() - avail.bottom());
 
     int best = kNoteSnapPx + 1;
     QString edge = QStringLiteral("none");
     for (const auto& [distance, name] :
          {qMakePair(dLeft, QStringLiteral("left")),
-          qMakePair(dRight, QStringLiteral("right")),
-          qMakePair(dTop, QStringLiteral("top")),
-          qMakePair(dBottom, QStringLiteral("bottom"))}) {
+          qMakePair(dRight, QStringLiteral("right"))}) {
         if (distance <= kNoteSnapPx && distance < best) {
             best = distance;
             edge = name;
         }
     }
     if (edge == QLatin1String("none")) {
+        // 没落在左右边上:若此前贴的是上下边(历史数据),这里一并解除 ——
+        // 产品面已无这两个入口,留着只会让状态机带着一个不可达分支跑。
         if (m_edge == QLatin1String("none")) return false;
-        // 拖离边缘:取消吸附,并把自动隐藏/收起一并关掉(否则会出现"没贴边却在收起态")
         m_edge = QStringLiteral("none");
         m_collapsed = false;
         m_collapseTimer->stop();
@@ -619,21 +699,26 @@ bool NoteWindow::snapAfterMove() {
     }
 
     m_edge = edge;
-    // 吸附后同时夹回可用区:避免"贴了右边却有一半在屏幕外"
+    // 吸附后同时夹回可用区:避免"贴了右边却有一半在屏幕外"。
+    // ⚠️ 纵向也必须夹 —— 纯左右吸附时纵向是用户自己摆的,他可能把便签拖到了
+    //    屏幕上下方之外(多屏竖向排列时尤其容易),夹一下才能贴边即完整可见。
     QPoint target = pos();
     if (edge == QLatin1String("left")) target.setX(avail.left() - kNoteShadowMargin);
     if (edge == QLatin1String("right")) {
         target.setX(avail.right() - width() + kNoteShadowMargin + 1);
     }
-    if (edge == QLatin1String("top")) target.setY(avail.top() - kNoteShadowMargin);
-    if (edge == QLatin1String("bottom")) {
-        target.setY(avail.bottom() - height() + kNoteShadowMargin + 1);
-    }
+    target.setY(qBound(avail.top() - kNoteShadowMargin, target.y(),
+                       qMax(avail.top(), avail.bottom() - height() + kNoteShadowMargin + 1)));
     move(target);
-    // 下边(任务栏那侧)不允许自动隐藏(docs/20 §6.2 第 4 条)
-    if (edge == QLatin1String("bottom") && m_autoHide) {
-        m_autoHide = false;
-        m_collapsed = false;
+    // 若吸附到的这条边**外侧是另一块屏**(屏幕交界处),主动关掉自动收起并告知:
+    // 半隐藏在那里不成立(推出去 = 推到邻屏上,见 edgeOutsideIsAnotherScreen),
+    // 留着 autoHide=1 会变成"勾着却永不收起"的假状态。
+    if (edgeOutsideIsAnotherScreen(screenForNote(), edge)) {
+        if (m_autoHide || m_collapsed) {
+            m_autoHide = false;
+            m_collapsed = false;
+            showTransientHint(QStringLiteral("屏幕交界处不做自动收起"));
+        }
     }
     saveState({{QStringLiteral("edge"), edge},
                {QStringLiteral("autoHide"), m_autoHide},
@@ -645,20 +730,38 @@ bool NoteWindow::snapAfterMove() {
 }
 
 void NoteWindow::setEdge(const QString& edge) {
-    // 取消贴边(或改成下边)时必须**先退出收起态**:收起位置的几何是按边算的,
-    // 没有边还停在收起位置 = 窗口留在屏幕外,鼠标永远进不来(便签就此消失)。
-    // 库侧 normalized() 也会纠正这个组合,这里同步纠正内存态,免得界面与库不一致。
-    if ((edge == QLatin1String("none") || edge == QLatin1String("bottom")) && m_collapsed) {
+    // 上下边已下线(2026-10-19 用户裁定):菜单不再出现,历史数据里残留的
+    // top/bottom 在读入时会被归一成 none(见 applyState),这里也兜一层,
+    // 免得任何调用方把不可达状态写回库里。
+    QString want = edge;
+    if (want != QLatin1String("none") && want != QLatin1String("left")
+        && want != QLatin1String("right")) {
+        want = QStringLiteral("none");
+    }
+    // 取消贴边时**必须先退出收起态**:收起位置的几何是按边算的,没有边还停在
+    // 收起位置 = 窗口留在屏幕外,鼠标永远进不来(便签就此消失)。
+    // 库侧 normalized() 也会纠正这个组合,这里同步纠正内存态。
+    if (want == QLatin1String("none") && m_collapsed) {
         m_collapsed = false;
         saveState({{QStringLiteral("collapsed"), false}});
     }
-    if (edge == QLatin1String("bottom") && m_autoHide) {
-        m_autoHide = false;
-        saveState({{QStringLiteral("autoHide"), false}});
+    m_edge = want;
+    saveState({{QStringLiteral("edge"), want}});
+    // 贴边会改窗口位置:几何必须一起落库,否则重启回到旧位置 + 旧 edge 自相矛盾。
+    // 先确认归属屏:saveState 会把 m_screen 一起写下去,顺序上先 adopt 能保证存的是
+    // "窗口此刻真在的那块屏"(展开态才 adopt,收起态见 adoptScreenUnderWindow)。
+    if (!m_collapsed) adoptScreenUnderWindow();
+    // 显式贴边也可能贴到屏幕交界处:那里不做半隐藏(见 edgeOutsideIsAnotherScreen)
+    if (want != QLatin1String("none")
+        && edgeOutsideIsAnotherScreen(screenForNote(), want)) {
+        if (m_autoHide || m_collapsed) {
+            m_autoHide = false;
+            m_collapsed = false;
+            saveState({{QStringLiteral("autoHide"), false},
+                       {QStringLiteral("collapsed"), false}});
+            showTransientHint(QStringLiteral("屏幕交界处不做自动收起"));
+        }
     }
-    m_edge = edge;
-    saveState({{QStringLiteral("edge"), edge}});
-    // 贴边会改窗口位置:几何必须一起落库,否则重启回到旧位置 + 旧 edge 自相矛盾
     startSlide(expandedPosition(), true);
     saveGeometry();
     refreshAffordances();
@@ -799,9 +902,20 @@ void NoteWindow::enterEvent(QEnterEvent* e) {
     QWidget::enterEvent(e);
 }
 
+bool NoteWindow::isCursorOverWindow() const {
+    // ⚠️ 用**窗口矩形**而不是 rect():rect() 是窗口内坐标,窗口在屏外时
+    //    mapFromGlobal 仍能算出值,但含义容易读错。这里直接比全局坐标,意图明确。
+    return frameGeometry().contains(QCursor::pos());
+}
+
 void NoteWindow::leaveEvent(QEvent* e) {
-    qDebug() << "note-leave" << m_id.left(8) << "collapsed:" << m_collapsed;
-    if (m_autoHide && !m_collapsed && !m_dragging) {
+    qDebug() << "note-leave" << m_id.left(8) << "collapsed:" << m_collapsed
+             << "cursorOverWindow:" << isCursorOverWindow();
+    // ⚠️ 抖振保护(2026-10-19):滑入/滑出动画会让窗口在鼠标底下移动,
+    //    Windows 于是连发 leave→enter→leave…,每次 leave 都起一遍计时器,
+    //    动画一结束就收起、刚收起又展开 —— 用户看到的是**闪烁**。
+    //    只在"光标真的不在窗口上"时才起表。
+    if (m_autoHide && !m_collapsed && !m_dragging && !isCursorOverWindow()) {
         m_collapseTimer->start();
     }
     QWidget::leaveEvent(e);
@@ -919,22 +1033,27 @@ void NoteWindow::showToolbar(const QPoint& globalPos) {
     });
 
     // 自动收起只在吸附后才有意义(未贴边时"不自动隐藏"恒真,勾选框会误导)
-    const bool canAutoHide = m_edge != QLatin1String("none")
-                             && m_edge != QLatin1String("bottom");
+    const bool atJunction = m_edge != QLatin1String("none")
+                            && edgeOutsideIsAnotherScreen(screenForNote(), m_edge);
+    const bool canAutoHide = m_edge != QLatin1String("none") && !atJunction;
     QAction* const autoAction = m_toolbar->addAction(QStringLiteral("贴边自动收起"));
     autoAction->setCheckable(true);
     autoAction->setChecked(m_autoHide);
     autoAction->setEnabled(canAutoHide);
     if (!canAutoHide) {
-        autoAction->setToolTip(QStringLiteral("先贴到屏幕边缘(左右或上边),才能自动收起"));
+        autoAction->setToolTip(atJunction
+            ? QStringLiteral("这块屏的这一侧紧接着另一块屏,交界处不做自动收起")
+            : QStringLiteral("先贴到屏幕左/右边缘,才能自动收起"));
     }
     connect(autoAction, &QAction::toggled, this, [this](bool on) { setAutoHide(on); });
 
     // 贴边:显式入口。用户往往先想到"贴左/贴右",而不是"拖到边上"——
     // 只靠拖动 12px 的阈值,在小屏上很容易拖过头而没吸附,会被当成"贴边坏了"。
     QMenu* const edgeMenu = addSub(QStringLiteral("贴到屏幕边缘"));
+    // ⚠️ 只有左右(2026-10-19 用户裁定):上下边在实际使用中无法稳定触发
+    //    (上边是标题栏/全屏区,下边是任务栏),留着只会让人点了没反应。
     const struct { const char* id; const char* label; } edges[] = {
-        {"left", "贴左边"}, {"right", "贴右边"}, {"top", "贴上边"}, {"bottom", "贴下边"},
+        {"left", "贴左边"}, {"right", "贴右边"},
     };
     for (const auto& e : edges) {
         const QString id = QString::fromLatin1(e.id);

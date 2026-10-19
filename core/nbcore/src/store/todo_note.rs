@@ -34,14 +34,20 @@ pub const MAX_FONT_SIZE: i64 = 96;
 /// 线上/库里的表示都是小写字符串(as_str/parse),`Serialize` 只为让 NoteState
 /// 能直接下发 —— 两者的字符串必须一致,故用 `rename_all = "lowercase"` 而不是
 /// 手写 Serialize(手写会多一份容易漂移的映射)。
+///
+/// ⚠️ **产品面只有 Left / Right 两个吸附方向**(2026-10-19 用户实测裁定):
+///    上边是标题栏/全屏区,下边是任务栏,两个方向都无法稳定触发,已从宿主菜单
+///    下线。枚举仍保留 Top/Bottom 只为**读得懂历史数据**(v7 时期可能存过),
+///    读入时由宿主归一成 None;解析照旧接受,但写入不再产生它们。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NoteEdge {
     None,
     Left,
     Right,
+    /// @deprecated 产品面已下线,仅用于解析历史数据。宿主读入即归一成 None。
     Top,
-    /// 下边(任务栏那一侧)。允许吸附,**不允许 autoHide** —— 见 docs/20 §6.2 第 4 条。
+    /// @deprecated 同上。
     Bottom,
 }
 
@@ -70,9 +76,21 @@ impl NoteEdge {
         }
     }
 
-    /// 下边吸附不支持自动半隐藏(会与任务栏自动隐藏抢鼠标)。
+    /// 是否是**产品面仍支持**的吸附边(只有 left / right)。
+    ///
+    /// Top/Bottom 保留在枚举里只为解析历史数据 —— 宿主读入后归一成 None,
+    /// 核心写入时也归一,库里不会再新增这两个值。
+    pub fn is_active(self) -> bool {
+        matches!(self, NoteEdge::None | NoteEdge::Left | NoteEdge::Right)
+    }
+
+    /// 是否允许自动半隐藏。
+    ///
+    /// 语义保留原样:**未吸附(none)时 autoHide 可以留着** —— 它是用户的偏好,
+    /// 下次贴边时仍然生效(回归测试 detaching_edge_clears_collapsed 钉住这条)。
+    /// 只有已下线的 Top/Bottom 才强制清掉:那两个方向本来就收不起来。
     pub fn allows_auto_hide(self) -> bool {
-        !matches!(self, NoteEdge::Bottom)
+        self.is_active()
     }
 }
 
@@ -237,7 +255,12 @@ fn normalized(mut state: NoteState) -> NoteState {
     state.h = clamp(state.h, MIN_H, MAX_H);
     state.opacity = clamp(state.opacity, MIN_OPACITY, MAX_OPACITY);
     state.font_size = clamp(state.font_size, 0, MAX_FONT_SIZE);
-    // 下边吸附不允许自动隐藏(docs/20 §6.2 第 4 条):把非法组合在落库时纠正,
+    // 上下边已从产品面下线(2026-10-19 用户裁定):写入时一律归一成 None。
+    // 留在库里只会让宿主按一条界面上没有的边去算收起几何。
+    if !state.edge.is_active() {
+        state.edge = NoteEdge::None;
+    }
+    // 半隐藏只对**可收起的边**有意义:把非法组合在落库时纠正,
     // 而不是留给宿主每次读取时再判断一遍。
     if !state.edge.allows_auto_hide() {
         state.auto_hide = false;
@@ -578,38 +601,50 @@ mod tests {
     }
 
     #[test]
-    fn bottom_edge_forbids_auto_hide() {
+    fn retired_edges_normalize_to_none() {
+        // 2026-10-19 用户裁定:上下边从产品面下线(上边是标题栏/全屏区,下边是任务栏,
+        // 实际使用中无法稳定触发)。核心侧的处理是**写入即归一成 none** ——
+        // 库里不再新增这两个值,历史数据读到也会被纠正。
         let mut conn = crate::store::memory();
         let id = todo_at(&mut conn, "任务栏侧");
-        let state = save(
-            &conn,
-            &id,
-            &NotePatch {
-                edge: Some(NoteEdge::Bottom),
-                auto_hide: Some(true),
-                collapsed: Some(true),
-                ..patch_full(0, 0, 240, 200)
-            },
-        )
-        .expect("bottom");
-        // 下边吸附与任务栏自动隐藏抢鼠标(docs/20 §6.2 第 4 条):落库时就纠正
-        assert!(!state.auto_hide);
-        assert!(!state.collapsed);
 
-        // 其它边允许
-        let left = save(
-            &conn,
-            &id,
-            &NotePatch {
-                edge: Some(NoteEdge::Left),
-                auto_hide: Some(true),
-                collapsed: Some(true),
-                ..Default::default()
-            },
-        )
-        .expect("left");
-        assert!(left.auto_hide);
-        assert!(left.collapsed);
+        for retired in [NoteEdge::Bottom, NoteEdge::Top] {
+            let state = save(
+                &conn,
+                &id,
+                &NotePatch {
+                    edge: Some(retired),
+                    auto_hide: Some(true),
+                    collapsed: Some(true),
+                    ..patch_full(0, 0, 240, 200)
+                },
+            )
+            .expect("retired edge");
+            assert_eq!(state.edge, NoteEdge::None, "{retired:?} 应归一成 none");
+            // 收起态跟着清:没有边就没有收起方向(几何是按边算的)
+            assert!(!state.collapsed, "{retired:?} 不该残留收起态");
+            // autoHide 是**用户偏好**,贴边时才生效 —— 与"取消贴边"同一口径,
+            // 不因为一次归一就抹掉(见 detaching_edge_clears_collapsed)。
+            assert!(state.auto_hide);
+        }
+
+        // 左右仍然允许,且允许自动收起
+        for active in [NoteEdge::Left, NoteEdge::Right] {
+            let state = save(
+                &conn,
+                &id,
+                &NotePatch {
+                    edge: Some(active),
+                    auto_hide: Some(true),
+                    collapsed: Some(true),
+                    ..Default::default()
+                },
+            )
+            .expect("active edge");
+            assert_eq!(state.edge, active);
+            assert!(state.auto_hide);
+            assert!(state.collapsed);
+        }
 
         // 关掉 autoHide 时 collapsed 必须一起落(否则会出现"没开自动隐藏却处于收起态")
         let off = save(

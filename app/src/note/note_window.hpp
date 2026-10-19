@@ -4,6 +4,9 @@
 // (旋转/编辑回写/文本位图渲染),而那些对便签全是死代码;真正的复用是**机制** ——
 // 无边框透明底 + 自绘阴影 + 8 向缩放命中 + DPR 变化延迟重算 + 顶层弹层菜单。
 //
+// 吸附边只有**左右**两条(docs/20 §6.2 修订):上边是标题栏/全屏区、下边是任务栏,
+// 实际使用中无法稳定触发,故从产品面下线(历史数据读入时归一成 none)。
+//
 // 窗体 = 纯 Widgets(不用 QQuickWidget):便签可能同时开好几张,每张再挂一个
 // QML 场景/RHI 上下文的代价与收益不匹配;且 QTextEdit 的 IME(中文输入法)行为
 // 在置顶多窗口场景下比 QML TextEdit 稳。
@@ -17,6 +20,7 @@
 
 class QCheckBox;
 class QMenu;
+class QScreen;
 class QPropertyAnimation;
 class QLabel;
 class QTextEdit;
@@ -111,14 +115,29 @@ private:
     bool snapAfterMove();
     QPoint collapsedPosition() const;
     QPoint expandedPosition() const;
-    /// 窗口**当前所在屏**的可用区。位置优先于记忆的屏名(见实现处注释)。
+    /// 这张便签**归属屏**的可用区(边缘定义 = 当前屏幕的边缘,不是虚拟桌面外框)。
+    /// 归属判定见 screenForNote:展开态看位置,收起态看记忆的屏名。
     QRect availableRect() const;
+    /// 便签属于哪块屏。收起态**不能**用几何判定 —— 收起是程序把窗口推到屏外,
+    /// 按几何认主会在多屏相邻时认到邻屏,导致收起/展开反复换屏(来回横跳)。
+    QScreen* screenForNote() const;
+    /// 该归屏的某条边**外侧是否紧接着另一块屏**(即这是屏幕连接处,不是桌面外缘)。
+    ///
+    /// 收起几何的前提是"往边外推出去就看不见了";屏幕连接处这个前提不成立 ——
+    /// 推出去的区域正好是邻屏,于是"收起"变成"挪到邻屏上",鼠标又落回窗口 →
+    /// 展开 → 弹回 → 移出 → 收起 → 无限循环(用户看到的闪烁)。
+    /// 连接处**不能**做半隐藏,只能吸附(或换用别的方式来省空间)。
+    bool edgeOutsideIsAnotherScreen(QScreen* screen, const QString& edge) const;
     /// 虚拟桌面(所有屏可用区的外接矩形):拖动夹取用 —— 单屏夹取等于把窗口
     /// 焊死在那一块屏上,多屏机上永远拖不过去。
     QRect virtualBounds() const;
     /// 按窗口当前位置更新 m_screen(位置是权威,屏名只是记忆)。
+    /// ⚠️ 收起态直接返回:那时位置由程序决定,不代表用户意图。
     void adoptScreenUnderWindow();
     void clampToScreen();
+    /// 光标此刻是否真的落在窗口矩形内。leaveEvent 用它挡掉滑入/滑出动画期间的
+    /// enter/leave 抖振(否则每次 leave 都起表,动画结束就收起 → 闪烁)。
+    bool isCursorOverWindow() const;
     void startSlide(const QPoint& target, bool animate);
     void saveGeometry();
     void scheduleBodySave();
@@ -159,6 +178,9 @@ private:
     QString m_lastCommittedText;
     /// 已落库的**备注**(规范化后):正文区编辑对象(docs/21)。
     QString m_lastCommittedNote;
+    /// 是否已就"屏幕交界处不做自动收起"提示过一次(每张贴图只提示一次,
+    /// 免得每次离开都弹一条)。
+    bool m_junctionNoticed = false;
     /// 最近一次按键的时刻(msecs)。自动收起用它判"用户还在打字吗"。
     /// 只认按键而不是 hasFocus:光标移开窗口时窗口**仍持有焦点**(没有别的窗口被
     /// 激活),用 hasFocus 判会让便签永远收不起来。
