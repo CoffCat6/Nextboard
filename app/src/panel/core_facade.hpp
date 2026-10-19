@@ -101,8 +101,9 @@ public:
     // ---- 数据备份与导出(慢 I/O:线程池执行,完成发 backupFinished/exportFinished) ----
     /// 创建备份 zip:path 由 QFileDialog 提供,nbcore 内 checkpoint 后打包。
     Q_INVOKABLE void backupCreate(const QString& path);
-    /// 导出全部条目为 Markdown 单文件(图片 base64 内嵌)。
-    Q_INVOKABLE void exportEntries(const QString& path);
+    /// 导出全部条目为单文件。format: "markdown"(默认,图片 base64 内嵌)/
+    /// "json" / "csv"(结构化,图片只记 blob 相对路径)。未知格式由核心报错。
+    Q_INVOKABLE void exportEntries(const QString& path, const QString& format = QStringLiteral("markdown"));
     /// 恢复备份(慢 I/O:线程池执行,完成发 restoreFinished):**替换**当前数据;
     /// nbcore 侧先自动给当前数据打险备份 zip(恢复源同目录)再热替换。
     Q_INVOKABLE void restoreBackup(const QString& path);

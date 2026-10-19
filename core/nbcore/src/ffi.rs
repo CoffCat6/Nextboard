@@ -929,7 +929,8 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
             let path = str_req(req, "path")?;
             Ok(crate::backup_export::backup_create(core, &path)?)
         }
-        // 导出:全部条目 -> Markdown 单文件(图片 base64 内嵌;html 显式报错)
+        // 导出:全部条目 -> Markdown / JSON / CSV 单文件
+        // (Markdown 图片 base64 内嵌;结构化格式只记 blob 相对路径;未知 format 显式报错)
         "export_entries" => {
             let core = crate::core::Core::get()?;
             let path = str_req(req, "path")?;

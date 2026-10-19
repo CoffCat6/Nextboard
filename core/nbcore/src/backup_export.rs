@@ -4,8 +4,11 @@
 //!   manifest.json)。⚠️ WAL 坑(progress.md:3085):必须在**同一连接锁内**先
 //!   `PRAGMA wal_checkpoint(TRUNCATE)` 再拷 .db,只拷 .db 不带 -wal/-shm 才安全;
 //!   持有 `Core.db` 互斥锁的窗口内业务写入被串行化,快照一致。
-//! - 导出:`export_entries` —— 剪贴板历史渲染为 Markdown(图片 base64 内嵌,
-//!   单文件自包含)。HTML 为 backlog,format 传 "html" 显式报错不静默。
+//! - 导出:`export_entries` —— 剪贴板历史渲染为 **Markdown / JSON / CSV**。
+//!   Markdown 把图片 base64 内嵌(单文件自包含,给人看);JSON / CSV 是**结构化**
+//!   格式(给别的工具吃),图片只记库内相对路径、不内嵌 —— 否则一份 4K 图列表
+//!   的 CSV 会膨胀成几百 MB,Excel 直接打不开。
+//!   HTML 仍为 backlog,format 传 "html" 显式报错不静默。
 //! - 恢复:`restore_backup` —— 选备份 zip → **替换**当前数据。执行前自动给当前
 //!   数据打险备份 zip(恢复源同目录,`nextboard-pre-restore-*.zip`);解包/迁移
 //!   全部在 staging 里预演通过后才动真数据,锁内换连接 + 换 blobs 目录,失败回滚。
@@ -144,18 +147,28 @@ fn zip_err(err: zip::result::ZipError) -> AppError {
 // 导出(Markdown)
 // ---------------------------------------------------------------------------
 
-/// 导出全部条目为 Markdown 单文件。format 仅支持 "markdown"。
+/// 导出全部条目为单文件。format 支持 "markdown" / "json" / "csv"(大小写不敏感)。
+///
+/// 三种格式共用同一条**流式分页**查询(`load_batch`),内存只持有当前批 ——
+/// 十万条历史的导出峰值与五百条时一样。新增格式时不要改成"先 load 全量再序列化"。
 pub fn export_entries(core: &Core, out_path: &str, format: &str) -> AppResult<serde_json::Value> {
-    if format != "markdown" {
-        return Err(AppError::InvalidInput(format!(
-            "不支持的导出格式: {format}(当前仅 markdown,HTML 在 backlog)"
-        )));
-    }
     let started = std::time::Instant::now();
+    // 归一化:对话框过滤器给的大小写不一定("CSV"/"Json"),别让它走到报错分支
+    let format = format.trim().to_ascii_lowercase();
     let db = core.db.lock()?;
-    let result = export_markdown(&db, &core.blobs_dir, Path::new(out_path))?;
+    let result = match format.as_str() {
+        "markdown" | "md" => export_markdown(&db, &core.blobs_dir, Path::new(out_path))?,
+        "json" => export_json(&db, &core.blobs_dir, Path::new(out_path))?,
+        "csv" => export_csv(&db, &core.blobs_dir, Path::new(out_path))?,
+        other => {
+            return Err(AppError::InvalidInput(format!(
+                "不支持的导出格式: {other}(支持 markdown / json / csv;HTML 在 backlog)"
+            )))
+        }
+    };
     log::info!(
-        "export_entries: {} 条目 / {} bytes -> {}",
+        "export_entries({}): {} 条目 / {} bytes -> {}",
+        format,
         result.entry_count,
         result.file_bytes,
         out_path
@@ -208,6 +221,8 @@ fn export_markdown(conn: &Connection, blobs_dir: &Path, out_path: &Path) -> AppR
 }
 
 struct RawEntry {
+    /// 条目 id(结构化导出要用;Markdown 分支不用它)
+    id: String,
     kind: String,
     text_content: Option<String>,
     blob_path: Option<String>,
@@ -217,17 +232,18 @@ struct RawEntry {
     ocr_text: Option<String>,
     pinned: bool,
     created_at: i64,
-    /// 条目来源(导出文档暂不展示,保留字段与 DB 对齐;标注以过 dead_code 检查)。
-    #[allow(dead_code)]
+    /// 条目来源(Markdown 分支不展示;JSON / CSV 会导出这一列)。
     source: String,
+    /// 标签(JSON 数组字符串,列 clip_entries.tags;空 = 无标签)。
+    tags: Option<String>,
     todo_done: Option<i64>,
     todo_due_at: Option<i64>,
 }
 
 fn load_batch(conn: &Connection, limit: i64, offset: i64) -> AppResult<Vec<RawEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT e.kind, e.text_content, e.blob_path, e.file_paths, e.width, e.height,
-                e.ocr_text, e.pinned, e.created_at, e.source,
+        "SELECT e.id, e.kind, e.text_content, e.blob_path, e.file_paths, e.width, e.height,
+                e.ocr_text, e.pinned, e.created_at, e.source, e.tags,
                 m.done_at AS todo_done_at, m.due_at AS todo_due_at
          FROM clip_entries e
          LEFT JOIN todo_meta m ON m.id = e.id
@@ -236,18 +252,20 @@ fn load_batch(conn: &Connection, limit: i64, offset: i64) -> AppResult<Vec<RawEn
     )?;
     let rows = stmt.query_map(params![limit, offset], |row| {
         Ok(RawEntry {
-            kind: row.get(0)?,
-            text_content: row.get(1)?,
-            blob_path: row.get(2)?,
-            file_paths: row.get(3)?,
-            width: row.get(4)?,
-            height: row.get(5)?,
-            ocr_text: row.get(6)?,
-            pinned: row.get::<_, i64>(7)? != 0,
-            created_at: row.get(8)?,
-            source: row.get(9)?,
-            todo_done: row.get(10)?,
-            todo_due_at: row.get(11)?,
+            id: row.get(0)?,
+            kind: row.get(1)?,
+            text_content: row.get(2)?,
+            blob_path: row.get(3)?,
+            file_paths: row.get(4)?,
+            width: row.get(5)?,
+            height: row.get(6)?,
+            ocr_text: row.get(7)?,
+            pinned: row.get::<_, i64>(8)? != 0,
+            created_at: row.get(9)?,
+            source: row.get(10)?,
+            tags: row.get(11)?,
+            todo_done: row.get(12)?,
+            todo_due_at: row.get(13)?,
         })
     })?;
     let mut out = Vec::new();
@@ -341,6 +359,233 @@ fn render_entry(w: &mut impl Write, e: &RawEntry, blobs_dir: &Path) -> AppResult
     }
     writeln!(w)?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 导出(JSON / CSV)
+// ---------------------------------------------------------------------------
+
+/// 结构化导出共用的条目视图。`RawEntry` 是数据库行的直映(字段名 snake_case、
+/// 时间戳是毫秒整数),对外格式要的是 camelCase + 可读时间,故单独装配一次,
+/// 免得 JSON 与 CSV 各写一份列语义而漂移。
+struct ExportRow {
+    id: String,
+    kind: String,
+    text: String,
+    blob_path: String,
+    file_paths: Vec<String>,
+    width: Option<i64>,
+    height: Option<i64>,
+    ocr_text: String,
+    pinned: bool,
+    source: String,
+    tags: Vec<String>,
+    created_at: i64,
+    created_at_text: String,
+    /// 待办扩展(仅 kind == "todo" 时有值)
+    todo_done: Option<bool>,
+    todo_due_at: Option<i64>,
+}
+
+/// 由 `RawEntry` 装配 `ExportRow`。
+///
+/// 标签来源是 `clip_entries.tags`(JSON 数组字符串,v5 起的既有形态),不是独立表 ——
+/// 不必额外查询,也不会出现"关联表有、条目列没有"的两份真相。
+fn to_export_rows(batch: &[RawEntry]) -> AppResult<Vec<ExportRow>> {
+    let mut out = Vec::with_capacity(batch.len());
+    for e in batch {
+        let file_paths: Vec<String> = e
+            .file_paths
+            .as_deref()
+            .and_then(|json| serde_json::from_str(json).ok())
+            .unwrap_or_default();
+        out.push(ExportRow {
+            id: e.id.clone(),
+            kind: e.kind.clone(),
+            text: e.text_content.clone().unwrap_or_default(),
+            blob_path: e.blob_path.clone().unwrap_or_default(),
+            file_paths,
+            width: e.width,
+            height: e.height,
+            ocr_text: e.ocr_text.clone().unwrap_or_default(),
+            pinned: e.pinned,
+            source: e.source.clone(),
+            tags: e
+                .tags
+                .as_deref()
+                .and_then(|json| serde_json::from_str(json).ok())
+                .unwrap_or_default(),
+            created_at: e.created_at,
+            created_at_text: millis_to_text(e.created_at),
+            todo_done: if e.kind == "todo" { Some(e.todo_done.is_some()) } else { None },
+            todo_due_at: e.todo_due_at,
+        });
+    }
+    Ok(out)
+}
+
+fn millis_to_text(ms: i64) -> String {
+    use chrono::TimeZone;
+    chrono::Local
+        .timestamp_millis_opt(ms)
+        .single()
+        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|| ms.to_string())
+}
+
+/// 导出为 JSON:顶层是对象而不是裸数组 —— 便于以后加字段(导出器元信息、
+/// 分页游标)而不破坏消费方的解析。`format` 字段兼作版本抓手。
+///
+/// 图片/文件条目不内嵌数据:blob 只给**库内相对路径**,明确写进 `note` 让
+/// 消费方知道这不是可直接打开的绝对路径。
+fn export_json(conn: &Connection, blobs_dir: &Path, out_path: &Path) -> AppResult<ExportResult> {
+    let out_file = std::fs::File::create(out_path)?;
+    let mut w = BufWriter::new(out_file);
+    let total: i64 = conn.query_row("SELECT COUNT(*) FROM clip_entries", [], |r| r.get(0))?;
+
+    let mut offset: i64 = 0;
+    let mut count: u64 = 0;
+    // 边查边写:避免把全部条目先攒成一个大 Value 再 to_string
+    //(10 万条 × 含 OCR 文本的条目可达数百 MB 常驻)。
+    writeln!(w, "{{")?;
+    writeln!(w, "  \"format\": \"nextboard-entries\",")?;
+    writeln!(w, "  \"version\": 1,")?;
+    writeln!(w, "  \"exportedAt\": {},", serde_json::to_string(&millis_to_text(chrono_ms()))?)?;
+    writeln!(w, "  \"entryCount\": {total},")?;
+    writeln!(
+        w,
+        "  \"note\": \"blobPath 是数据目录下的相对路径;图片字节未内嵌\","
+    )?;
+    writeln!(w, "  \"entries\": [")?;
+    loop {
+        let batch = load_batch(conn, EXPORT_BATCH, offset)?;
+        let batch_len = batch.len() as i64;
+        if batch_len == 0 {
+            break;
+        }
+        let rows = to_export_rows(&batch)?;
+        for (i, r) in rows.iter().enumerate() {
+            let is_last = (offset + i as i64 + 1) == total;
+            let json = serde_json::json!({
+                "id": r.id,
+                "kind": r.kind,
+                "text": r.text,
+                "blobPath": r.blob_path,
+                "filePaths": r.file_paths,
+                "width": r.width,
+                "height": r.height,
+                "ocrText": r.ocr_text,
+                "pinned": r.pinned,
+                "source": r.source,
+                "tags": r.tags,
+                "createdAt": r.created_at,
+                "createdAtText": r.created_at_text,
+                "todoDone": r.todo_done,
+                "todoDueAt": r.todo_due_at,
+            });
+            // 缩进两格,便于人直接打开看;体积代价可忽略(zip/传输才是主要成本)
+            let text = serde_json::to_string_pretty(&json)?;
+            let indented = text.replace('\n', "\n    ");
+            write!(w, "    {indented}{}", if is_last { "" } else { "," })?;
+            writeln!(w)?;
+            count += 1;
+        }
+        offset += batch_len;
+        if batch_len < EXPORT_BATCH {
+            break;
+        }
+    }
+    writeln!(w, "  ]")?;
+    writeln!(w, "}}")?;
+    w.flush()?;
+    let file_bytes = w.get_ref().metadata()?.len();
+    let _ = blobs_dir; // 结构化格式不读 blob;保留参数与 markdown 分支同签名
+    Ok(ExportResult { entry_count: count, file_bytes })
+}
+
+/// 导出为 CSV(RFC 4180:逗号分隔、`"` 转义、CRLF 行尾)。
+///
+/// ⚠️ 写 UTF-8 **BOM**:Excel 打开无 BOM 的 UTF-8 CSV 会按本地代码页(GBK)
+///    解码,中文全变乱码。BOM 是让"双击就能看"成立的必要代价,其它工具都容忍。
+/// ⚠️ 多值字段(file_paths / tags)用 ` | ` 连接而不是拆多行:一行一条是
+///    CSV 能被 Excel/数据库导入的前提,拆行会让列数错位。
+fn export_csv(conn: &Connection, blobs_dir: &Path, out_path: &Path) -> AppResult<ExportResult> {
+    let out_file = std::fs::File::create(out_path)?;
+    let mut w = BufWriter::new(out_file);
+    // UTF-8 BOM(EF BB BF)
+    w.write_all(&[0xEF, 0xBB, 0xBF])?;
+    writeln!(
+        w,
+        "id,kind,text,blobPath,filePaths,width,height,ocrText,pinned,source,tags,createdAt,createdAtText,todoDone,todoDueAt"
+    )?;
+
+    let mut offset: i64 = 0;
+    let mut count: u64 = 0;
+    loop {
+        let batch = load_batch(conn, EXPORT_BATCH, offset)?;
+        let batch_len = batch.len() as i64;
+        if batch_len == 0 {
+            break;
+        }
+        for r in to_export_rows(&batch)? {
+            let cells = [
+                r.id,
+                r.kind,
+                r.text,
+                r.blob_path,
+                r.file_paths.join(" | "),
+                r.width.map(|v| v.to_string()).unwrap_or_default(),
+                r.height.map(|v| v.to_string()).unwrap_or_default(),
+                r.ocr_text,
+                if r.pinned { "1".to_string() } else { "0".to_string() },
+                r.source,
+                r.tags.join(" | "),
+                r.created_at.to_string(),
+                r.created_at_text,
+                match r.todo_done {
+                    Some(true) => "1".to_string(),
+                    Some(false) => "0".to_string(),
+                    None => String::new(),
+                },
+                r.todo_due_at.map(|v| v.to_string()).unwrap_or_default(),
+            ];
+            let line: Vec<String> = cells.iter().map(|c| csv_field(c)).collect();
+            writeln!(w, "{}", line.join(","))?;
+            count += 1;
+        }
+        offset += batch_len;
+        if batch_len < EXPORT_BATCH {
+            break;
+        }
+    }
+    w.flush()?;
+    let file_bytes = w.get_ref().metadata()?.len();
+    let _ = blobs_dir;
+    Ok(ExportResult { entry_count: count, file_bytes })
+}
+
+/// CSV 单字段转义:含逗号 / 引号 / CR / LF 时整体加引号,内部引号翻倍。
+/// 另外把裸 CR 也当需要引用的情形 —— 剪贴板里的文本经常带 \r\n,不引用会把
+/// 一行拆成两行、后续列全部错位。
+fn csv_field(v: &str) -> String {
+    let needs_quote = v.contains([',', '"', '\r', '\n']);
+    if !needs_quote {
+        return v.to_string();
+    }
+    let mut out = String::with_capacity(v.len() + 2);
+    out.push('"');
+    for ch in v.chars() {
+        if ch == '"' {
+            out.push('"');
+        }
+        out.push(ch);
+    }
+    out.push('"');
+    out
+}
+
+fn chrono_ms() -> i64 {
+    chrono::Local::now().timestamp_millis()
 }
 
 fn kind_label(kind: &str) -> &'static str {
@@ -1202,6 +1447,107 @@ mod tests {
 
         drop(conn); // 同上:先关连接再清理
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn export_json_structure_and_escaping() {
+        let dir = temp_dir("json");
+        let conn = crate::store::open(&dir.join("clipboard.db")).unwrap();
+        // 正文里带引号、反斜杠、换行与中文:JSON 转义最容易在"人工拼字符串"的实现里出错
+        insert_text(&conn, "t1", "他是\"作者\"\\ 说:第一行\n第二行", false, 1700000000000);
+        conn.execute(
+            "INSERT INTO clip_entries (id, kind, hash, byte_size, preview, pinned, created_at, last_used_at, source)
+             VALUES ('f1', 'file', 'hf', 0, 'p', 0, 1700000100, 1700000100, 'clipboard')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE clip_entries SET file_paths = '[\"D:\\\\a b.txt\",\"D:\\\\c.txt\"]' WHERE id = 'f1'",
+            [],
+        )
+        .unwrap();
+
+        let out = dir.join("export.json");
+        let r = export_json(&conn, &dir.join("blobs"), &out).unwrap();
+        assert_eq!(r.entry_count, 2);
+        let raw = std::fs::read_to_string(&out).unwrap();
+        // 必须是**合法 JSON**,而不是"看起来像"(手拼最容易在这里翻车)
+        let v: serde_json::Value = serde_json::from_str(&raw).expect("导出物必须是合法 JSON");
+        assert_eq!(v["format"], "nextboard-entries");
+        assert_eq!(v["version"], 1);
+        assert_eq!(v["entryCount"], 2);
+        let entries = v["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        // 固定优先:文件条目 pinned=0 排在文本之后,故 entries[1] 是文件
+        let text_ids: Vec<&str> = entries.iter().map(|e| e["id"].as_str().unwrap()).collect();
+        assert!(text_ids.contains(&"t1") && text_ids.contains(&"f1"));
+        let t = entries.iter().find(|e| e["id"] == "t1").unwrap();
+        // 往返后正文必须与原文逐字相同(转义正确性的判据)
+        assert_eq!(t["text"], "他是\"作者\"\\ 说:第一行\n第二行");
+        assert_eq!(t["source"], "clipboard");
+        assert_eq!(t["pinned"], false);
+        assert!(t["createdAtText"].as_str().unwrap().starts_with("2023-11-"));
+        let f = entries.iter().find(|e| e["id"] == "f1").unwrap();
+        assert_eq!(f["filePaths"].as_array().unwrap().len(), 2);
+        drop(conn);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn export_csv_quotes_and_bom() {
+        let dir = temp_dir("csv");
+        let conn = crate::store::open(&dir.join("clipboard.db")).unwrap();
+        // 含逗号、引号、换行 —— CSV 三类必须引用的字符各一个
+        insert_text(&conn, "c1", "a,b", false, 1700000000000);
+        insert_text(&conn, "c2", "say \"hi\"", false, 1700000060000);
+        insert_text(&conn, "c3", "line1\nline2", false, 1700000120000);
+
+        let out = dir.join("export.csv");
+        let r = export_csv(&conn, &dir.join("blobs"), &out).unwrap();
+        assert_eq!(r.entry_count, 3);
+        let bytes = std::fs::read(&out).unwrap();
+        // UTF-8 BOM:Excel 双击打开不乱码的前提
+        assert_eq!(&bytes[0..3], &[0xEF, 0xBB, 0xBF], "CSV 必须带 UTF-8 BOM");
+        let text = String::from_utf8(bytes[3..].to_vec()).unwrap();
+        // 按**记录**数而不是物理行数断言:被引号包住的正文里可以有裸换行,
+        // 那是合法 CSV(RFC 4180 §2.6)。用 lines() 数行会把这种正文数成多行,
+        // 于是"正确实现"反而被判错 —— 必须按引号状态机切记录。
+        let records = csv_record_count(&text);
+        assert_eq!(records, 4, "表头 + 3 条记录(带换行的正文仍在同一条记录内)");
+        let header = text.split(['\r', '\n']).next().unwrap();
+        assert_eq!(header.split(',').count(), 15, "表头 15 列");
+        assert!(text.contains("\"a,b\""), "含逗号必须加引号");
+        assert!(text.contains("\"say \"\"hi\"\"\""), "内部引号必须翻倍");
+        assert!(text.contains("\"line1\nline2\""), "含换行必须整段加引号");
+        drop(conn);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 按引号状态机数 CSV 记录数(引号内的换行不切记录)。
+    fn csv_record_count(text: &str) -> usize {
+        let mut n = 0usize;
+        let mut in_quote = false;
+        let mut has_content = false;
+        for ch in text.chars() {
+            match ch {
+                '"' => {
+                    in_quote = !in_quote;
+                    has_content = true;
+                }
+                '\n' if !in_quote => {
+                    if has_content {
+                        n += 1;
+                        has_content = false;
+                    }
+                }
+                '\r' => {}
+                _ => has_content = true,
+            }
+        }
+        if has_content {
+            n += 1;
+        }
+        n
     }
 
     #[test]

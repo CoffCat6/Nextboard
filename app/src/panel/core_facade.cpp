@@ -317,10 +317,10 @@ void CoreFacade::backupCreate(const QString& path) {
     QThreadPool::globalInstance()->start(job);
 }
 
-void CoreFacade::exportEntries(const QString& path) {
+void CoreFacade::exportEntries(const QString& path, const QString& format) {
     auto* job = new AsyncCall;
     job->method = "export_entries";
-    job->req = QJsonObject{{"path", path}, {"format", "markdown"}};
+    job->req = QJsonObject{{"path", path}, {"format", format}};
     job->setAutoDelete(true);
     job->onDone = [this](const QJsonObject& resp) {
         emit exportFinished(jsonToVariant(resp).toMap());
