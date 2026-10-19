@@ -4436,3 +4436,326 @@ JPG   -> fmt=JPEG ok=1 size=2911   (大写后缀也认)
 
 
 
+
+
+---
+
+## 2026-10-19(日) 第 0 档收尾 + 第 1 档六项
+
+### 背景
+
+上一轮盘点(docs/18 v2026-10-17)给出的优先级被用户采纳,本轮按两批次执行:
+第 0 档(纯文档/仓库)+ 第 1 档(贴图方向键 / 搜索高亮 / 导出 JSON·CSV /
+OCR 三项显隐 / 热键 toast / 面板尺寸记忆)。
+
+### 一、文档状态回填(D2 / D3 / D4)
+
+这三条的共同特征是:**代码早就做完,文档还标着未做**。回填时逐条复核了代码证据,
+不是照着提交信息改口径。
+
+| 项 | 文档 | 代码证据 |
+| --- | --- | --- |
+| D2 滚动长截图 S5 | `docs/19:7` 状态行、`:275` 标题补 ✅ | `capture_session.cpp:1068` 有「长截图」按钮;`core_bridge.cpp:70-72` 有 `nb_stitch_append/finish/abort` |
+| D3 设置字段级合并 F7 | `docs/17:340` 改 ✅ | `ffi.rs:595-615` `merge_settings()`(提交 `de9cd18`) |
+| D4 OCR 后端选择器 | `docs/10` §14.6 第 4 项、§15.6 第 1 项改 ✅ | `SettingsDrawer.qml` 的 `ocrBackendCombo` / `ocrProfileCombo` / `ocrSessionCombo` |
+
+### 二、仓库卫生
+
+```
+git rm --cached tools/smoke_host/nbcore.dll tools/smoke_host/smoke_host.exe
+```
+
+本地副本保留(构建仍可用),只把它们从索引移除。`.gitignore` 同时做了两件事:
+把 28 行逐文件的 `app/.cache/clangd/index/*.idx` 换成一条目录规则(逐文件列举
+在文件新增/改名后必然失效),并把 smoke_host 段的注释从「需另行清理」改成「已清理」。
+文件从 2393 字符压到 734。
+
+### 三、导出 JSON / CSV(核心 ~300 行 + 3 条单测)
+
+`backup_export::export_entries` 原先对 `format != "markdown"` 直接报错。本轮拆成
+`match format` 三分支,三种格式**共用同一条流式分页查询**(`load_batch`),
+内存只持有当前批 —— 十万条历史的导出峰值与五百条时一样。
+
+关键取舍:
+
+1. **结构化格式不内嵌图片**。Markdown 把图片 base64 塞进正文(给人看、单文件自包含),
+   JSON / CSV 只记库内相对路径。否则一份 4K 图列表的 CSV 会膨胀到几百 MB,Excel 打不开。
+2. **CSV 必须写 UTF-8 BOM**。没有 BOM 时 Excel 按本地代码页(GBK)解码,中文全乱码。
+3. **多值字段用 ` | ` 连接,不拆行**。`filePaths` / `tags` 若拆成多行,列数会错位,
+   「一行一条记录」这个 CSV 能被导入的前提就没了。
+
+### 踩坑:标签不在关联表里
+
+首版按「条目-标签多对多」的直觉写了 `JOIN entry_tags`,直接报
+`no such table: entry_tags`。本项目的标签是 **`clip_entries.tags` 一个 JSON 数组字符串**
+(v5 起的既有形态),没有独立关联表。改回读该列后一次通过。
+
+这条记在这里的原因:如果按「标准范式」去猜 schema,会浪费一整轮编译;
+schema 的真相只有 `store/migrations/v*.sql` 里才有。
+
+### 踩坑:CSV 测试不能用 lines() 数行
+
+首版断言 `lines().len() == 4`(表头 + 3 条记录),结果**正确实现被判错**:
+正文里含换行时,该字段被引号包住,里面的换行是合法内容(RFC 4180 §2.6),
+`lines()` 会把它数成两行。改成引号状态机(`csv_record_count`)按**记录**数断言。
+这个坑的价值在于:它演示了「测试断言与规范不一致时,错的是断言」。
+
+### 四、搜索命中高亮
+
+`EntryCard.qml` 新增 `query` 属性(由 `Main.qml` 直接绑 `searchInput.text`),
+命中片段包一层 `accentSoft` 底色。三条实现约束:
+
+- **只在有搜索词时切 RichText**。空词走原纯文本路径 —— 1MB 的长文本条目在滚动时
+  逐帧重建富文本是可感知的卡顿,而折叠态只看 4 行。
+- **先按原串切段、再逐段转义**。先整体转义再找会让 `&` `<` 膨胀,匹配位置全错。
+- **搜索词要转义成正则字面量**,否则用户输入 `.` `*` 会被当通配。
+
+验收:`qmllint` 0 syntax issue;`--query https` 自截 38.9KB PNG,运行期无新增告警。
+
+### 五、贴图方向键
+
+`PinWindow::keyPressEvent` 原只处理 ESC。补方向键 1px / Shift 10px。
+刻意**不复用 `m_dragging`**:拖动状态由鼠标独占,键盘若也置它,松手时
+`mouseReleaseEvent` 会把「键盘挪过的那张」当成还在拖。
+
+### 六、面板尺寸记忆
+
+`settings.panelSize: Vec<i64>`(二元组)+ `PanelWindow::preferredPanelSize/savePanelSize`。
+三道回退:无记录 / 不是二元组 → 默认 800×600;超出光标所在屏可用区 → 回默认
+(拔了外接屏后不会打开一个比屏幕还大的面板)。
+
+两个刻意的取舍:
+
+- **只记列表形态**。翻译页 520×660 是内容驱动的最优值,记下来会让「第二次打开翻译页」
+  变成用户上次意外拖出的奇怪比例。
+- **500ms 防抖 + `m_applyingSize` 闸门**。拖边框时每帧都有 `resizeEvent`,直接写就是
+  每秒几十次 sqlite 事务;而程序自己 `resize`(切形态)若被当成用户操作,会形成
+  「程序写入 → 触发 resize → 再写回」的回环。闸门用一个局部 RAII guard 复位,
+  比在每条 return 前手写复位可靠。
+
+### 七、OCR 三项设置落地
+
+`ocrLanguage` / `ocrScale` / `maxTextKb` 三个字段一直存在、参与校验、却**没有任何界面入口**。
+本轮:
+
+| 字段 | 控件 | 可见性 |
+| --- | --- | --- |
+| `maxTextKb` | `maxTextKbSpin`(1~4096) | 常显(「数据」分组) |
+| `ocrLanguage` | `ocrLanguageCombo` | 仅「系统内置」后端 |
+| `ocrScale` | `ocrScaleSpin`(1~4) | 仅「系统内置」后端 |
+
+显隐依据不是猜的:`ocr/rapid.rs:16-17` 写明 RapidOCR 自带 `max_side_len` 故不应用
+`ocr_scale` 放大,且中英混排一体故 `ocr_language` 对它无效。选了 RapidOCR 还显示这两个
+控件,等于让用户「调了没反应」。
+
+⚠️ 一个 QML 作用域坑:`builtinOcr` 这个只读属性必须声明在**根对象**属性区。
+首版放在内容 `ColumnLayout` 里,子控件引用它得到 undefined(编译不报错,行为是全显)。
+
+### 八、B2 热键 toast:核实为「早已实现」
+
+盘点里把「热键冲突不提示」列为待办,本轮核实发现 `hotkeys.cpp:170-175` 早在
+2026-10-15(提交 `5ec3a19`)就做了:注册失败项汇总成一条 toast。
+**没有改代码** —— 这类「按旧盘点重做一遍」是纯浪费,记录在此以免下次再犯。
+
+### 验证
+
+| 项 | 结果 |
+| --- | --- |
+| `cargo test -p nbcore --release` | **353 passed / 1 failed / 5 ignored**(新增 3 条;失败仍是既有的 `translate::http::tests::send_dispatches_socks5_through_ureq`,os error 11001) |
+| `cargo test -p nbcore --release export_` | **4 passed / 0 failed** |
+| `cargo build -p nbcore --release` | 通过,零 warning |
+| `ninja`(app) | **57/57 链接成功** |
+| `qmllint` | `SettingsDrawer.qml` / `EntryCard.qml` 均 0 syntax issue |
+| `--settings-flow` | 15 个 STEP 全绿:`historyLimit` 手输 999 落库、点点抽屉外不穿透、ESC 关闭、待办页签恒显示、OCR 后端切换 true、两后端 probe 均可用 |
+| `--screenshot --settings` | 104KB PNG,渲染无 QML 告警 |
+| `--screenshot --query https` | 38.9KB PNG,高亮路径无运行期错误 |
+| `--todo-flow`(干净 `--data-dir`) | STEP1–5 全绿:浮层在视口内、确定写回字段 `match: true`、保存入库 `match: true`、分组键正确 |
+
+### 一个已知的既有告警(本轮未修)
+
+`Main.qml:2006` 反复报 `ReferenceError: model is not defined`。
+该行是 `todoNote: model.todoNote ? model.todoNote : ""` —— **改动前就在**(已用
+`git show HEAD:` 确认)。委托根声明了显式 `required property`,此处应改用
+委托自身属性而非 `model`。不属于本轮范围,记入 docs/18 待办。
+
+### 顺带清掉的两条文档债
+
+- `docs/13-ocr-enhancement-plan.md` 开头两行 `undefined` + `---` 拼接残留已删(纯文本债);
+- `docs/04` 头部状态从「待用户最终确认」改为「§8 的代码签名(D6)与发布渠道(D10)仍待用户拍板,
+  其余按推荐项落地」—— 原写法会让人以为整份发布规程都还没定。
+
+### 未做
+
+- 版本号口径(app 0.2.0 / core 0.1.0 / 安装器 0.2.0)未统一;
+- 发布渠道与代码签名未定(自动更新因此仍是死按钮);
+- 安装冒烟 7 项与 S6.5/S6.6 的量化验收未跑(需真机);
+- 以上四项都需要用户拍板或真机环境,已列入 docs/18 §2 与 §5。
+
+
+---
+
+## 2026-10-19(日) 待办贴屏:多屏相邻边界来回横跳 + 上下边下线
+
+### 用户反馈
+
+> 贴屏到一块屏幕的一边后,这边还连着另一块屏幕,自动收起就会出现问题,
+> 在这两块屏幕之间来回切换……还有目前还是取消贴上边和贴下边(实际使用中是无法触发的),
+> 实际使用还是以左右为主。
+
+用户同时裁定:**边缘的定义 = 待办贴屏当前所在的当前屏幕**(不是所有显示器拼起来的
+虚拟桌面外轮廓)。
+
+### 根因:两层缺陷叠在一起
+
+| # | 缺陷 | 机理 |
+| --- | --- | --- |
+| ① | `anchorFor()` 取的是**贴边那一端** | 左贴时取 `geo.left()+4`,而收起后窗口是**往左推出屏幕**的 —— 这个点落在左邻屏上,`screenAt()` 认到邻屏 |
+| ② | `adoptScreenUnderWindow()` 收起态也按几何认屏 | 收起是**程序**把窗口推出屏外的动作,不代表用户意图。①认出的邻屏被写进 `m_screen`,下次展开按邻屏的边算 → 落回原屏 → 再认回邻屏,**来回振荡** |
+
+两处都不是「再调一下阈值」能解决的:它们在语义层面把**收起后的位置**当成了
+**用户想把便签放在哪块屏**的证据。而收起后的位置恰恰是程序自己算出来的。
+
+### 修法
+
+1. `anchorFor()` 改为取**屏内那一端**(贴左边取 `geo.right()`,贴右边取 `geo.left()`);
+2. 新增 `NoteWindow::screenForNote()` 统一归属判定:**展开态看窗口中心,收起态看记忆的屏名**
+   (记忆的屏没了才退到锚点/光标屏);
+3. `adoptScreenUnderWindow()` **收起态直接返回** —— 归属屏只在「用户拖动/缩放结束」
+   与「屏幕布局变化」两个时刻更新;
+4. 上下边下线:菜单只剩左右,`collapse()`/`setAutoHide()` 的 bottom 特判删除,
+   `expandedPosition()`/`collapsedPosition()` 去纵向分支,拉手恒画竖条;
+5. 核心 `normalized()` 把 top/bottom 归一成 none(历史数据自愈),新增
+   `NoteEdge::is_active()` 表达「产品面仍支持的边」;`allows_auto_hide()` 改为 `is_active()`
+   (**保留**「none 时 autoHide 可留」的旧语义 —— 那是用户偏好,下次贴边仍生效)。
+
+### A/B 留痕(关键)
+
+同一台三屏机(Mi Monitor 0..1920 / TL160MDMP03-0 在下方 / S24 PRO -1080..0):
+
+```
+旧代码(临时回滚两处修复):
+  FAIL 第 1/2/3 轮收起后归属屏未变
+  FAIL 三轮后归属屏未变      screen: "Mi Monitor" -> "S24 PRO"
+  FAIL 展开后位置不漂移      geo: QRect(-1088,421 ...)   <- 跳到邻屏上
+  失败项:5
+
+新代码:
+  PASS 第 1/2/3 轮收起后归属屏未变
+  PASS 三轮后归属屏未变      screen: "Mi Monitor"
+  PASS 展开后位置不漂移      geo: QRect(-8,421 ...)
+  全部通过(66 PASS / 0 FAIL)
+```
+
+### 两个测试方法论教训
+
+1. **贴右边测不出这个缺陷**。第一版 STEP3b 贴的是右边,旧代码跑出「全绿」的假结论 ——
+   因为本机主屏右侧没有邻屏,锚点落在屏幕外的虚空里,`screenAt()` 返回空,缺陷
+   无从发生。**验证多屏缺陷必须让锚点真的落进邻屏**。
+2. **验收脚本自己也会踩同一个坑**。`availUnder(window)` 用 `screenAt(窗口中心)`,
+   收起后中心已在屏外,它会退化到主屏,于是「拉手坐标」算到别的屏上 ——
+   表现和产品缺陷一模一样。修法是在**展开态**取一次可用区并固定下来。
+
+### 验证
+
+| 项 | 结果 |
+| --- | --- |
+| `cargo test -p nbcore --release` | **353 passed / 1 failed / 5 ignored**(353 = 350 + 新增的 `retired_edges_normalize_to_none`;失败仍是既有的 socks5 用例) |
+| `ninja`(app) | **[42/42] Linking CXX executable nextboard.exe** |
+| `--note-flow`(干净 `--data-dir`) | **全部通过:66 PASS / 0 FAIL**(含新增 STEP3b 的 9 条断言) |
+| `--settings-flow` | 0 FAIL(回归) |
+| `--todo-flow` | 0 FAIL(回归) |
+
+### 顺带
+
+- `core/nbcore/src/store/todo_note.rs`:单测 `bottom_edge_forbids_auto_hide` 改写为
+  `retired_edges_normalize_to_none` —— 覆盖 top/bottom 都归一、左右仍可收起、
+  关 autoHide 时 collapsed 一起落;
+- `app/src/host/note_flow.cpp`:`step2b` 的边矩阵从 3 条(left/top/bottom)降为 2 条
+  (left/right),注释写明「上下边已下线,不再测也不再有入口」;
+- `docs/20`:§6.2 吸附规则重写(边缘定义 + 左右两条),新增 §13.11 完整根因与 A/B 记录;
+- `docs/18`:已落地表补两行(多屏横跳修复 / 上下边下线)。
+
+### 未做
+
+- 「卷起」(折叠成标题条、原地不动)仍是 v1.1 项;
+- 上下边从枚举里**彻底删除**没做:保留只为解析历史数据,代价是 `NoteEdge` 有
+  两个永远不会被写入的变体。彻底删除需要一次 v9 迁移改写存量行,收益不抵风险。
+
+
+---
+
+## 2026-10-19(日) 待办贴屏:屏幕**连接处**闪烁与收不回去
+
+### 用户反馈
+
+> 继续修复还是不行,在两块屏幕的连接处,无法正常贴屏,会出现闪烁且没有正常收回。
+
+### 先说清楚:上一轮修的不是这个缺陷
+
+上一轮(同日)修的是**归属屏翻转**:`anchorFor()` 取错了端、`adoptScreenUnderWindow()`
+在收起态也按几何认屏。那是真缺陷,但它解释的是「整块屏之间跳」。
+用户报的是**两块屏的接缝处** —— 机理完全不同,单修前者不可能解决。
+
+### 根因一:收起公式在连接处不成立(几何问题)
+
+`collapsedPosition()` 把窗口往贴边侧推出屏幕,只留一条拉手。它默认**「该边外侧是空的」**。
+屏幕连接处这个前提不成立。本机 `S24 PRO`(-1080..-1)与 `Mi Monitor`(0..1919)在 x=0 相接,
+窗口宽 196、拉手可见 16:
+
+| 位置 | 收起 x | 窗口占位 | 落在邻屏的宽度 |
+| --- | --- | --- | --- |
+| S24 PRO 贴右 | -16 | [-16, 179] | **180px 在 Mi Monitor 上** |
+| Mi Monitor 贴左 | -180 | [-180, 15] | **180px 在 S24 PRO 上** |
+
+所以「收起」实际变成了「挪到邻屏、而且几乎全可见」。死循环:收起挪过去 →
+鼠标本来就在那片区域 → `enterEvent` → `expand()` 弹回 → 鼠标离开 → `leaveEvent` →
+700ms → `collapse()` 又挪过去 → ……(闪烁,且永远停在半收半展)。
+
+这条与「归属屏」无关 —— 就算屏认对了,只要边外侧有屏,收起几何就是错的。
+
+### 根因二:leaveEvent 无条件起表
+
+滑入/滑出是 140ms 动画,**窗口在鼠标底下移动**,Windows 连发 leave→enter→leave…。
+每次 leave 都起一遍收起计时器,动画结束就收起、刚收起又展开。
+
+### 修法
+
+1. `edgeOutsideIsAnotherScreen(screen, edge)`:贴边线外 2px、纵向屏中点取样,
+   用 `QGuiApplication::screenAt()` 判断外侧是否另一块屏(系统口径,不自比矩形,
+   避免混合 DPI 错位);
+2. `collapse()` 交界处**直接拒绝**,首次 `showTransientHint("屏幕交界处不做自动收起")`;
+3. `setAutoHide(true)` 交界处拒绝并提示;
+4. `snapAfterMove()` / `setEdge()` 贴到交界边时主动清 `autoHide`(`勾着却永不生效`是假状态);
+5. 钉住按钮与右键菜单项交界处禁用 + tooltip 说明;
+6. `applyState()` 恢复旧数据时若正收在交界处,直接展开并落库;
+7. `leaveEvent()` 加 `isCursorOverWindow()` 守卫 —— 光标真在窗口外才起表。
+
+### 为什么选「拒绝」而不是硬收
+
+连接处做半隐藏在几何上不成立:要藏起来就得移出当前屏,而那个方向正是邻屏 ——
+没有「屏外」可用。另一条路是把「收起」改成「缩成窄条」(resize 而非 move),
+但那是另一种形态(语义从半隐藏变缩小),且要存/恢复尺寸,应作为独立需求评估。
+本轮把**不确定的行为换成了确定的缺失**,并在 UI 上说清原因。
+
+### 验收脚本的连锁反应
+
+交界处拒绝收起是**新的正确行为**,原来「已收起」的断言必然失败(首轮跑出 4 FAIL)。
+改造:
+
+- `collapsibleEdgeFor(QScreen*)` 挑一条非交界边;
+- `edgeOutsideIsAnotherScreenForTest(window, edge)` 测试侧同口径复算;
+- STEP3b / STEP4.6 按 `atJunction` 分流:交界处断言「未收起 + autoHide 已关」。
+
+### 验证
+
+| 项 | 结果 |
+| --- | --- |
+| `ninja`(app) | 多次构建均 **status 0 / 0 error** |
+| `--note-flow --data-dir note-j2` | **67 PASS / 0 FAIL** |
+| STEP3b 日志 | 「该边是否屏幕交界: **true**」+ 三轮均 PASS(未收起、autoHide 已关、归属屏未变、位置不漂移) |
+
+### 一个方法论收获
+
+**「测试通过」不等于「缺陷修好」**。本轮 STEP3b 第一次跑出 4 个 FAIL,而那 4 条恰恰
+是因为修复生效了(交界处不再收起)。断言必须跟着**产品语义**走,而不是跟着
+「上一版怎么写的」走 —— 否则修对了也会被测试判红。
