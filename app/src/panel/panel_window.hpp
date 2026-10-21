@@ -115,6 +115,12 @@ public:
     /// 验收专用:按 objectName 取项,返回它在**场景坐标**里的左上角 y;找不到返回 -1。
     /// 场景坐标是统一坐标系 —— 两个控件父级不同时,直接比各自的 y 没有意义。
     qreal acceptanceItemSceneY(const QString& objectName) const;
+    /// 该 objectName 的项**实际是否可见**(QQuickItem::isVisible,沿父链生效)。
+    ///
+    /// 为什么必须有它:mapToScene 对**不可见**的项照样返回坐标 ——
+    /// 只用坐标断言会漏掉"控件被 visible:false 藏起来了"这类缺陷
+    /// (实测:备注框因绑定失败恒不可见,而位置断言一直 PASS)。
+    bool acceptanceItemVisible(const QString& objectName) const;
 
     /// 验收:向面板投递一次真实按键(press + release),走与真实键盘相同的
     /// 链路(QQuickWidget → QML 场景的 deliverKeyEvent → activeFocusItem)。

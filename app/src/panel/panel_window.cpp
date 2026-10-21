@@ -411,6 +411,12 @@ qreal PanelWindow::acceptanceItemSceneY(const QString& objectName) const {
     return item->mapToScene(QPointF(0, 0)).y();
 }
 
+bool PanelWindow::acceptanceItemVisible(const QString& objectName) const {
+    QQuickItem* item = findAcceptanceItem(objectName);
+    // 找不到也报 false:调用方要的是"能不能看到",不是"找没找到"
+    return item && item->isVisible();
+}
+
 bool PanelWindow::clickByObjectName(const QString& objectName, qreal xFrac) {
     QQuickItem* target = findAcceptanceItem(objectName);
     if (!target) {

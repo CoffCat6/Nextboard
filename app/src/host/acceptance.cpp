@@ -974,17 +974,70 @@ void runTodoLayoutFlow(PanelWindow& panel) {
             const qreal titleY = panel.acceptanceItemSceneY(QStringLiteral("todoTitleInput"));
             const qreal noteY = panel.acceptanceItemSceneY(QStringLiteral("todoNoteInput"));
             const bool bothPresent = titleY >= 0 && noteY >= 0;
+            // ⚠️ 位置断言**测不到可见性**:mapToScene 对不可见的项照样给坐标。
+            //    实测缺陷:备注框的 visible 绑到 parent.noteExpanded,而它的 parent 是
+            //    ColumnLayout、noteExpanded 定义在兄弟 RowLayout 上 → 取到 undefined
+            //    → 恒不可见(备注功能整个用不了),而本用例一直 PASS。
+            const bool noteVisible = panel.acceptanceItemVisible(QStringLiteral("todoNoteInput"));
+            const bool titleVisible = panel.acceptanceItemVisible(QStringLiteral("todoTitleInput"));
             qInfo() << "TODO-LAYOUT 标题 y:" << titleY << "备注 y:" << noteY
-                    << "两者都存在:" << bothPresent;
+                    << "两者都存在:" << bothPresent
+                    << "标题可见:" << titleVisible << "备注可见:" << noteVisible;
             if (!bothPresent) {
                 qWarning().noquote()
                     << "TODO-LAYOUT FAIL 找不到标题/备注输入框(objectName 缺失?)";
-            } else if (!(titleY < noteY)) {
+            } else if (!titleVisible) {
+                qWarning().noquote() << "TODO-LAYOUT FAIL 标题输入框不可见(应始终可见)";
+            } else if (noteVisible) {
+                // ⚠️ 卡片刚打开时备注框**本该收起**(空备注 + 无焦点)。
+                // 它若是可见的,说明 visible 绑定没生效 —— QML 里
+                // `visible: undefined` 是**赋值失败、保持默认 true**,不是"恒 false"。
+                // 这正是 parent.noteExpanded 那个缺陷的表现。
                 qWarning().noquote()
-                    << "TODO-LAYOUT FAIL 标题必须排在备注**上面**(当前标题 y 不小于备注 y)";
+                    << "TODO-LAYOUT FAIL 空备注时备注框应收起,实际却展开(visible 绑定失效)";
             } else {
-                qInfo().noquote() << "TODO-LAYOUT PASS 标题在第一行、备注在第二行";
+                // 收起态正确 → 再验它能**展开**、能**再收起**。
+                // 只验一次展开是不够的:visible 恒 true 也能通过那一条。
+                qInfo().noquote() << "TODO-LAYOUT 备注框已收起,点击展开后复验";
+                panel.clickByObjectName(QStringLiteral("todoNoteToggle"));
+                QTimer::singleShot(300, qApp, [&panel, titleY] {
+                    const bool expandedVisible =
+                        panel.acceptanceItemVisible(QStringLiteral("todoNoteInput"));
+                    const qreal noteY2 =
+                        panel.acceptanceItemSceneY(QStringLiteral("todoNoteInput"));
+                    qInfo() << "TODO-LAYOUT 展开后备注可见:" << expandedVisible
+                            << "备注 y:" << noteY2;
+                    if (!expandedVisible) {
+                        qWarning().noquote() << "TODO-LAYOUT FAIL 点「展开」后备注框仍不可见";
+                        QApplication::quit();
+                        return;
+                    }
+                    if (!(titleY < noteY2)) {
+                        qWarning().noquote() << "TODO-LAYOUT FAIL 标题必须排在备注**上面**";
+                        QApplication::quit();
+                        return;
+                    }
+                    // 再收起:证明状态是**双向**跟随的,而不是"一旦可见就永远可见"
+                    panel.clickByObjectName(QStringLiteral("todoNoteToggle"));
+                    QTimer::singleShot(300, qApp, [&panel] {
+                        const bool collapsedAgain =
+                            !panel.acceptanceItemVisible(QStringLiteral("todoNoteInput"));
+                        qInfo() << "TODO-LAYOUT 再收起后备注已隐藏:" << collapsedAgain;
+                        if (!collapsedAgain) {
+                            qWarning().noquote()
+                                << "TODO-LAYOUT FAIL 点「收起」后备注框仍可见(状态不跟随)";
+                        } else {
+                            qInfo().noquote()
+                                << "TODO-LAYOUT PASS 备注可展开/收起且排在标题下方";
+                        }
+                        QApplication::quit();
+                    });
+                });
+                return;
             }
+            // 注意:上面的展开/收起分支自带 return(异步,结果在定时器里断言),
+            // 走不到这里;只有 bothPresent==false / titleVisible==false / noteVisible==true
+            // 三种失败会落到本行的 quit。
             QApplication::quit();
         });
     });

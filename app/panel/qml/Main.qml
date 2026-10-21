@@ -2914,6 +2914,17 @@ Rectangle {
                 Layout.fillWidth: true
                 spacing: 2
                 RowLayout {
+                    // ⚠️ 必须给 id:折叠状态 noteExpanded 定义在**这一行**上,
+                    //    而下面的备注正文框 Rectangle 是 ColumnLayout 的子项(兄弟级),
+                    //    它的 parent 是 ColumnLayout 而**不是**这个 RowLayout ——
+                    //    原先写 parent.noteExpanded 取到 undefined。
+                    //
+                    //    实际后果**不是**"一直隐藏",而是**一直展开**:
+                    //    QML 里 `visible: undefined` 属于**赋值失败**,visible 保持
+                    //    默认值 true —— 于是"空备注时收起"这条设计整个失效(卡片永远
+                    //    很高),同时每帧刷一条 "Unable to assign [undefined] to bool"。
+                    //    (我最初按"恒 false"推断,被反向验证纠正 —— 见 progress.md)
+                    id: noteHeader
                     Layout.fillWidth: true
                     spacing: 6
                     Text {
@@ -2923,11 +2934,19 @@ Rectangle {
                         font.pixelSize: Theme.metrics.fontCaption
                     }
                     Text {
-                        visible: !parent.noteExpanded
+                        visible: !noteHeader.noteExpanded
                         text: (todoNoteInput.text.length > 0
                                ? "（" + todoNoteInput.text.split("\n").length + " 行）"
                                : "（可选，点右侧展开）")
-                        color: Theme.colors.textFaint
+                        // textFaint 是**不存在的令牌**(Theme.qml 里从没有它):
+                        // 绑定失败 → 颜色取默认值,日志每帧刷 "Unable to assign
+                        // [undefined] to QColor"。改回 textTertiary —— 与上方标题框的
+                        // 占位符(2889 行"要做什么?")同一档,同类文字同一个色。
+                        //
+                        // 为什么不是"补一个更弱的 textFaint":浅色主题下 textTertiary
+                        // (#8994A1 压白)本身只有 3.0:1,再弱一档必然跌破 3:1,
+                        // 提示文字会糊成一片。弱化到不可读不叫层级,叫缺陷。
+                        color: Theme.colors.textTertiary
                         font.family: Theme.fontFamily
                         font.pixelSize: Theme.metrics.fontCaption
                     }
@@ -2940,19 +2959,23 @@ Rectangle {
                         todoNoteInput.text.length > 0 || todoNoteInput.activeFocus
                     ThemedButton {
                         id: todoNoteToggle
-                        text: parent.noteExpanded ? "收起" : "展开"
+                        // 验收用(acceptanceItemVisible/clickByObjectName 按 objectName 查找;
+                        // 只写 id 是找不到的 —— 这一条曾让"展开后备注仍不可见"的断言误报)
+                        objectName: "todoNoteToggle"
+                        text: noteHeader.noteExpanded ? "收起" : "展开"
                         variant: "ghost"
                         onClicked: {
                             // 收起时把焦点交还标题框,避免正文框仍持有隐式焦点却不可见
-                            if (parent.noteExpanded) todoInput.forceActiveFocus()
-                            parent.noteExpanded = !parent.noteExpanded
+                            if (noteHeader.noteExpanded) todoInput.forceActiveFocus()
+                            noteHeader.noteExpanded = !noteHeader.noteExpanded
                         }
                     }
                 }
                 Rectangle {
                     Layout.fillWidth: true
                     Layout.preferredHeight: Math.max(todoNoteInput.implicitHeight + 16, 44)
-                    visible: parent.noteExpanded
+                    // 走 id 而不是 parent:见 noteHeader 上的说明
+                    visible: noteHeader.noteExpanded
                     color: Theme.colors.surfaceSecondary
                     radius: Theme.metrics.radiusInput
                     border.width: Theme.metrics.borderWidth
@@ -2981,7 +3004,7 @@ Rectangle {
                             anchors.top: parent.top
                             anchors.left: parent.left
                             text: "补充说明、清单、链接…"
-                            color: Theme.colors.textFaint
+                            color: Theme.colors.textTertiary   // 同上:不存在 textFaint
                             font.family: Theme.fontFamily
                             font.pixelSize: Theme.metrics.fontBody
                         }
