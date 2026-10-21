@@ -247,3 +247,123 @@ pub fn overlap_threshold(frame_height: u32, ratio_percent: i64) -> u32 {
         .round() as u32;
     by_ratio.max(super::MIN_OVERLAP_ROWS)
 }
+
+// ---------- 行投影互相关(固定背景场景)----------
+//
+// ## 为什么必须再有一条估计路径
+//
+// 真机日志(DSH 聊天区设了个人背景图)显示:k=0 时 838/927 行逐行相等,
+// 但没有**任何** k>0 能让「从第 0 行起连续相等」成立 —— 于是每一帧都被判
+// no-overlap,长图只有一屏高。
+//
+// 原因:背景图**固定在屏幕上**,同一行号两帧像素一致;而文字在内容坐标里移动。
+// 真实位移 k 处,占多数的背景行全部不匹配,只有约 10% 的文字行能对上 ——
+// 「连续相等」这个前提在这种画面上数学上不成立。
+//
+// ## 解法:把每帧压成一条一维曲线,做归一化互相关
+//
+// 每行取「采样列区间内的水平梯度能量」作为该行的值(文字是强边缘,平滑背景
+// 边缘很弱 → 曲线主要由内容决定)。背景给两条曲线贡献的是**常数基线**,
+// 去均值后相互抵消;文字则贡献一个真正的相关峰。
+//
+// 这条路径与逐行比对的关键差别:**允许近似匹配**。内容行只占 10% 时,
+// 逐行精确比较必然失败,而相关性仍能认出峰值。
+//
+// 实测(离线,按真机参数 H=927 / 内容 89 行构造):位移 23/40/87/150/400 全部
+// 命中,corr 0.88~0.998;静止时峰在 k=0。
+
+/// 互相关的最小可接受相关系数。
+///
+/// 0.75 的依据:离线实测固定背景 + 内容行仅 10% 时,真实位移处 corr 为
+/// 0.88~0.998;而两张不相关画面(动态内容/换页)corr 通常 < 0.3。
+/// 取 0.75 留出足够间隔,避免把「不同源」错当成「匹配上」。
+pub const CORR_MIN: f32 = 0.75;
+
+/// 一帧的**行投影曲线**:每行的水平梯度能量。
+pub fn row_profile(rgba: &[u8], width: u32, height: u32) -> Vec<f32> {
+    let stride = width as usize * 4;
+    let (x0, x1) = sample_range(width);
+    let mut out = Vec::with_capacity(height as usize);
+    for y in 0..height as usize {
+        let row = &rgba[y * stride..(y + 1) * stride];
+        let mut energy = 0.0f32;
+        let mut prev: Option<i32> = None;
+        for x in x0..x1 {
+            let i = x * 4;
+            let g = (row[i] as i32 * 77 + row[i + 1] as i32 * 150 + row[i + 2] as i32 * 29) >> 8;
+            if let Some(p) = prev {
+                energy += (g - p).abs() as f32;
+            }
+            prev = Some(g);
+        }
+        out.push(energy);
+    }
+    out
+}
+
+/// 去掉均值(消除固定背景的常数基线贡献)。
+fn demean(v: &mut [f32]) {
+    if v.is_empty() {
+        return;
+    }
+    let mean = v.iter().sum::<f32>() / v.len() as f32;
+    for x in v.iter_mut() {
+        *x -= mean;
+    }
+}
+
+fn l2(v: &[f32]) -> f32 {
+    v.iter().map(|x| x * x).sum::<f32>().sqrt()
+}
+
+/// 用归一化互相关找 `prev` 相对 `next` 的位移(即页面向下滚了多少行)。
+///
+/// 返回 `(k, correlation)`;相关系数低于 [`CORR_MIN`] 时视为失败 ——
+/// 相关性弱意味着两张画面不同源(动态内容/换了页面),不能硬拼。
+pub fn find_shift_correlation(
+    prev: &[u8],
+    next: &[u8],
+    width: u32,
+    height: u32,
+    min_overlap_rows: u32,
+) -> Option<(ShiftMatch, f32)> {
+    let mut pa = row_profile(prev, width, height);
+    let mut pb = row_profile(next, width, height);
+    demean(&mut pa);
+    demean(&mut pb);
+
+    let ph = pa.len();
+    let nh = pb.len();
+    let mut best: Option<(usize, f32)> = None;
+    for k in 0..ph {
+        let overlap = (ph - k).min(nh);
+        if (overlap as u32) < min_overlap_rows {
+            break;
+        }
+        let a = &pa[k..k + overlap];
+        let b = &pb[..overlap];
+        let (na, nb) = (l2(a), l2(b));
+        if na < 1e-6 || nb < 1e-6 {
+            continue;
+        }
+        let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+        let corr = dot / (na * nb);
+        if best.map_or(true, |(_, bc)| corr > bc) {
+            best = Some((k, corr));
+        }
+    }
+    let (k, corr) = best?;
+    if corr < CORR_MIN {
+        return None;
+    }
+    let overlap = (ph - k).min(nh) as u32;
+    Some((
+        ShiftMatch {
+            k: k as u32,
+            run: overlap,
+            overlap,
+            evidence: overlap,
+        },
+        corr,
+    ))
+}

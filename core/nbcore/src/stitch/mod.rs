@@ -733,6 +733,112 @@ mod tests {
         assert_eq!(out.height, 60, "只采一帧时长图高度 = 帧高");
     }
 
+    // ---- 固定背景(应用设了个人背景图)----
+
+    /// 造一页「背景固定在屏幕上」的画面:
+    /// 背景只依赖屏幕坐标(滚动时不动),文字依赖内容坐标(随滚动移动)。
+    /// 参数比例按**真机日志**校准:选区 927 行,其中约 838 行是纯背景、
+    /// 约 89 行是内容(k=0 时 838/927 行相等)。
+    fn fixed_bg_page(scroll: u32, h: u32, content_rows: u32) -> Vec<u8> {
+        let stride = (W * 4) as usize;
+        let mut out = vec![0u8; stride * h as usize];
+        for y in 0..h as usize {
+            for x in 0..W as usize {
+                let fy = y as f32 / 170.0;
+                let fx = x as f32 / 130.0;
+                let v = (70.0 + 50.0 * (fy * 1.9 + fx * 0.7).sin()
+                    + 28.0 * (fy * 3.3 - fx * 2.1).cos())
+                    .clamp(25.0, 195.0) as u8;
+                let i = y * stride + x * 4;
+                out[i] = v;
+                out[i + 1] = v;
+                out[i + 2] = v;
+                out[i + 3] = 255;
+            }
+        }
+        let mut cpos = Vec::new();
+        let mut cy = 3u32;
+        while cpos.len() < content_rows as usize && cy < h * 4 {
+            cpos.push(cy);
+            cy += 3 + (cy.wrapping_mul(1103515245) >> 27) % 9;
+        }
+        for &cp in &cpos {
+            if cp < scroll {
+                continue;
+            }
+            let y = (cp - scroll) as usize;
+            if y >= h as usize {
+                continue;
+            }
+            for x in 15..W as usize - 15 {
+                if (x + cp as usize * 7) % 5 < 2 {
+                    let i = y * stride + x * 4;
+                    out[i] = 245;
+                    out[i + 1] = 245;
+                    out[i + 2] = 245;
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn correlation_finds_shift_with_fixed_background() {
+        let h = 927u32;
+        let truth = 150u32;
+        let a = fixed_bg_page(0, h, 89);
+        let b = fixed_bg_page(truth, h, 89);
+        let fa = fingerprint_frame(&a, W, h);
+        let fb = fingerprint_frame(&b, W, h);
+        assert!(
+            find_shift(&fa, &fb, 28).is_none(),
+            "固定背景画面下逐行比对应当失败(这正是真机现象)"
+        );
+        let got = crate::stitch::fingerprint::find_shift_correlation(&a, &b, W, h, 28);
+        let (m, corr) = got.expect("互相关应能认出位移");
+        assert_eq!(m.k, truth, "位移应为 {truth}");
+        assert!(corr > 0.75, "相关系数应显著: {corr}");
+    }
+
+    #[test]
+    fn correlation_reports_no_shift_when_static() {
+        let h = 300u32;
+        let a = fixed_bg_page(100, h, 30);
+        let (m, corr) =
+            crate::stitch::fingerprint::find_shift_correlation(&a, &a, W, h, 12)
+                .expect("同一帧应匹配");
+        assert_eq!(m.k, 0, "静止时位移必须为 0");
+        assert!(corr > 0.99, "自相关应为 1 附近: {corr}");
+    }
+
+    #[test]
+    fn correlation_rejects_unrelated_frames() {
+        let h = 200u32;
+        let a = fixed_bg_page(0, h, 20);
+        let other = page_of(200);
+        let got = crate::stitch::fingerprint::find_shift_correlation(&a, &other, W, h, 12);
+        assert!(got.is_none(), "不相关画面必须判失败,不能硬拼");
+    }
+
+    #[test]
+    fn session_uses_correlation_fallback_on_fixed_background() {
+        let h = 400u32;
+        let id = sid("fixedbg-session");
+        begin_session(&id, SessionSpec {
+            monitor: String::from("fbg"),
+            region_x: 0, region_y: 0, region_w: W, region_h: h,
+            dpr: 1.0, max_height: 30_000, max_bytes: 0, overlap_ratio: 3,
+        })
+        .unwrap();
+        let r1 = append_frame(&id, fixed_bg_page(0, h, 40), W, h).unwrap();
+        assert_eq!(r1.total_height, h);
+        let r2 = append_frame(&id, fixed_bg_page(60, h, 40), W, h).unwrap();
+        assert!(r2.matched, "固定背景也必须能拼(靠互相关兜底)");
+        assert_eq!(r2.shift_px, 60, "应吸收 60 行");
+        assert_eq!(r2.total_height, h + 60);
+        abort_session(&id).unwrap();
+    }
+
     // ---- 空白行导致的假匹配(docs/progress 长截图拼接错位)----
 
     /// 造一页「白底文档」:(start_row, len, darkness) 三段描述各段文字。

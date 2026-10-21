@@ -7,6 +7,7 @@
 #include "host/image_save.hpp"
 #include "panel/core_facade.hpp"
 #include "host/memory_probe.hpp"
+#include "host/app_paths.hpp"
 
 #include <QBuffer>
 #include <QCursor>
@@ -26,6 +27,7 @@
 #include <QtConcurrent/QtConcurrentRun>
 #include <QFutureWatcher>
 #include <QDateTime>
+#include <QDir>
 #include <QMessageBox>
 #include <QScreen>
 #include <QTimer>
@@ -551,6 +553,63 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured) {
                         qWarning() << "长截图:本帧裁剪失败" << region;
                         return;
                     }
+                }
+
+                // ---- 采集时序(始终记录)----
+                //
+                // 为什么必须记时序:真机日志里只有两种结果 ——
+                //   ① run=955 k=0   (整帧逐行全等 = 两次采样之间画面没变)
+                //   ② run=0 no-overlap(下一帧首行在上一帧里完全找不到 = 跨度超过整屏)
+                // 中间没有任何"部分重叠"的位移。这只有两种成因:
+                //   A 采样停摆 —— 两次采样间隔远大于 150ms,滚动在这一大段里走完了一屏;
+                //   B 逐屏跳滚 —— 间隔正常,但应用一次滚动就跨了整屏。
+                // 两者的处置完全不同(A 要修采集节拍,B 只能改提示语/选区高度),
+                // 而它们靠**帧间隔**就能区分,故这一行必须无条件打印。
+                static qint64 lastFrameNs = 0;
+                static int frameSeq = 0;
+                const qint64 nowNs = QDateTime::currentMSecsSinceEpoch() * 1000 * 1000;
+                const qint64 dtMs = lastFrameNs == 0 ? -1 : (nowNs - lastFrameNs) / 1000000;
+                lastFrameNs = nowNs;
+
+                // 轻量变化度:与上一帧相比有多少像素不同(抽样,~1/64 像素)。
+                // 用于区分"画面真的没变"与"变了但指纹判不出来"。
+                static QImage lastThumb;
+                int changedPctX100 = -1;
+                if (!lastThumb.isNull() && lastThumb.size() == frame.size()) {
+                    qint64 changed = 0, total = 0;
+                    for (int y = 0; y < frame.height(); y += 8) {
+                        const uchar* a = frame.constScanLine(y);
+                        const uchar* b = lastThumb.constScanLine(y);
+                        for (int x = 0; x < frame.width(); x += 8) {
+                            ++total;
+                            if (a[x * 4] != b[x * 4] || a[x * 4 + 1] != b[x * 4 + 1]) ++changed;
+                        }
+                    }
+                    changedPctX100 = total > 0 ? static_cast<int>(changed * 10000 / total) : 0;
+                }
+                lastThumb = frame;
+
+                qInfo().nospace() << "长截图[时序] #" << frameSeq++ << " dt=" << dtMs << "ms"
+                                  << " 变化=" << (changedPctX100 < 0
+                                                      ? QStringLiteral("首帧")
+                                                      : QStringLiteral("%1.%2%")
+                                                            .arg(changedPctX100 / 100)
+                                                            .arg(changedPctX100 % 100, 2, 10,
+                                                                 QLatin1Char('0')));
+                // 交给遮罩:no-overlap 的提示要按"跨度超屏 / 采集卡顿 / 真的滚太快"分流
+                if (stitchOverlay) stitchOverlay->setStitchFrameStats(changedPctX100, dtMs);
+
+                // 可选:像素级体检(NB_STITCH_DIAG=1)。默认关闭 —— 它会额外跑一次整屏捕获,
+                // 本身就会拖慢采样,开着的时候时序数据不具代表性。
+                static int diagFrame = 0;
+                if (qEnvironmentVariableIsSet("NB_STITCH_DIAG") && diagFrame < 12) {
+                    const QString dir = nb::appDataDir() + QStringLiteral("/stitch-diag");
+                    QDir().mkpath(dir);
+                    const QString tag =
+                        QStringLiteral("%1").arg(diagFrame, 2, 10, QLatin1Char('0'));
+                    frame.save(dir + QStringLiteral("/direct-") + tag + QStringLiteral(".png"));
+                    qInfo().nospace() << "长截图[体检] 落盘 direct-" << tag << ".png ->" << dir;
+                    ++diagFrame;
                 }
 
                 // ---- 拼接 ----
@@ -1502,7 +1561,25 @@ void OverlayWidget::updateStitchProgress(int totalHeight, int gaps, int bands,
     const QString heightText = QStringLiteral("已拼接 %1 px")
         .arg(qRound(totalHeight / (k > 0.01 ? k : 1.0)));
     if (reason == QLatin1String("no-overlap")) {
-        m_stitchNotice = QStringLiteral("滚动过快,有内容漏掉(缺口 %1)").arg(gaps);
+        // ⚠️ 这里以前一律写「滚动过快」,而真机上用户明明滚得很慢 —— 错的归因比不提示
+        //    更糟:用户会照着提示放慢,然后仍然失败,最后认定"这功能坏了"。
+        //
+        // 真正的原因有三种,提示必须按**可观测的数值**分流:
+        //  ① 相邻帧几乎全等(changedPct 很小)→ 跨度直接超过整屏,没有任何重叠可用;
+        //  ② 帧间隔异常(远大于采样间隔)→ 采集卡顿,滚动在这一大段里走过去了;
+        //  ③ 确实滚得快 → 原本的提示才成立。
+        // 判据来自会话层刚记录的那一帧(MarkerFrame),见 capture_session.cpp。
+        if (m_stitchLastChangedPct >= 0 && m_stitchLastChangedPct < 2) {
+            m_stitchNotice = QStringLiteral(
+                "这一屏换了整屏内容(无重叠):单次滚动跨度超过选区高度。"
+                "请把选区拉高一些,或改用滚轮小幅滚动");
+        } else if (m_stitchLastDtdMs > 1200) {
+            m_stitchNotice = QStringLiteral(
+                "采集出现卡顿(两帧间隔 %1 ms)。请重试;若反复出现请反馈日志")
+                .arg(m_stitchLastDtdMs);
+        } else {
+            m_stitchNotice = QStringLiteral("滚动过快,有内容漏掉(缺口 %1)").arg(gaps);
+        }
     } else if (reason == QLatin1String("backward")) {
         m_stitchNotice = QStringLiteral("已到顶部,无法继续向上拼接");
     } else if (reason == QLatin1String("limit")) {

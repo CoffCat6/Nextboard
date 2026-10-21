@@ -118,6 +118,13 @@ public:
     /// 之所以放 public 而非 private:会话层的 lambda 不是本类的成员。
     void updateStitchProgress(int totalHeight, int gaps, int bands, const QString& reason);
 
+    /// 会话层在投递每一帧前,把"这一帧相对上一帧的变化度与帧间隔"交给遮罩,
+    /// 供失败提示分流使用(见 updateStitchProgress 的 no-overlap 分支)。
+    void setStitchFrameStats(int changedPctX100, qint64 dtMs) {
+        m_stitchLastChangedPct = changedPctX100;
+        m_stitchLastDtdMs = dtMs;
+    }
+
     /// 标记"上一拍已返回",允许节拍器投下一帧。
     ///
     /// 供会话层在**所有**出口调用(含捕获失败、核心拒绝)。**必须**用 RAII 守卫
@@ -304,6 +311,10 @@ private:
     bool m_stitchOverlayHidden = false;
     /// 采集期 UI(选区描边 + 结束/取消面板)。采集结束/取消时销毁。
     QPointer<StitchHud> m_stitchHud;
+    /// 最近一帧的变化度(0.01% 为单位)与帧间隔(ms);-1 = 未知。
+    /// 仅用于把 no-overlap 的提示分流到真实原因,不参与拼接判定。
+    int m_stitchLastChangedPct = -1;
+    qint64 m_stitchLastDtdMs = -1;
     /// 采集节拍定时器(只在 Capturing 态运行)。
     QTimer* m_stitchTimer = nullptr;
     /// 上一拍是否还在采集(防止定时器在合成中又投一帧)。

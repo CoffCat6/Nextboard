@@ -79,6 +79,12 @@ struct Session {
     height: u32,
     /// 最近若干帧的指纹,新的在尾部。
     baselines: VecDeque<FrameFingerprint>,
+    /// 上一帧的**原始像素**(仅保留一帧,供互相关兜底用)。
+    ///
+    /// 为什么要多留一份像素:固定背景画面下逐行比对必然失败,而互相关需要真的
+    /// 像素才能算行投影。只留一帧,内存增量 = 选区一帧(927×724×4 ≈ 2.7MB),
+    /// 与"结果图"相比可忽略。
+    last_frame: Vec<u8>,
     /// 累计缺口数(内容确实丢了)。
     gaps: u32,
     /// 已插入的警示条数量。
@@ -162,6 +168,7 @@ pub fn begin_session(session: &str, spec: SessionSpec) -> AppResult<()> {
                 rgba: Vec::new(),
                 height: 0,
                 baselines: VecDeque::with_capacity(BASELINE_DEPTH),
+                last_frame: Vec::new(),
                 gaps: 0,
                 bands: 0,
                 pending_gap: false,
@@ -210,6 +217,12 @@ pub fn append_frame(session: &str, rgba: Vec<u8>, width: u32, height: u32) -> Ap
         if !state.has_frame {
             let cap_rows = height.min(state.max_height);
             let keep = cap_rows as usize * width as usize * 4;
+            // 首帧像素留一份给互相关兜底:必须先克隆,再让 stored 被 truncate 消费。
+            // (顺序写反过一次 —— 先 move 进 stored 再读 rgba 是编译期就能抓到的错。)
+            state.last_frame = rgba.clone();
+            if state.last_frame.len() != width as usize * height as usize * 4 {
+                state.last_frame.clear();
+            }
             let mut stored = rgba;
             stored.truncate(keep);
             let fp = fingerprint_frame(&stored, width, cap_rows);
@@ -260,7 +273,79 @@ pub fn append_frame(session: &str, rgba: Vec<u8>, width: u32, height: u32) -> Ap
         }
 
         let Some((age, m)) = hit else {
-            // ---- 失配:可能是滚太快,也可能是向上滚 ----
+            // ---- 逐行比对失配:先用**互相关**兜底 ----
+            //
+            // 固定背景画面(应用设了个人背景图)在数学上不可能让"连续相等"成立:
+            // 真实位移处占多数的背景行全部不匹配(真机实测 838/927 行是背景)。
+            // 互相关把整帧压成一条曲线比较整体形状,背景贡献被去均值抵消,
+            // 内容贡献真正的相关峰 —— 这是这类画面唯一可靠的估计方式。
+            if !state.last_frame.is_empty()
+                && state.last_frame.len() == width as usize * height as usize * 4
+            {
+                let threshold = overlap_threshold(height, state.overlap_ratio);
+                if let Some((m2, corr)) = crate::stitch::fingerprint::find_shift_correlation(
+                    &state.last_frame,
+                    &rgba,
+                    width,
+                    height,
+                    threshold,
+                ) {
+                    let new_rows2 = m2.new_rows(height);
+                    if new_rows2 > 0 {
+                        log::info!(
+                            "长截图:行比对失配,互相关兜底命中 k={} corr={:.3} new_rows={new_rows2}",
+                            m2.k,
+                            corr
+                        );
+                        let room = state.max_height.saturating_sub(state.height);
+                        let take = new_rows2.min(room);
+                        if take > 0 {
+                            if state.pending_gap {
+                                push_gap_band(state);
+                                state.pending_gap = false;
+                            }
+                            let src_start = m2.overlap as usize * width as usize * 4;
+                            let take_bytes = take as usize * width as usize * 4;
+                            let src_end = (src_start + take_bytes).min(rgba.len());
+                            state.rgba.extend_from_slice(&rgba[src_start..src_end]);
+                            state.height = state.height.saturating_add(take);
+                            let truncated = take < new_rows2;
+                            if truncated {
+                                state.baselines.clear();
+                                push_baseline(
+                                    state,
+                                    fingerprint_frame(&rgba[src_start..src_end], width, take),
+                                );
+                            } else {
+                                commit_frame(state, next_fp.clone(), rgba.clone(), width, height);
+                            }
+                            state.last_frame = rgba;
+                            return Ok(StitchResult {
+                                matched: true,
+                                shift_px: take,
+                                total_height: state.height,
+                                reason: if truncated {
+                                    StitchStatus::Limit
+                                } else {
+                                    StitchStatus::Ok
+                                },
+                                gaps: state.gaps,
+                                bands: state.bands,
+                                debug: Some(StitchDebug {
+                                    k: m2.k,
+                                    run: m2.run,
+                                    evidence: m2.evidence,
+                                    overlap: m2.overlap,
+                                    threshold,
+                                    baseline_age: 0,
+                                }),
+                            });
+                        }
+                    }
+                }
+            }
+
+            // ---- 兜底也失配:可能是滚太快,也可能是向上滚 ----
             let backward = state
                 .baselines
                 .back()
@@ -270,7 +355,7 @@ pub fn append_frame(session: &str, rgba: Vec<u8>, width: u32, height: u32) -> Ap
             state.pending_gap = true;
             // 以本帧为新基线(否则后续全部失配),但**保留**更老的基线:
             // 下一帧若能对上上一帧,就能继续拼,不必等用户重新滚。
-            push_baseline(state, next_fp);
+            commit_frame(state, next_fp.clone(), rgba.clone(), width, height);
             return Ok(StitchResult {
                 matched: false,
                 shift_px: 0,
@@ -305,7 +390,7 @@ pub fn append_frame(session: &str, rgba: Vec<u8>, width: u32, height: u32) -> Ap
                 .map(|b| rows_all_equal(b, &next_fp))
                 .unwrap_or(false);
             if m.k == 0 && identical {
-                push_baseline(state, next_fp);
+                commit_frame(state, next_fp.clone(), rgba.clone(), width, height);
                 return Ok(StitchResult {
                     matched: false,
                     shift_px: 0,
@@ -319,7 +404,7 @@ pub fn append_frame(session: &str, rgba: Vec<u8>, width: u32, height: u32) -> Ap
             // 首行对齐但内容已变(动画/重绘):不是「没滚动」,按失配处理
             state.gaps = state.gaps.saturating_add(1);
             state.pending_gap = true;
-            push_baseline(state, next_fp);
+            commit_frame(state, next_fp.clone(), rgba.clone(), width, height);
             return Ok(StitchResult {
                 matched: false,
                 shift_px: 0,
@@ -346,7 +431,7 @@ pub fn append_frame(session: &str, rgba: Vec<u8>, width: u32, height: u32) -> Ap
 
         let room = state.max_height.saturating_sub(state.height);
         if room <= band_rows {
-            push_baseline(state, next_fp);
+            commit_frame(state, next_fp.clone(), rgba.clone(), width, height);
             return Ok(StitchResult {
                 matched: false,
                 shift_px: 0,
@@ -367,7 +452,7 @@ pub fn append_frame(session: &str, rgba: Vec<u8>, width: u32, height: u32) -> Ap
         let room_left = state.max_height.saturating_sub(state.height);
         let take = new_rows.min(room_left);
         if take == 0 {
-            push_baseline(state, next_fp);
+            commit_frame(state, next_fp.clone(), rgba.clone(), width, height);
             return Ok(StitchResult {
                 matched: false,
                 shift_px: 0,
@@ -394,7 +479,7 @@ pub fn append_frame(session: &str, rgba: Vec<u8>, width: u32, height: u32) -> Ap
             state.baselines.clear();
             push_baseline(state, fingerprint_frame(&rgba[src_start..src_end], width, take));
         } else {
-            push_baseline(state, next_fp);
+            commit_frame(state, next_fp.clone(), rgba.clone(), width, height);
         }
 
         Ok(StitchResult {
@@ -411,6 +496,21 @@ pub fn append_frame(session: &str, rgba: Vec<u8>, width: u32, height: u32) -> Ap
             debug: Some(debug_of(&m, threshold, age)),
         })
     })?
+}
+
+
+/// 更新基线,并把本帧像素留作互相关兜底的参照。
+///
+/// ⚠️ 两条路径都必须更新 last_frame:否则下一次失配时会用**两帧之前**的像素
+/// 做互相关,位移算出来是累计值,拼出来必然错位。
+fn commit_frame(state: &mut Session, fp: FrameFingerprint, rgba: Vec<u8>, width: u32, height: u32) {
+    push_baseline(state, fp);
+    let expected = width as usize * height as usize * 4;
+    if rgba.len() == expected {
+        state.last_frame = rgba;
+    } else {
+        state.last_frame.clear();
+    }
 }
 
 fn debug_of(m: &super::fingerprint::ShiftMatch, threshold: u32, age: usize) -> StitchDebug {
