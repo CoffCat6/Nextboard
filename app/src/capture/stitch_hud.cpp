@@ -1,6 +1,7 @@
 #include "capture/stitch_hud.hpp"
 
 #include "capture/overlay_geometry.hpp"
+#include "ui_theme.hpp"
 
 #include <QApplication>
 #include <QDebug>
@@ -64,8 +65,9 @@ protected:
     void paintEvent(QPaintEvent*) override {
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing, false);
+        // 描边 = 主题 accent(与遮罩上的选区边框同色,视觉上还是"同一个选区")。
         p.setPen(Qt::NoPen);
-        p.setBrush(QColor(0x1C, 0x7E, 0xD6));
+        p.setBrush(ui::themeTokens().accent);
         // 只画选区**外侧**那一圈:本窗口 = 选区外扩 kFrameThickness。
         const QRect sel = m_selectionGlobal.translated(-geometry().topLeft());
         const QRect outer = rect();
@@ -110,29 +112,32 @@ protected:
     void paintEvent(QPaintEvent*) override {
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing, true);
+        // 面板跟随主题(surface 底 + border 描边),与遮罩浮条同一套令牌。
+        // 采集期这块面板浮在**页面内容**上,浅色主题下若还是深色底,会和整机观感割裂。
+        const ui::ThemeTokens& t = ui::themeTokens();
         const QRect btnArea(0, 0, width(), kPanelButtonsHeight);
-        p.setPen(Qt::NoPen);
-        p.setBrush(QColor(0x26, 0x27, 0x2E, 242));
-        p.drawRoundedRect(btnArea, 7, 7);
+        p.setPen(QPen(ui::panelBorder(), 1));
+        p.setBrush(ui::panelPlate(242));
+        p.drawRoundedRect(QRectF(btnArea).adjusted(0.5, 0.5, -0.5, -0.5), 7, 7);
 
         const int bw = width() / 2;
-        // 「结束」= 橙(收尾动作),「取消」= 红(丢弃)
+        // 「结束」= warning(收尾动作),「取消」= error(丢弃)
         const QRect endBtn(0, 0, bw, kPanelButtonsHeight);
         const QRect abortBtn(bw, 0, width() - bw, kPanelButtonsHeight);
-        p.setPen(QColor(0xE8, 0x9B, 0x2B));
+        p.setPen(t.warning);
         p.drawText(endBtn, Qt::AlignCenter, QStringLiteral("结束"));
-        p.setPen(QColor(0xE0, 0x31, 0x31));
+        p.setPen(t.error);
         p.drawText(abortBtn, Qt::AlignCenter, QStringLiteral("取消"));
-        p.setPen(QColor(255, 255, 255, 28));
+        p.setPen(ui::withAlpha(t.borderStrong, 170));
         p.drawLine(QPoint(bw, 8), QPoint(bw, kPanelButtonsHeight - 8));
 
         // 进度 / 提示文案
         if (!status.isEmpty() || escUnavailable) {
             const QRect bar(0, kPanelButtonsHeight + 2, width(), kPanelStatusHeight);
-            p.setPen(Qt::NoPen);
-            p.setBrush(QColor(0x26, 0x27, 0x2E, 230));
-            p.drawRoundedRect(bar, 6, 6);
-            p.setPen(QColor(0xFF, 0xFF, 0xFF, 230));
+            p.setPen(QPen(ui::panelBorder(), 1));
+            p.setBrush(ui::panelPlate(242));
+            p.drawRoundedRect(QRectF(bar).adjusted(0.5, 0.5, -0.5, -0.5), 6, 6);
+            p.setPen(t.textPrimary);
             const QString text =
                 escUnavailable ? QStringLiteral("%1(点「结束」收尾)").arg(status)
                                : status;

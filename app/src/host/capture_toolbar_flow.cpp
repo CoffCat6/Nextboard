@@ -13,17 +13,32 @@
 //            (此前引擎场景被当"全局物理坐标"索引,合成图是错位 + 右下大片空白);
 //        B3 笔画不出选区;
 //        B4 长截图态(docs/19 §3):进入后手柄不画、面板落在窗口内、Esc 只退状态
-//           而不取消整次截图。真实采集不在这里验(要真滚窗口,交真机)。
+//           而不取消整次截图。真实采集不在这里验(要真滚窗口,交真机);
+//        B5 **主题适配**(docs/theme.md §6):浮条底板必须跟随浅/深主题,
+//           而不是恒定深色 —— 这是"无论什么主题工具栏都是深色"的回归哨兵。
+//           判据是**抓图上的亮度中位数**:底板占浮条面积的绝大多数,文字是少数,
+//           中位数就是底板色。比"取某个固定像素"稳(不受文字位置/抗锯齿影响)。
 //
 // 日志前缀 CAPTURE-TOOLBAR,失败行以 FAIL 开头;结束时 QApplication::quit()。
 #include "host/acceptance.hpp"
 
 #include "capture/capture_session.hpp"
 #include "capture/overlay_geometry.hpp"
+#include "ui_theme.hpp"
+#include "ui/ocr_result_panel.hpp"
+#include "host/core_bridge.hpp"
 
 #include <QApplication>
 #include <QImage>
 #include <QKeyEvent>
+#include <QJsonObject>
+#include <QTextEdit>
+#include <QStringList>
+#include <QLabel>
+#include <QPointer>
+#include <QPalette>
+
+#include <algorithm>
 
 #include <windows.h>
 #include <QMouseEvent>
@@ -89,6 +104,30 @@ QRect colorBounds(const QImage& img, const QColor& target, const QRect& region,
     return QRect(QPoint(x0, y0), QPoint(x1, y1));
 }
 
+/// 区域内像素亮度中位数(0~255)。
+///
+/// 为什么用中位数而不是平均值或单点取样:
+///  - 单点取样会撞上按钮文字、悬停高亮、分隔线(验收里鼠标可能在任意位置);
+///  - 平均值会被少量高亮像素带偏;
+///  - 底板占浮条面积的绝大多数,中位数就是底板色本身。
+int medianLuma(const QImage& img, const QRect& region) {
+    const QImage rgb = img.convertToFormat(QImage::Format_RGB32);
+    const QRect area = region.intersected(QRect(QPoint(0, 0), rgb.size()));
+    if (area.isEmpty()) return -1;
+    QVector<int> values;
+    values.reserve(area.width() * area.height());
+    for (int y = area.top(); y <= area.bottom(); ++y) {
+        const QRgb* line = reinterpret_cast<const QRgb*>(rgb.constScanLine(y));
+        for (int x = area.left(); x <= area.right(); ++x) {
+            const QColor c(line[x]);
+            // Rec.601 亮度:人眼对绿最敏感,整数近似足够区分"深底/浅底"
+            values.append((c.red() * 299 + c.green() * 587 + c.blue() * 114) / 1000);
+        }
+    }
+    std::sort(values.begin(), values.end());
+    return values.at(values.size() / 2);
+}
+
 /// A 段:坐标系换算 + 浮条摆位(不依赖窗口,便于快速回归)。
 void checkGeometry() {
     const QRect sel(100, 80, 400, 300);
@@ -132,6 +171,264 @@ void runCaptureToolbarFlow() {
         checkGeometry();
 
         QScreen* screen = QGuiApplication::primaryScreen();
+
+        // ---- B8. OCR 结果面板必须**脱离宿主窗口**存活 ----
+        //
+        // 这是本轮 OcrResultPanel 的核心设计约束,也是最容易被改回去的地方:
+        // 浮条取字后会话立即 cancelled → closeAllOverlays → 遮罩 close(),
+        // 若面板是遮罩的子控件,它会"闪一下就不见"(编辑器早期踩过同一个坑)。
+        // 断言方式:造一个 anchor 窗口 → 弹面板 → **销毁 anchor** → 面板仍可见。
+        if (screen) {
+            auto* anchorHost = new QWidget(nullptr, Qt::FramelessWindowHint | Qt::Tool);
+            anchorHost->setGeometry(screen->geometry().adjusted(100, 100, -100, -100));
+            anchorHost->show();
+            QApplication::processEvents();
+
+            const QString sample = QStringLiteral("第一行识别结果\n第二行文本");
+            QPointer<OcrResultPanel> panel = OcrResultPanel::showResult(
+                sample, QStringLiteral("已识别 16 个字符并复制到剪贴板"), QImage(),
+                anchorHost, /*popup=*/false);
+            QApplication::processEvents();
+            check(panel && panel->isVisible(),
+                  QStringLiteral("OCR 结果面板弹出后可见(驻留形态)"));
+
+            // 宿主(遮罩)在这之后就会被销毁 —— 模拟真实链路
+            anchorHost->close();
+            delete anchorHost;
+            QApplication::processEvents();
+            check(panel && panel->isVisible(),
+                  QStringLiteral("宿主销毁后 OCR 面板仍存活可见(不是遮罩子控件)"));
+            if (panel) {
+                // 可鼠标选取是"只取其中几行"的前提,值得钉住
+                // 正文已从 QLabel 换成只读 QTextEdit(为了能滚动),所以这里要按
+                // QTextEdit 查 —— 断言的是"能只取片段"这条**能力**,不是控件类型,
+                // 但实现载体变了,查的对象就得跟着变。
+                bool selectable = false;
+                for (QTextEdit* t : panel->findChildren<QTextEdit*>()) {
+                    if (t->textInteractionFlags() & Qt::TextSelectableByMouse) selectable = true;
+                }
+                check(selectable, QStringLiteral("OCR 面板文本可鼠标选取(能只取片段)"));
+
+                // ---- 面板必须**有不透明底板** ----
+                //
+                // 用户报的现象:面板整体是透明的,文字直接浮在桌面上。
+                // 根因:透明顶层窗口(WA_TranslucentBackground)+ stylesheet 的
+                // QFrame background —— QFrame 不画 stylesheet 背景(要
+                // WA_StyledBackground),于是什么都没画。
+                //
+                // 判据:取面板右下角一块(只有底板,没有文字/按钮)的亮度,
+                // 必须接近主题 surface 而不是透出底下的桌面。
+                {
+                    // ⚠️ **两套主题都要测**。只在浅色下测是不够的:透明面板透出
+                    //    白色桌面同样是 255,会和"白色 surface"给出一样的读数 ——
+                    //    缺陷恰好能通过断言(假通过)。深色主题下透明会透出深色桌面,
+                    //    与浅色 surface 差出一个数量级,才真正区分得开。
+                    const QPalette savedPal = QGuiApplication::palette();
+                    const auto plateLuma = [&](bool dark) {
+                        QGuiApplication::setPalette(ui::paletteFor(dark));
+                        QApplication::processEvents();
+                        panel->update();
+                        QApplication::processEvents();
+                        const QImage img = panel->grab().toImage();
+                        const qreal k = img.devicePixelRatio() > 0 ? img.devicePixelRatio() : 1.0;
+                        // 右侧中部:只有底板,避开文字与按钮行
+                        const QRect probe(qRound(img.width() - 30 * k),
+                                          qRound(img.height() * 0.45),
+                                          qRound(16 * k), qRound(24 * k));
+                        return medianLuma(img, probe);
+                    };
+                    const int lumaDark = plateLuma(true);
+                    const int lumaLight = plateLuma(false);
+                    QGuiApplication::setPalette(savedPal);
+                    QApplication::processEvents();
+
+                    const ui::ThemeTokens& td = ui::themeTokens(true);
+                    const ui::ThemeTokens& tl = ui::themeTokens(false);
+                    const int wantDark = qRound(0.299 * td.surface.red() + 0.587 * td.surface.green()
+                                                + 0.114 * td.surface.blue());
+                    const int wantLight = qRound(0.299 * tl.surface.red() + 0.587 * tl.surface.green()
+                                                 + 0.114 * tl.surface.blue());
+                    qInfo() << "CAPTURE-TOOLBAR  ocr panel plate luma: dark =" << lumaDark
+                            << "(want" << wantDark << ") light =" << lumaLight
+                            << "(want" << wantLight << ")";
+                    // 容差取 ±12:底板是**纯色**填充,没有渐变/混合,实测值与主题色
+                    // 只差抗锯齿边缘的几级。放宽到 ±40 会让"透明(0) vs 深色 surface(25)"
+                    // 这种差别漏过 —— 反向验证时实测就是这样假通过的。
+                    constexpr int kTol = 12;
+                    check(lumaDark >= 0 && qAbs(lumaDark - wantDark) <= kTol,
+                          QStringLiteral("深色主题下 OCR 面板有底板(实测 %1,期望 ~%2)")
+                              .arg(lumaDark).arg(wantDark));
+                    check(qAbs(lumaLight - wantLight) <= kTol,
+                          QStringLiteral("浅色主题下 OCR 面板有底板(实测 %1,期望 ~%2)")
+                              .arg(lumaLight).arg(wantLight));
+                }
+
+                // ---- 面板必须贴在**选区**旁边,而不是屏幕边角 ----
+                //
+                // 用户报的现象:面板跑到屏幕角落。根因是 anchor 传了整屏遮罩。
+                // 判据:面板矩形与选区矩形**有重叠**,且距离不超过一个面板宽 ——
+                // "贴旁边"的可用定义。太远 = 又跑偏了。
+                {
+                    const QRect selRect(200, 150, 400, 300);
+                    const QSize ps(320, 160);
+                    const QPoint p = OcrResultPanel::placeForTest(ps, selRect);
+                    const QRect panelRect(p, ps);
+                    const int dist = (panelRect.center() - selRect.center()).manhattanLength();
+                    qInfo() << "CAPTURE-TOOLBAR  panel placed at" << p << "for selection" << selRect
+                            << "distance" << dist;
+                    // 选区内接的中心距上限:面板宽 + 选区半宽,足够宽松但能挡住"屏幕角落"
+                    check(dist < ps.width() + selRect.width(),
+                          QStringLiteral("OCR 面板贴紧选区(中心距 %1 在合理范围)").arg(dist));
+                    // 更不能离屏
+                    const QRect screenRect(QPoint(0, 0), QSize(1920, 1080));
+                    check(screenRect.contains(panelRect),
+                          QStringLiteral("OCR 面板完整落在屏幕内(点得到关闭)"));
+                }
+                panel->close();
+            }
+
+            // ---- B9. 长文本必须**可滚动**,不能被裁掉 ----
+            //
+            // 缺陷背景(用户报的):正文原先用 QLabel + setMaximumHeight(420),
+            // 一屏放不下的识别结果被直接裁掉 —— 既看不到也拿不到,而"取字"恰恰
+            // 常常来自长段落/整页文字。
+            //
+            // 判据两条,缺一不可:
+            //  ① 长内容时**确实需要滚动**(bodyScrollable():滚动条 maximum > 0);
+            //  ② 面板**没有被撑出屏幕**(否则"能滚"但按钮点不到,等于不可用)。
+            {
+                // 造 120 行:"短内容也要能滚"不成立,必须真的超长
+                QStringList lines;
+                for (int i = 1; i <= 120; ++i) {
+                    lines << QStringLiteral("第 %1 行:用于验证长文本滚动与不被截断").arg(i);
+                }
+                const QString longText = lines.join(QLatin1Char('\n'));
+                QPointer<OcrResultPanel> longPanel = OcrResultPanel::showResult(
+                    longText, QStringLiteral("已识别 120 行"), QImage(),
+                    QRect(screen->geometry().center() - QPoint(200, 150), QSize(400, 300)),
+                    /*popup=*/false);
+                QApplication::processEvents();
+
+                // ⚠️ 这两条都是**弱断言**,单独用会假通过(反向验证实测):
+                //   - bodyScrollable:QTextEdit 内容超长时无论多矮,maximum 都 > 0;
+                //   - bodyLastLineReachable:QTextEdit 本来就能滚到末尾,与窗口多高无关。
+                //     (把正文硬裁到 113px,两条照样 PASS。)
+                // 保留它们 + 下面那条**高度**断言,才是完整判据:前者保证"能滚"这一能力
+                // 存在,后者保证"面板真的为内容长高了"(而不是被压成一条缝)。
+                check(longPanel && longPanel->bodyScrollable(),
+                      QStringLiteral("长文本时正文可滚动"));
+                check(longPanel && longPanel->bodyLastLineReachable(),
+                      QStringLiteral("长文本可滚到最后一行"));
+
+                const QRect avail = screen->availableGeometry();
+                const QRect panelRect = longPanel ? longPanel->frameGeometry() : QRect();
+                qInfo() << "CAPTURE-TOOLBAR  long-text panel rect" << panelRect
+                        << "available" << avail;
+                check(longPanel && avail.contains(panelRect),
+                      QStringLiteral("长文本面板未被撑出屏幕(按钮点得到)"));
+
+                // 短文本**不该**出现滚动条:否则每张小图取字都挂一条多余的条
+                QPointer<OcrResultPanel> shortPanel = OcrResultPanel::showResult(
+                    QStringLiteral("两行文字\n第二行"), QString(),
+                    QImage(), QRect(screen->geometry().center(), QSize(300, 200)),
+                    /*popup=*/false);
+                QApplication::processEvents();
+                check(shortPanel && !shortPanel->bodyScrollable(),
+                      QStringLiteral("短文本不出现滚动条(高度按内容收缩)"));
+
+                // ---- 关键断言:面板高度必须**随内容增长**并封顶 ----
+                //
+                // 这是"内容不被裁掉"唯一可外部观测的判据:文字多 → 面板高。
+                // 阈值取 300px:120 行文本按 13px 字号远远超过它,而硬裁到 113px
+                // 的旧行为必然低于它(反向验证实测 204px 也低于 300)。
+                const int longH = longPanel ? longPanel->height() : 0;
+                const int shortH = shortPanel ? shortPanel->height() : 0;
+                qInfo() << "CAPTURE-TOOLBAR  panel heights: long =" << longH
+                        << "short =" << shortH;
+                check(longH > 300 && longH > shortH + 100,
+                      QStringLiteral("长文本面板按内容长高(高 %1 > 300 且显著高于短文本 %2)")
+                          .arg(longH).arg(shortH));
+
+                if (shortPanel) shortPanel->close();
+                if (longPanel) longPanel->close();
+
+                // ---- B10. 面板可拖动(用户要求) ----
+                //
+                // 两类断言都要有,缺一不可:
+                //  ① 在**标题行**按下并移动 → 窗口跟着走(这是"能拖");
+                //  ② 在**正文**按下并移动 → 窗口**不动**(这是"拖动没抢走划选")。
+                //     只验①会把"整块面板都能拖"写成正确行为,而那会让 QTextEdit
+                //     永远选不中文字 —— 缺陷的镜像。
+                {
+                    QPointer<OcrResultPanel> dragPanel = OcrResultPanel::showResult(
+                        QStringLiteral("拖动测试\n第二行"), QString(),
+                        QImage(), QRect(QPoint(500, 400), QSize(300, 200)),
+                        /*popup=*/false);
+                    QApplication::processEvents();
+                    const QPoint before = dragPanel->pos();
+
+                    // ① 标题行拖动:目标点取标题行中心
+                    QWidget* header = dragPanel->findChild<QWidget*>(QStringLiteral("ocrHeader"));
+                    check(header != nullptr, QStringLiteral("面板有标题行(拖动把手)"));
+                    if (header) {
+                        const QPoint local = header->mapTo(dragPanel, header->rect().center());
+                        const QPoint from = dragPanel->mapToGlobal(local);
+                        const QPoint to = from + QPoint(60, 45);
+                        QMouseEvent press(QEvent::MouseButtonPress, QPointF(local),
+                                          QPointF(from), Qt::LeftButton, Qt::LeftButton,
+                                          Qt::NoModifier);
+                        QApplication::sendEvent(dragPanel, &press);
+                        QMouseEvent moveEv(QEvent::MouseMove, QPointF(local + QPoint(60, 45)),
+                                           QPointF(to), Qt::NoButton, Qt::LeftButton,
+                                           Qt::NoModifier);
+                        QApplication::sendEvent(dragPanel, &moveEv);
+                        QMouseEvent release(QEvent::MouseButtonRelease,
+                                            QPointF(local + QPoint(60, 45)), QPointF(to),
+                                            Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+                        QApplication::sendEvent(dragPanel, &release);
+                        QApplication::processEvents();
+
+                        const QPoint after = dragPanel->pos();
+                        qInfo() << "CAPTURE-TOOLBAR  drag: before =" << before
+                                << "after =" << after
+                                << "delta =" << (after - before);
+                        check(after == before + QPoint(60, 45),
+                              QStringLiteral("标题行拖动可移动面板(位移 = 鼠标位移)"));
+                    }
+
+                    // ② 正文区域的按下**不该**拖动窗口。
+                    //    这里直接投给 QTextEdit:它接受左键(用于放置光标/划选),
+                    //    事件不会冒泡到面板 —— 这正是我们要的行为。
+                    const QPoint beforeBody = dragPanel->pos();
+                    QTextEdit* body = dragPanel->findChild<QTextEdit*>(QStringLiteral("ocrText"));
+                    if (body) {
+                        // 投给 **viewport**:QTextEdit 真正的鼠标处理在 viewport 上,
+                        // 投给 QTextEdit 本身等于绕过了它的命中逻辑(第一次就是这么错的)。
+                        QWidget* vp = body->viewport();
+                        const QPoint bFrom = vp->mapToGlobal(QPoint(10, 10));
+                        QMouseEvent press(QEvent::MouseButtonPress, QPointF(QPoint(10, 10)),
+                                          QPointF(bFrom), Qt::LeftButton, Qt::LeftButton,
+                                          Qt::NoModifier);
+                        QApplication::sendEvent(vp, &press);
+                        QMouseEvent moveEv(QEvent::MouseMove, QPointF(QPoint(70, 55)),
+                                           QPointF(bFrom + QPoint(60, 45)), Qt::NoButton,
+                                           Qt::LeftButton, Qt::NoModifier);
+                        QApplication::sendEvent(vp, &moveEv);
+                        QMouseEvent release(QEvent::MouseButtonRelease, QPointF(QPoint(70, 55)),
+                                            QPointF(bFrom + QPoint(60, 45)), Qt::LeftButton,
+                                            Qt::NoButton, Qt::NoModifier);
+                        QApplication::sendEvent(vp, &release);
+                        QApplication::processEvents();
+                        qInfo() << "CAPTURE-TOOLBAR  body press: pos before =" << beforeBody
+                                << "after =" << dragPanel->pos();
+                        check(dragPanel->pos() == beforeBody,
+                              QStringLiteral("正文区按下不拖动窗口(划选文字不受影响)"));
+                    }
+                    if (dragPanel) dragPanel->close();
+                }
+            }
+        }
+
         if (!screen) {
             qWarning() << "CAPTURE-TOOLBAR  FAIL 无可用屏幕,跳过端到端段";
             ++g_failures;
@@ -179,6 +476,55 @@ void runCaptureToolbarFlow() {
             };
             check(!tb.isNull(), QStringLiteral("框选后浮条可见(几何非空)"));
 
+            // ---- B5. 主题适配:浮条底板必须跟随浅/深主题 ----
+            //
+            // 缺陷原状(2026-10-21 前):底板硬编码 #26272E,与 QPalette / Theme.qml
+            // 完全脱钩 —— 用户切到浅色主题后,工具栏仍是深色块。这条断言就是它的哨兵。
+            //
+            // 做法:显式切两套调色板(不依赖系统设置,否则不可自动化),各抓一次画面,
+            // 比**底板亮度中位数**。深色主题 surface #151A21 ≈ 22,浅色 #FFFFFF = 255,
+            // 两者相差一个数量级,判据取 90 / 150 留足余量(半透底板压在深色冻结
+            // 底图上会被底图拉偏,取舍见下)。
+            {
+                const QPalette saved = QGuiApplication::palette();
+                // 底板是半透的,压在冻结底图(#202020)上 —— 用**半透档**抓到的亮度
+                // 会被底图往中间拽。为了让断言反映"底板本色",这里临时切到不透明档。
+                const int savedAlpha = overlay->barAlpha();
+                overlay->setBarAlpha(OverlayWidget::kBarAlphaSolid);
+
+                const auto grabLuma = [&](bool dark) {
+                    QGuiApplication::setPalette(ui::paletteFor(dark));
+                    QApplication::processEvents();
+                    const QImage shot = overlay->grab().toImage();
+                    const qreal gd = shot.devicePixelRatio() > 0 ? shot.devicePixelRatio() : 1.0;
+                    // 只取浮条中段:避开左右圆角(抗锯齿混入底图)与四边描边。
+                    const QRect area(qRound((tb.x() + 12) * gd), qRound((tb.y() + 6) * gd),
+                                     qRound((tb.width() - 24) * gd),
+                                     qRound((tb.height() - 12) * gd));
+                    return medianLuma(shot, area);
+                };
+                const int darkLuma = grabLuma(true);
+                const int lightLuma = grabLuma(false);
+                qInfo() << "CAPTURE-TOOLBAR  toolbar plate luma: dark =" << darkLuma
+                        << "light =" << lightLuma;
+                check(darkLuma >= 0 && darkLuma < 90,
+                      QStringLiteral("深色主题浮条底板为深色(亮度中位数 < 90,得 %1)")
+                          .arg(darkLuma));
+                check(lightLuma > 150,
+                      QStringLiteral("浅色主题浮条底板为浅色(亮度中位数 > 150,得 %1)")
+                          .arg(lightLuma));
+                // 两套主题必须**真的有差别** —— 只断言各自阈值时,若两者都恰好落在
+                // 中间带(例如都在 150 附近)会漏掉"没跟主题走"的情况。
+                check(lightLuma - darkLuma > 100,
+                      QStringLiteral("浅/深主题下浮条底板明显不同(差值 > 100,得 %1)")
+                          .arg(lightLuma - darkLuma));
+
+                // 复位:后续断言要按"真实待截内容 + 半透底板"的口径跑
+                QGuiApplication::setPalette(saved);
+                overlay->setBarAlpha(savedAlpha);
+                QApplication::processEvents();
+            }
+
             // ---- 进标注态:「标注」按钮(下标 0)----
             click(QPoint(tb.x() + bw / 2, tb.y() + tb.height() / 2));
 
@@ -212,6 +558,81 @@ void runCaptureToolbarFlow() {
             check(!got.isNull() && gotLogical.left() >= sel.left() - 8
                       && gotLogical.right() <= sel.right() + 8,
                   QStringLiteral("标注被裁在选区内(不出框)"));
+
+            // ---- B6. 标注态键盘撤销/重做(docs/17 §17.3 A 漏项)----
+            //
+            // 二级条上一直有撤销按钮,但键盘没有入口 —— 标注是"一手鼠标一手快捷键"
+            // 的操作,画错一笔还得移回二级条点按钮。编辑器早有 Ctrl+Z/Y,浮条没有。
+            // 这里用**真实按键**验,不直接调 undoStack():要证明的是"按键被接上了"。
+            {
+                QKeyEvent undo(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
+                QApplication::sendEvent(overlay, &undo);
+                QApplication::processEvents();
+                const QImage afterUndo = overlay->grab().toImage();
+                const QRect stillThere = colorBounds(afterUndo, pen, insideSel);
+                qInfo() << "CAPTURE-TOOLBAR  after Ctrl+Z stroke bbox:" << stillThere;
+                check(stillThere.isNull(),
+                      QStringLiteral("Ctrl+Z 撤销了刚画的那一笔(笔画消失)"));
+
+                QKeyEvent redo(QEvent::KeyPress, Qt::Key_Y, Qt::ControlModifier);
+                QApplication::sendEvent(overlay, &redo);
+                QApplication::processEvents();
+                const QImage afterRedo = overlay->grab().toImage();
+                const QRect backAgain = colorBounds(afterRedo, pen, insideSel);
+                qInfo() << "CAPTURE-TOOLBAR  after Ctrl+Y stroke bbox:" << backAgain;
+                check(!backAgain.isNull(),
+                      QStringLiteral("Ctrl+Y 重做出了那一笔(笔画回来)"));
+
+                // Ctrl+Shift+Z 也必须能重做(与编辑器同一套三键)
+                QKeyEvent undo2(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
+                QApplication::sendEvent(overlay, &undo2);
+                QKeyEvent redo2(QEvent::KeyPress, Qt::Key_Z,
+                                Qt::ControlModifier | Qt::ShiftModifier);
+                QApplication::sendEvent(overlay, &redo2);
+                QApplication::processEvents();
+                const QRect viaShift = colorBounds(overlay->grab().toImage(), pen, insideSel);
+                check(!viaShift.isNull(),
+                      QStringLiteral("Ctrl+Shift+Z 也能重做(与编辑器同一套按键)"));
+            }
+
+            // ---- B7. 标注偏好跨会话记忆(core settings round-trip)----
+            //
+            // 缺陷:每次进标注态都退回写死的红笔 4px,而同在浮条上的"底板不透明度"
+            // 却会记住 —— 口吻不一致。这里验**真的落到设置里并能读回**,而不是
+            // 只看成员变量(那只能证明"这轮记住了",证明不了"下次还能取到")。
+            {
+                const QJsonObject saved = CoreBridge::instance().call(
+                    "save_settings",
+                    {{"annotationColor", "#1C7ED6"},
+                     {"annotationPenSize", 8},
+                     {"annotationFontSize", 48}});
+                qInfo() << "CAPTURE-TOOLBAR  save annotation prefs ok ="
+                        << saved.value("ok").toBool();
+                const QJsonObject readBack = CoreBridge::instance().call("get_settings");
+                const QJsonObject d = readBack.value("data").toObject();
+                qInfo() << "CAPTURE-TOOLBAR  readback color/size/font ="
+                        << d.value("annotationColor").toString()
+                        << d.value("annotationPenSize").toInt()
+                        << d.value("annotationFontSize").toInt();
+                check(d.value("annotationColor").toString() == QStringLiteral("#1C7ED6")
+                          && d.value("annotationPenSize").toInt() == 8
+                          && d.value("annotationFontSize").toInt() == 48,
+                      QStringLiteral("标注偏好写进设置并能原样读回(跨会话记忆的前提)"));
+
+                // 非档位值必须被 core 挡住 —— 否则存进去一个界面上选不到的值,
+                // 下次进标注态就是"颜色/粗细与界面选中项对不上"。
+                const QJsonObject bad = CoreBridge::instance().call(
+                    "save_settings", {{"annotationPenSize", 7}});
+                qInfo() << "CAPTURE-TOOLBAR  reject out-of-tier pen size ok ="
+                        << !bad.value("ok").toBool();
+                check(!bad.value("ok").toBool(),
+                      QStringLiteral("档位外的粗细被 core 拒绝(界面不会出现选不中的值)"));
+                // 复位成默认,避免影响后续断言与人工复核
+                CoreBridge::instance().call("save_settings",
+                                            {{"annotationColor", "#E03131"},
+                                             {"annotationPenSize", 4},
+                                             {"annotationFontSize", 36}});
+            }
 
             // ---- B2. 「完成」交出的合成图 ----
             // ⚠️ 索引跟着按钮集合走。当前 8 个按钮:

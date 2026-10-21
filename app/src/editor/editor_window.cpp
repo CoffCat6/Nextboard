@@ -8,6 +8,9 @@
 #include "host/core_bridge.hpp"
 #include "host/image_save.hpp"
 
+#include "ui_theme.hpp"
+#include "ui/ocr_result_panel.hpp"
+
 #include <QAction>
 #include <QActionGroup>
 #include <QCursor>
@@ -239,7 +242,10 @@ EditorWindow::EditorWindow(QImage base, QWidget* parent) : QWidget(parent), m_ba
     canvas->setRenderHint(QPainter::Antialiasing);
     canvas->setRenderHint(QPainter::SmoothPixmapTransform);
     canvas->setDragMode(QGraphicsView::NoDrag);
-    canvas->setBackgroundBrush(QColor(0x1E, 0x1F, 0x24));
+    // 画布外框跟随主题:深色主题用近黑(衬出截图内容),浅色主题用浅灰。
+    // 原先是写死 #1E1F24 —— 浅色主题下编辑器是一个"白工具条 + 黑画布"的割裂窗口。
+    canvas->setBackgroundBrush(ui::themeTokens().surfaceSecondary.darker(
+        ui::isDarkTheme() ? 100 : 108));
     canvas->setAlignment(Qt::AlignCenter);
     canvas->setMouseTracking(true);
     m_view = canvas;
@@ -572,90 +578,44 @@ void EditorWindow::ocrTakeText() {
 }
 
 void EditorWindow::showOcrResult(const QString& text, const QString& reason) {
-    // OCR 结果面板(§17.3 D6)。
+    // OCR 结果面板:**与截图浮条共用 ui/ocr_result_panel**。
     //
-    // 原实现两点不好用:①文本只"展示",用户看完就没了(虽然已进剪贴板却看不出);
-    // ②面板是编辑器子窗口,而识别完成后 singleShot(0) 立刻 close → 面板一帧都
-    // 看不到(表现为"点了取字,啥也没发生")。
-    // 现改为:面板**驻留**,明确提示"已复制,可 Ctrl+V",文本可鼠标选取(便于只取片段)。
+    // 历史沿革(保留判断依据,避免又走回去):
+    //  1) 最初文本只"展示",识别完立刻 close → 面板一帧都看不到("点了取字啥也没发生");
+    //  2) 改成驻留 QFrame 面板后可用,但实现只在编辑器这一侧 ——
+    //     浮条那边同期只有 QToolTip,同一个能力两套体验;
+    //  3) 现在两边收口到 OcrResultPanel:驻留、可鼠标选取片段、跟随主题,
+    //     并且多了「再次复制」(驻留期间用户可能复制了别的东西)。
     //
-    // ⚠️ 2026-10-17 移除「插入为标注文字」(曾把 OCR 文本直接落成画布文字标注),两条理由:
-    //    ①场景受限 —— 取字链路本就以"把文本带走"为主,"留在本图"属小众需求;
-    //    ②文字布局难处理 —— 只能落在可见区中心(引擎只回纯文本、没有逐行框),
-    //      字号/颜色/行距都与原图无关,多行必然压字或溢出,"看着不对"比不打这句还差。
-    //    故 OCR 文本的去处收敛为**剪贴板**一条(要留在图上就自己用文字工具输入)。
-    if (m_ocrPopup) { m_ocrPopup->deleteLater(); m_ocrPopup = nullptr; }
+    // popup=true:保持编辑器旧手感 —— 点面板外面就关(编辑器是常驻窗口,
+    // 面板不该长期压在画布上挡着);浮条链路用 false(那时宿主窗口马上就没了)。
+    if (m_ocrPopup) { m_ocrPopup->close(); m_ocrPopup = nullptr; }
 
-    // "识别中…" 仍用轻量提示(此时没有可操作的文本)
+    // "识别中…" 仍用轻量提示:此刻没有可操作的文本,弹面板只是噪音。
     if (text.isEmpty() && !reason.isEmpty() && reason.endsWith(QStringLiteral("…"))) {
-        if (m_ocrPopup) { m_ocrPopup->deleteLater(); m_ocrPopup = nullptr; }
-        auto* popup = new QLabel(this, Qt::ToolTip);
-        popup->setText(reason);
-        popup->setStyleSheet(QStringLiteral(
-            "QLabel{background:#26272E;color:#DFE1E8;padding:8px 12px;border-radius:6px;}"));
-        popup->adjustSize();
-        popup->move(mapToGlobal(QPoint(width() - popup->width() - 24,
-                                       height() - popup->height() - 72)));
-        popup->show();
-        m_ocrPopup = popup;
+        const ui::ThemeTokens& t = ui::themeTokens();
+        auto* tip = new QLabel(this, Qt::ToolTip);
+        tip->setText(reason);
+        tip->setStyleSheet(QStringLiteral(
+            "QLabel{background:%1;color:%2;padding:8px 12px;border-radius:6px;"
+            "border:1px solid %3;}")
+            .arg(t.surfaceSecondary.name(), t.textPrimary.name(), t.border.name()));
+        tip->adjustSize();
+        tip->move(mapToGlobal(QPoint(width() - tip->width() - 24,
+                                     height() - tip->height() - 72)));
+        tip->show();
+        m_ocrPopup = tip;
         return;
     }
 
-    auto* panel = new QFrame(this, Qt::Popup | Qt::FramelessWindowHint);
-    panel->setObjectName("ocrResultPanel");
-    panel->setFrameShape(QFrame::NoFrame);
-    panel->setStyleSheet(QStringLiteral(
-        "QFrame#ocrResultPanel{background:#26272E;border:1px solid #3A3D46;"
-        "border-radius:8px;} "
-        "QLabel#ocrText{color:#DFE1E8;font-size:13px;} "
-        "QLabel#ocrStatus{color:#8FA0B4;font-size:12px;} "
-        "QPushButton{background:#33363F;color:#DFE1E8;border:none;border-radius:5px;"
-        "padding:6px 12px;font-size:13px;} "
-        "QPushButton:hover{background:#3E424D;}"));
+    // 原图 = 当前合成结果(底图 + 标注),不是 m_base:用户已经画过标注,
+    // 面板里"源图"应与他看到的一致(也为后续"图中取字"提供正确底图)。
+    const QImage source = m_engine ? m_engine->compose() : QImage();
+    m_ocrPopup = OcrResultPanel::showResult(text, reason, source, this, /*popup=*/true);
 
-    auto* layout = new QVBoxLayout(panel);
-    layout->setContentsMargins(12, 10, 12, 10);
-    layout->setSpacing(8);
-
-    auto* body = new QLabel(panel);
-    body->setObjectName("ocrText");
-    body->setWordWrap(true);
-    body->setTextFormat(Qt::PlainText);
-    body->setTextInteractionFlags(Qt::TextSelectableByMouse);   // 允许手动选取部分文本
-    body->setMaximumWidth(520);
-    body->setMaximumHeight(qMax(120, height() - 200));
-    body->setText(text.isEmpty() ? reason : text);
-    layout->addWidget(body);
-
-    if (!reason.isEmpty() && !text.isEmpty()) {
-        // 成功时提示"已进剪贴板";失败时显示原因
-        auto* status = new QLabel(reason, panel);
-        status->setObjectName("ocrStatus");
-        layout->addWidget(status);
-    }
-
-    auto* buttons = new QHBoxLayout();
-    buttons->addStretch(1);
-    // 只剩「关闭」一个动作:文本已进剪贴板,面板的职责是"让用户看见识别到了什么"
-    // 并能选取片段 Ctrl+C,不再提供落画布的入口(见上方 2026-10-17 说明)。
-    auto* closeBtn = new QPushButton(
-        text.isEmpty() ? QStringLiteral("关闭") : QStringLiteral("关闭(已在剪贴板)"), panel);
-    closeBtn->setCursor(Qt::PointingHandCursor);
-    connect(closeBtn, &QPushButton::clicked, this, [this] {
-        if (m_ocrPopup) m_ocrPopup->hide();
-    });
-    buttons->addWidget(closeBtn);
-    layout->addLayout(buttons);
-
-    panel->adjustSize();
-    panel->move(mapToGlobal(QPoint(qMax(8, width() - panel->width() - 24),
-                                   qMax(8, height() - panel->height() - 72))));
-    panel->show();
-    m_ocrPopup = panel;
-
-    // ⚠️ 不再自动关编辑器:面板要留给用户阅读/选取片段。
-    //    关闭由用户点按钮(或直接关编辑器)完成 —— 原先识别完就 singleShot 关窗,
-    //    会把面板连同结果一起销毁(表现为"点了取字,啥也没发生")。
+    // ⚠️ 不自动关编辑器:面板要留给用户阅读/选取片段。
+    //    关闭由用户点按钮(或直接关编辑器)完成 —— 曾经的 singleShot 关窗
+    //    会把面板连同结果一起销毁。
     emit ocrFinished(text, reason);
 }
 

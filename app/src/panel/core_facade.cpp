@@ -1,5 +1,7 @@
 #include "core_facade.hpp"
 
+#include "../ui_theme.hpp"
+
 #include "capture/capture_session.hpp"
 #include "editor/editor_window.hpp"
 #include "host/auto_paste.hpp"
@@ -110,46 +112,13 @@ bool resolveDark(const QString& mode) {
     return QGuiApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark;
 }
 
-/// 两套 QPalette:Basic 风格控件(Button/ComboBox/SpinBox/TextArea…)跟随它取色。
+/// QPalette:Basic 风格控件(Button/ComboBox/SpinBox/TextArea…)跟随它取色。
 /// 只改 QML 的 Theme 单例是不够的——这些控件走的是 QPalette。
-QPalette buildPalette(bool dark) {
-    QPalette p;
-    if (dark) {
-        // 与 Theme.qml colors 对齐(theme.md §8)
-        p.setColor(QPalette::Window, QColor(0x0E, 0x12, 0x17));
-        p.setColor(QPalette::WindowText, QColor(0xF1, 0xF4, 0xF7));
-        p.setColor(QPalette::Base, QColor(0x15, 0x1A, 0x21));
-        p.setColor(QPalette::AlternateBase, QColor(0x1A, 0x20, 0x28));
-        p.setColor(QPalette::Button, QColor(0x1A, 0x20, 0x28));
-        p.setColor(QPalette::ButtonText, QColor(0xF1, 0xF4, 0xF7));
-        p.setColor(QPalette::Text, QColor(0xF1, 0xF4, 0xF7));
-        // 与 Theme.qml textTertiary 对齐(暗色提亮一档保可读)
-        p.setColor(QPalette::PlaceholderText, QColor(0x8D, 0x99, 0xA6));
-        p.setColor(QPalette::Highlight, QColor(0x4C, 0x9A, 0xFF));
-        p.setColor(QPalette::HighlightedText, QColor(0xFF, 0xFF, 0xFF));
-        p.setColor(QPalette::ToolTipBase, QColor(0x1A, 0x20, 0x28));
-        p.setColor(QPalette::ToolTipText, QColor(0xF1, 0xF4, 0xF7));
-        p.setColor(QPalette::BrightText, QColor(0xFF, 0xFF, 0xFF));
-        p.setColor(QPalette::Link, QColor(0x4C, 0x9A, 0xFF));
-    } else {
-        // 与 Theme.qml colors 对齐(theme.md §7)
-        p.setColor(QPalette::Window, QColor(0xF4, 0xF6, 0xF8));
-        p.setColor(QPalette::WindowText, QColor(0x17, 0x20, 0x2A));
-        p.setColor(QPalette::Base, QColor(0xFF, 0xFF, 0xFF));
-        p.setColor(QPalette::AlternateBase, QColor(0xF8, 0xFA, 0xFC));
-        p.setColor(QPalette::Button, QColor(0xF8, 0xFA, 0xFC));
-        p.setColor(QPalette::ButtonText, QColor(0x17, 0x20, 0x2A));
-        p.setColor(QPalette::Text, QColor(0x17, 0x20, 0x2A));
-        p.setColor(QPalette::PlaceholderText, QColor(0x89, 0x94, 0xA1));
-        p.setColor(QPalette::Highlight, QColor(0x3B, 0x82, 0xF6));
-        p.setColor(QPalette::HighlightedText, QColor(0xFF, 0xFF, 0xFF));
-        p.setColor(QPalette::ToolTipBase, QColor(0xFF, 0xFF, 0xFF));
-        p.setColor(QPalette::ToolTipText, QColor(0x17, 0x20, 0x2A));
-        p.setColor(QPalette::BrightText, QColor(0x00, 0x00, 0x00));
-        p.setColor(QPalette::Link, QColor(0x3B, 0x82, 0xF6));
-    }
-    return p;
-}
+///
+/// ⚠️ 取值**不再在这里写一遍**:统一由 ui::paletteFor 从 ui_theme.hpp 的令牌构建
+///    (那份与 Theme.qml 的 colors 逐项对齐)。此前这里另抄了一份十六进制,
+///    改主题色要改三处(Theme.qml / 这里 / 截图浮条),漏一处就是"半套主题"。
+QPalette buildPalette(bool dark) { return ui::paletteFor(dark); }
 
 } // namespace
 

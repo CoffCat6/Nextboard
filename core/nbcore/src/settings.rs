@@ -21,6 +21,23 @@ const DATA_MOVE_MARKER: &str = "data-move-pending.txt";
 pub const MIN_STITCH_SAMPLE_MS: i64 = 80;
 pub const MAX_STITCH_SAMPLE_MS: i64 = 1000;
 
+// 颜色校验复用文件末尾已有的 is_hex_color(#RRGGBB,大小写不敏感)——
+// 同一语义不该有第二份实现。
+
+/// 标注偏好的默认值(与浮条成员的写死初值一致:红笔 / 4px / 36px)。
+///
+/// 用独立函数而不是字面量,是因为 `#[serde(default = "...")]` 要求路径可调用;
+/// 同时让"core 默认值"与"宿主兜底值"能一眼对上(宿主读不到设置时用同一组数)。
+fn default_annotation_color() -> String {
+    "#E03131".into()
+}
+fn default_annotation_pen_size() -> i64 {
+    4
+}
+fn default_annotation_font_size() -> i64 {
+    36
+}
+
 /// 配置加载警告(进程级,只增不减直到被取走)。
 ///
 /// 动机:配置损坏/缺键时 `load()` 会整体回退默认值——**所有设置一起丢**
@@ -116,6 +133,20 @@ pub struct Settings {
     /// 242 = 不透明(底色复杂时用)、217 = 半透(默认)、179 = 极简(尽量不挡原图)。
     /// 校验限定在这三档内,不接受任意值 —— 浮条上只有三档按钮,存别的值没有意义。
     pub capture_bar_alpha: i64,
+    /// 截图标注态的**偏好**(颜色 / 粗细 / 字号),跨会话记忆。
+    ///
+    /// 动机(用户反馈):每次进标注态都退回写死的红笔 4px —— 常用黄笔/粗线的人
+    /// 每次都要重选。而同在浮条上的"底板不透明度"却会记住,口吻不一致。
+    ///
+    /// 存**字符串 hex + 两个整数**,而不是结构体:save_settings 是**深合并**,
+    /// 标量/数组整体替换、对象逐键合并 —— 用扁平标量最不容易出现"改了一半"的状态。
+    /// 校验:颜色须 #rrggbb、粗细/字号须落在 UI 提供的档位内(见 annotation_* 常量)。
+    #[serde(default = "default_annotation_color")]
+    pub annotation_color: String,
+    #[serde(default = "default_annotation_pen_size")]
+    pub annotation_pen_size: i64,
+    #[serde(default = "default_annotation_font_size")]
+    pub annotation_font_size: i64,
     /// 编辑器窗口几何(四元组 x,y,w,h;空 = 尚未记录,首次按默认尺寸居中)。
     ///
     /// 动机:编辑器此前固定 resize(960,720),用户按自己习惯调过尺寸,下次打开
@@ -492,6 +523,9 @@ impl Default for Settings {
             region_auto_confirm: true,
             region_right_click_cancel: true,
             capture_bar_alpha: 217,        // 半透档(docs/17 §17.5):默认不挡原图又看得清按钮
+            annotation_color: default_annotation_color(),
+            annotation_pen_size: default_annotation_pen_size(),
+            annotation_font_size: default_annotation_font_size(),
             editor_geometry: Vec::new(),
             panel_size: Vec::new(),   // 空 = 尚未记录,首次按默认尺寸居中
             // 默认"松手即复制"：截图后立刻可粘贴，不经过编辑器
@@ -642,6 +676,27 @@ impl Settings {
         if ![179, 217, 242].contains(&self.capture_bar_alpha) {
             return Err(AppError::InvalidInput(
                 "浮条不透明度只支持 179 / 217 / 242 三档".into(),
+            ));
+        }
+        // 标注偏好:颜色须 #rrggbb(界面只提供调色板 + 取色器,取色器也只出 hex);
+        // 粗细/字号必须是 UI 档位里的值 —— 存了别的值界面上没有对应选中项,
+        // 会变成"设置与界面不一致"(与上面 alpha 三档同一理由)。
+        if !is_hex_color(&self.annotation_color) {
+            return Err(AppError::InvalidInput(
+                "标注颜色须为 #rrggbb 形式".into(),
+            ));
+        }
+        // 档位必须与 UI 的 strokeSizes()/textFontSizes() 逐项一致
+        // (app/src/editor/annotation_engine.cpp:{2,4,8} / {24,36,48})——
+        // 对不上就是"core 收下了一个界面上选不到的值"。
+        if ![2, 4, 8].contains(&self.annotation_pen_size) {
+            return Err(AppError::InvalidInput(
+                "标注粗细只支持 2 / 4 / 8 三档".into(),
+            ));
+        }
+        if ![24, 36, 48].contains(&self.annotation_font_size) {
+            return Err(AppError::InvalidInput(
+                "标注字号只支持 24 / 36 / 48 三档".into(),
             ));
         }
         // 编辑器几何:空(未记录)合法;非空必须是四个数,且宽高在合理区间。
@@ -1628,6 +1683,43 @@ mod tests {
         assert!(with_opacity(101).validate().is_err());
         assert!(with_opacity(30).validate().is_ok());
         assert!(with_opacity(100).validate().is_ok());
+    }
+
+    #[test]
+    fn validate_checks_annotation_prefs() {
+        // 默认值必须自洽:默认就应该能通过校验,否则新装用户一启动就报错
+        assert!(Settings::default().validate().is_ok());
+
+        let with = |color: &str, pen: i64, font: i64| Settings {
+            annotation_color: color.into(),
+            annotation_pen_size: pen,
+            annotation_font_size: font,
+            ..Default::default()
+        };
+        // UI 档位内的值全部合法(须与 strokeSizes()/textFontSizes() 一致)
+        assert!(with("#E03131", 2, 24).validate().is_ok());
+        assert!(with("#40C057", 4, 36).validate().is_ok());
+        assert!(with("#1C7ED6", 8, 48).validate().is_ok());
+        // 档位外的值拒绝:界面没有对应选中项
+        assert!(with("#E03131", 3, 36).validate().is_err());
+        assert!(with("#E03131", 4, 30).validate().is_err());
+        // 颜色:必须 #rrggbb
+        assert!(with("red", 4, 36).validate().is_err());
+        assert!(with("#E0313", 4, 36).validate().is_err());   // 少一位
+        assert!(with("E031311", 4, 36).validate().is_err());  // 缺 #
+        assert!(with("#GGGGGG", 4, 36).validate().is_err());  // 非 hex
+    }
+
+    #[test]
+    fn old_config_without_annotation_keys_falls_back_to_defaults() {
+        // 向后兼容:旧配置文件里没有这三个键,靠 serde(default) 回落到默认值。
+        // 若这里失败,说明 #[serde(default = ...)] 写错了名字 —— 表现为
+        // 老用户升级后标注偏好变成空串/0,一进标注态就是黑笔 0px。
+        let v = serde_json::json!({ "historyLimit": 100 });
+        let s: Settings = serde_json::from_value(v).unwrap();
+        assert_eq!(s.annotation_color, "#E03131");
+        assert_eq!(s.annotation_pen_size, 4);
+        assert_eq!(s.annotation_font_size, 36);
     }
 
     #[test]

@@ -8,6 +8,8 @@
 #include "panel/core_facade.hpp"
 #include "host/memory_probe.hpp"
 #include "host/app_paths.hpp"
+#include "ui_theme.hpp"
+#include "ui/ocr_result_panel.hpp"
 
 #include <QBuffer>
 #include <QCursor>
@@ -423,6 +425,9 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured) {
     // (settings.rs 的 capture_bar_alpha = 217)一致 —— 读不到设置时退化成
     // "半透",而不是硬编码的不透明。
     const int barAlpha = data.value("captureBarAlpha").toInt(OverlayWidget::kBarAlphaHalf);
+    // 标注偏好(颜色/粗细/字号):跨会话记忆。用户反馈"每次都退回红笔 4px,
+    // 而底板不透明度却记得住" —— 口吻不一致,这里补齐。
+    // ⚠️ data 在这段之后还可能被别的分支用,这里只读不消费。
     const int idleSecs = qBound(0, data.value("overlayIdleSecs").toInt(60), 3600);
     if (idleSecs > 0 && !g_idleTimer) {
         g_idleTimer = new QTimer(qApp);
@@ -446,6 +451,7 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured) {
         auto* overlay = new OverlayWidget(frozen, i, screen, autoConfirm, rightClickCancel,
                                           scrollingIntent);
         overlay->setBarAlpha(barAlpha);   // 会话内三档可调,初始取设置
+        overlay->applyAnnotationPrefs(data);   // 标注偏好(颜色/粗细/字号)跨会话记忆
         overlay->setAttribute(Qt::WA_DeleteOnClose);
         g_overlays.append(overlay);
 
@@ -900,7 +906,9 @@ void OverlayWidget::paintEvent(QPaintEvent*) {
         painter.setRenderHint(QPainter::SmoothPixmapTransform);
         painter.drawImage(sel, m_frozen, src);
 
-        painter.setPen(QPen(QColor(80, 160, 255), 2));
+        // 选区边框 = theme.md §21「2px Accent」。取主题 accent(而非写死 #50A0FF):
+        // 深/浅两套主题的 accent 对比度不同,写死一个值总有一套显得发灰。
+        painter.setPen(QPen(ui::themeTokens().accent, 2));
         painter.setBrush(Qt::NoBrush);
         painter.drawRect(sel);
 
@@ -930,7 +938,7 @@ void OverlayWidget::paintEvent(QPaintEvent*) {
         // ⚠️ 长截图态也**不画**手柄:选区已锁定为采集窗口,让用户以为还能拖
         //    就会拖出新尺寸,而各帧宽度不一致时拼接必然错位(docs/19 §3.3 I1)。
         if (!m_autoConfirm && !m_engine && !stitchActive() && selectionUsable()) {
-            painter.setPen(QPen(QColor(80, 160, 255), 1));
+            painter.setPen(QPen(ui::themeTokens().accent, 1));
             painter.setBrush(QColor(255, 255, 255));
             for (const QPoint& point : handlePoints(sel)) {
                 painter.drawRect(QRect(point.x() - kHandleSize / 2,
@@ -938,7 +946,10 @@ void OverlayWidget::paintEvent(QPaintEvent*) {
             }
         }
 
-        // 尺寸提示按**物理像素**显示,即最终截出来的分辨率
+        // 尺寸提示按**物理像素**显示,即最终截出来的分辨率。
+        // ⚠️ 这一行文字压在**冻结底图**上(不是压在主题面板上),底图颜色由用户桌面
+        //    决定 —— 因此**刻意不跟主题**:白字 + 深色底纹才是任意底色上都读得清的组合。
+        //    改成主题前景色,在浅色页面上会直接消失。
         painter.setPen(QColor(255, 255, 255));
         painter.drawText(QPoint(sel.x(), sel.y() - 6),
                          QStringLiteral("%1 × %2").arg(src.width()).arg(src.height()));
@@ -951,6 +962,7 @@ void OverlayWidget::paintEvent(QPaintEvent*) {
             drawStitchPanel(painter);
         }
     } else if (!m_selecting) {
+        // 同上:空态提示压在底图上,固定白字(理由见尺寸提示那条)。
         painter.setPen(QColor(255, 255, 255, 200));
         painter.drawText(rect(), Qt::AlignHCenter | Qt::AlignTop,
                          m_autoConfirm
@@ -1033,6 +1045,7 @@ void OverlayWidget::mousePressEvent(QMouseEvent* e) {
 
     // 起新选区:旧标注锚定在旧选区上,选区一变全部失效 → 退出标注态(重新来)
     if (m_engine) exitAnnotating();
+    hideHoverTip();   // 浮条马上要消失,别留一条孤立的提示
     m_origin = e->pos();
     m_selection = QRect(m_origin, QSize(0, 0));
     m_selecting = true;
@@ -1041,6 +1054,9 @@ void OverlayWidget::mousePressEvent(QMouseEvent* e) {
 
 void OverlayWidget::mouseMoveEvent(QMouseEvent* e) {
     emit activity();
+    // 拖拽/绘制过程中的移动一律不清高亮之外的状态;高亮本身只在"悬停浮条"分支里
+    // 设置,下面每个提前 return 的分支都会把光标移出浮条 —— 统一在这里清一次即可。
+    if (m_selecting || m_adjusting || m_draggingStroke) setHoverButton(-1);
     if (m_selecting) {
         m_selection = QRect(m_origin, e->pos()).normalized();
         update();
@@ -1059,7 +1075,15 @@ void OverlayWidget::mouseMoveEvent(QMouseEvent* e) {
     }
     // 悬停在浮条/二级条的按钮上:给"可点"的手型(否则标注态会顶着一个画笔光标,
     // 用户不知道这里点得动)
-    if (toolbarContains(e->pos()) || subbarWidgetContains(e->pos())) {
+    if (toolbarContains(e->pos())) {
+        // 悬停高亮:按**具体按钮**高亮,整条一起亮等于没告诉用户"点哪儿"。
+        setHoverButton(toolbarButtonAt(e->pos()));
+        setCursor(Qt::PointingHandCursor);
+        return;
+    }
+    // 离开浮条 → 清掉高亮(否则光标移到选区里,浮条上还留着一块亮色)
+    setHoverButton(-1);
+    if (subbarWidgetContains(e->pos())) {
         setCursor(Qt::PointingHandCursor);
         return;
     }
@@ -1153,6 +1177,30 @@ void OverlayWidget::keyPressEvent(QKeyEvent* e) {
     if (e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter) {
         if (stitchActive()) return;   // 长截图态用面板按钮,Enter 不做确认
         if (!m_autoConfirm && selectionUsable()) confirmSelection();
+        return;
+    }
+
+    // ---- 标注态撤销/重做(docs/17 §17.3 A 漏项)----
+    //
+    // 二级条上一直有撤销/重做按钮,但**键盘没有任何入口**:而标注是"一手鼠标一手
+    // 快捷键"的操作,画错一笔还得移回二级条点按钮,手感很差。编辑器侧(Ctrl+Z /
+    // Ctrl+Shift+Z / Ctrl+Y)早已支持,这里补齐同一套,免得两边不一致。
+    //
+    // ⚠️ 必须在**标注态**才处理:非标注态的 Ctrl+Z 属于别的语义(将来若有),
+    //    这里不该吞掉按键。
+    if (m_engine && (e->modifiers() & Qt::ControlModifier)) {
+        const bool shift = e->modifiers().testFlag(Qt::ShiftModifier);
+        if (e->key() == Qt::Key_Z) {
+            if (shift) m_engine->undoStack()->redo();
+            else m_engine->undoStack()->undo();
+            update(m_selection.normalized().adjusted(-2, -2, 2, 2));
+            return;
+        }
+        if (e->key() == Qt::Key_Y) {
+            m_engine->undoStack()->redo();
+            update(m_selection.normalized().adjusted(-2, -2, 2, 2));
+            return;
+        }
     }
 }
 
@@ -1173,6 +1221,30 @@ QString toolbarButtonText(int index) {
         default: return QStringLiteral("取消");
     }
 }
+
+/// 按钮说明(悬停停留后显示)。与 toolbarButtonText 的索引一一对应。
+///
+/// 为什么需要:「透明」「贴图」这类两字标签**不自明** —— 用户不知道"透明"是
+/// 调底板档位、"贴图"是钉到屏幕。二级条是真控件所以有 tooltip,主浮条是自绘的,
+/// 一直没有(barAlphaTip() 写了却从没人调用,是典型的"想做但没接上")。
+QString toolbarButtonTipText(int index) {
+    switch (index) {
+        case 0: return QStringLiteral("标注:在选区内就地画笔/箭头/文字");
+        case 1: return QStringLiteral("OCR 取字:识别选区文字并复制到剪贴板");
+        case 2: return QStringLiteral("长截图:滚动采集(选区转为采集窗口)");
+        case 3: return QStringLiteral("贴图:把选区钉在屏幕上");
+        case 4: return QStringLiteral("保存:选区另存为图片文件");
+        case 5: return QStringLiteral("底板不透明度:不透明 / 半透 / 极简 循环");
+        case 6: return QStringLiteral("完成:入库并写剪贴板 (Enter)");
+        default: return QStringLiteral("取消本次截图 (Esc)");
+    }
+}
+
+/// 悬停停留多久才弹提示(毫秒)。
+///
+/// 取 700:浮条是一次性扫过的目标,鼠标划过每个按钮都弹提示会把屏幕刷满;
+/// 而 200~300ms 又太容易"手抖触发"。700ms 的含义是"主动停下想看清这是什么"。
+constexpr int kHoverTipDelayMs = 700;
 
 } // namespace
 
@@ -1216,47 +1288,150 @@ bool OverlayWidget::toolbarContains(const QPoint& pos) const {
     return toolbarVisible() && m_toolbarRect.contains(pos);
 }
 
+QRect OverlayWidget::toolbarButtonRect(int index) const {
+    const int count = overlay::kToolbarButtons;
+    if (index < 0 || index >= count) return QRect();
+    // 均分。**余数给最后一个按钮**:rc.width() 未必被 count 整除(见 overlay_geometry
+    // 的 kToolbarWidth 说明),按整数除法算宽度时最右侧会缺几条像素 —— 那几条属于
+    // 最后一个按钮,绘图与命中都按同一个算式取,点它才不会有"差 1px 点不到"的死角。
+    const int base = m_toolbarRect.width() / count;
+    const int x = m_toolbarRect.x() + index * base;
+    const int w = (index == count - 1) ? (m_toolbarRect.right() - x + 1) : base;
+    return QRect(x, m_toolbarRect.y(), w, m_toolbarRect.height());
+}
+
+int OverlayWidget::toolbarButtonAt(const QPoint& pos) const {
+    if (!toolbarVisible() || !m_toolbarRect.contains(pos)) return -1;
+    const int count = overlay::kToolbarButtons;
+    for (int i = 0; i < count; ++i) {
+        if (toolbarButtonRect(i).contains(pos)) return i;
+    }
+    return -1;
+}
+
+QString OverlayWidget::toolbarButtonTip(int index) const {
+    if (index < 0 || index >= overlay::kToolbarButtons) return QString();
+    // 「透明」档位的说明跟着当前档位走(barAlphaTip 终于有了调用点):
+    // 用户点一下想知道"现在是哪一档",光说"循环切换"没用。
+    if (index == 5) return barAlphaTip();
+    // 「OCR取字」进行中:说明还要告诉用户"为什么点不动"
+    if (index == 1 && m_ocrPending) return QStringLiteral("正在识别中…(完成前不能重复触发)");
+    return toolbarButtonTipText(index);
+}
+
+void OverlayWidget::scheduleHoverTip(int index) {
+    if (index < 0) {
+        hideHoverTip();
+        return;
+    }
+    if (m_hoverTipShownFor == index) return;   // 同一个按钮已经弹过,别重复弹
+    if (!m_hoverTipTimer) {
+        m_hoverTipTimer = new QTimer(this);
+        m_hoverTipTimer->setSingleShot(true);
+        m_hoverTipTimer->setInterval(kHoverTipDelayMs);
+        connect(m_hoverTipTimer, &QTimer::timeout, this, [this] {
+            if (m_hoverButton < 0) return;
+            const QString tip = toolbarButtonTip(m_hoverButton);
+            if (tip.isEmpty()) return;
+            m_hoverTipShownFor = m_hoverButton;
+            // 锚在按钮正上方;QToolTip 会自动夹进屏幕
+            const QRect btn = toolbarButtonRect(m_hoverButton);
+            QToolTip::showText(mapToGlobal(QPoint(btn.center().x(), btn.top() - 6)), tip,
+                               this, QRect(), 6000);
+        });
+    }
+    m_hoverTipTimer->start();
+}
+
+void OverlayWidget::hideHoverTip() {
+    if (m_hoverTipTimer) m_hoverTipTimer->stop();
+    m_hoverTipShownFor = -1;
+}
+
+void OverlayWidget::setHoverButton(int index) {
+    if (m_hoverButton == index) return;
+    m_hoverButton = index;
+    // 换按钮 = 重新开始计时;移出浮条 = 立刻收起(提示不该跟着鼠标乱飘)
+    scheduleHoverTip(index);
+    if (m_toolbarRect.isNull()) {
+        update();
+        return;
+    }
+    // 只重绘浮条(含一点余量给悬停圆角),不整屏刷 —— 遮罩是整屏窗口,4K 上整屏
+    // 重绘约 10ms,鼠标每动一格都刷会明显掉帧。
+    update(m_toolbarRect.adjusted(-2, -2, 2, 2));
+}
+
 void OverlayWidget::drawToolbar(QPainter& painter) const {
     if (!toolbarVisible()) return;
+    const ui::ThemeTokens& t = ui::themeTokens();
     const QRect rc = m_toolbarRect;
-    // 底板
-    painter.setPen(Qt::NoPen);
-    // 底板不透明度走**用户可调的三档**(docs/17 §17.5):原先硬编码 242(≈95% 不透明),
-    // 压在选区底部会把待截内容整片盖住 —— 这正是"浮条挡原图"的成因。
-    painter.setBrush(QColor(0x26, 0x27, 0x2E, barAlpha()));
-    painter.drawRoundedRect(rc, 8, 8);
-    // 按钮均分;完成/取消给强调/弱化色,其余普通
     const int count = overlay::kToolbarButtons;
-    const int bw = rc.width() / count;
-    // 极简档下底板仅 70% 不透明,默认灰字会"透到看不清" —— 提高对比度兜底
-    const QColor baseFg = barNeedsContrastBoost() ? QColor(0xFF, 0xFF, 0xFF)
-                                                  : QColor(0xDF, 0xE1, 0xE8);
+
+    // ---- 底板:主题 surface + 用户可调不透明度(docs/17 §17.5)----
+    // ⚠️ 底色**不再写死 #26272E**:那是"无论什么主题工具栏都是深色"的根因。
+    //    底板取主题 surface,描边取主题 border —— 浅色主题下才是"白底 + 浅灰边"。
+    const int radius = 8;   // theme.md §11:Panel 圆角 8
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(QPen(ui::panelBorder(), 1));
+    painter.setBrush(ui::panelPlate(barAlpha()));
+    painter.drawRoundedRect(QRectF(rc).adjusted(0.5, 0.5, -0.5, -0.5), radius, radius);
+    painter.setRenderHint(QPainter::Antialiasing, false);
+
+    // 极简档(70% 不透明)下普通文字会"透到看不清" —— 提高对比度兜底。
+    // 只用**纯黑/纯白**做兜底色:主题前景色本身就是最高对比档,再"提亮"只会
+    // 变成同色。语义色(完成/取消/激活)不受影响,见下。
+    const QColor baseFg = barNeedsContrastBoost()
+                              ? (ui::isDarkTheme() ? QColor(0xFF, 0xFF, 0xFF)
+                                                   : QColor(0x00, 0x00, 0x00))
+                              : t.textPrimary;
+
     for (int i = 0; i < count; ++i) {
-        const QRect btn(rc.x() + i * bw, rc.y(), bw, rc.height());
-        QColor fg = baseFg;
-        const QColor accent = barNeedsContrastBoost() ? QColor(255, 255, 255) : QColor();
+        const QRect btn = toolbarButtonRect(i);
+        const QRect fill = btn.adjusted(2, 3, -2, -3);   // 高亮/激活底衬内缩,不顶到描边
         // 索引顺序(与 toolbarButtonText 一一对应):
         // 0 标注 / 1 OCR取字 / 2 长截图 / 3 贴图 / 4 保存 / 5 透明 / 6 完成 / 7 取消
-        if (i == 0 && annotating()) fg = accent.isValid() ? accent : QColor(0x1C, 0x7E, 0xD6);
-        if (i == 2 && stitchActive()) fg = accent.isValid() ? accent : QColor(0x1C, 0x7E, 0xD6);
-        if (i == 6) fg = accent.isValid() ? accent : QColor(0x40, 0xC0, 0x57);   // 完成:绿
-        if (i == 7) fg = accent.isValid() ? accent : QColor(0xE0, 0x31, 0x31);   // 取消:红
+        const bool active = (i == 0 && annotating()) || (i == 2 && stitchActive());
+
+        if (active) {
+            // 激活态 = theme.md §15 的 Selected:AccentSoft 底 + Accent 字。
+            // 底板是半透的,故用 accent 低 alpha 衬底(等效 AccentSoft 叠在 surface 上)。
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(ui::activeFill());
+            painter.drawRoundedRect(fill, 6, 6);
+        } else if (i == m_hoverButton) {
+            // 悬停 = theme.md §15 的 Hover:SurfaceHover。同样用前景低 alpha 表达,
+            // 深色下变"提亮"、浅色下变"压暗",一套算式两套主题都成立。
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(ui::hoverFill(barNeedsContrastBoost() ? 40 : 28));
+            painter.drawRoundedRect(fill, 6, 6);
+        }
+
+        QColor fg = baseFg;
+        if (active) fg = t.accent;
+        if (i == 6) fg = t.success;   // 完成:绿(语义色,主题内两套都保证对比度)
+        if (i == 7) fg = t.error;     // 取消:红
+        if (i == 5) fg = t.textSecondary;   // 透明档位:次要动作,弱化
+        // 识别进行中:「OCR取字」置灰(它自己也会拒绝重入,这里是**看得见**的那一半)。
+        // 只靠"点了没反应"用户会以为按钮坏了 —— 状态必须同时可见。
+        if (i == 1 && m_ocrPending) fg = t.textDisabled;
         painter.setPen(fg);
         painter.drawText(btn, Qt::AlignCenter, toolbarButtonText(i));
+
         if (i < count - 1) {
-            painter.setPen(QColor(255, 255, 255, 28));
-            painter.drawLine(btn.topRight() + QPoint(0, 8),
-                             btn.bottomRight() - QPoint(0, 8));
+            // 分隔线:主题边框色低 alpha。原来是白色 28α —— 浅色主题下等于看不见。
+            painter.setPen(ui::withAlpha(t.borderStrong, 170));
+            painter.drawLine(btn.topRight() + QPoint(0, 9),
+                             btn.bottomRight() - QPoint(0, 9));
         }
     }
 }
 
 void OverlayWidget::handleToolbarClick(const QPoint& pos) {
-    if (!toolbarContains(pos)) return;
-    const QRect rc = m_toolbarRect;
-    const int count = overlay::kToolbarButtons;
-    const int bw = rc.width() / count;
-    const int index = qBound(0, (pos.x() - rc.x()) / bw, count - 1);
+    // 命中走 toolbarButtonAt —— 与 drawToolbar 共用同一份几何(见 toolbarButtonRect)。
+    const int index = toolbarButtonAt(pos);
+    if (index < 0) return;
+    hideHoverTip();   // 已经点下去了,说明用户看懂了;提示别继续压在上面
     switch (index) {
         case 5:   // 透明:底板不透明度三档循环(即时生效,不结束会话)
             cycleBarAlpha();
@@ -1289,11 +1464,23 @@ void OverlayWidget::handleToolbarClick(const QPoint& pos) {
     // 决策:三者在弹层/贴图/另存完成后**结束会话** —— 与形态 B 一致。
     // 索引:1 OCR取字 / 3 贴图 / 4 保存(长截图插在 2,见上)
     switch (index) {
-        case 1: {  // OCR取字:异步(0.4~5s),弹层先占位
+        case 1: {  // OCR取字:异步(0.4~5s)
+            // ---- 防重入 ----
+            // 识别是 0.4~5s 的异步任务。此前没有任何进行中状态:连点 N 次就并发起
+            // N 个识别,而每个 finished 回调都会 emit cancelled() —— 用户看到的是
+            // "点一次取字,截图会话被取消好几次",还白烧 N 次推理(全屏 OCR 很贵)。
+            if (m_ocrPending) return;
+            m_ocrPending = true;
+            // 面板定位基准在**此刻**固化(理由见 showOcrResultPanel 的注释)
+            const QRect ocrAnchor = QRect(mapToGlobal(m_selection.normalized().topLeft()),
+                                          m_selection.normalized().size());
             emit activity();
+            update(m_toolbarRect.adjusted(-2, -2, 2, 2));   // 「OCR取字」按钮置灰
             auto* watcher = new QFutureWatcher<QString>(this);
+            // cropped 按值捕获:识别结果面板要保存它(为"图中取字"预留),
+            // 而本函数返回后就地销毁了选区状态。
             connect(watcher, &QFutureWatcher<QString>::finished, this,
-                    [this, watcher] {
+                    [this, watcher, cropped, ocrAnchor] {
                 watcher->deleteLater();
                 const QString text = watcher->result();
                 // 「取字」的落点是**系统剪贴板**:识别到就写进去,用户 Ctrl+V 直接可用。
@@ -1311,8 +1498,13 @@ void OverlayWidget::handleToolbarClick(const QPoint& pos) {
                 } else {
                     notice = QStringLiteral("识别成功,但写入剪贴板失败");
                 }
-                const QPoint gp = mapToGlobal(QPoint(m_toolbarRect.x(), m_toolbarRect.y() - 8));
-                QToolTip::showText(gp, notice, this, QRect(), 4000);
+                m_ocrPending = false;
+                // ---- 结果**驻留**(与编辑器 showOcrResult 同一形态)----
+                // 此前只用 QToolTip 提示 4 秒并立刻结束会话:用户既看不清整段文本,
+                // 也没法只取其中几行 —— 同一个 OCR 能力在两处体验完全不同。
+                // 现在弹一个可驻留、可鼠标选取的面板,用户读完自己关。
+                showOcrResultPanel(text, notice, cropped, ocrAnchor);
+                update();
                 emit cancelled();
             });
             connect(watcher, &QFutureWatcher<QString>::canceled, watcher,
@@ -1320,6 +1512,7 @@ void OverlayWidget::handleToolbarClick(const QPoint& pos) {
             watcher->setFuture(QtConcurrent::run([cropped]() -> QString {
                 return CoreBridge::instance().ocrImage(cropped);
             }));
+            // 进行中提示仍走轻量 tooltip(此刻没有可操作的文本,弹面板只是噪音)
             QToolTip::showText(mapToGlobal(m_toolbarRect.topLeft()),
                                QStringLiteral("识别中…"), this, QRect(), 2500);
             return;
@@ -1339,6 +1532,23 @@ void OverlayWidget::handleToolbarClick(const QPoint& pos) {
 }
 
 
+// ---- OCR 结果驻留面板 ----
+
+void OverlayWidget::showOcrResultPanel(const QString& text, const QString& reason,
+                                       const QImage& source, const QRect& anchorGlobal) {
+    // ⚠️ 调用点紧跟着 emit cancelled():遮罩会被 close() 销毁。因此这里
+    //    **必须**用顶层窗口(内部 new 的 parent 是 nullptr),不能挂 this 当子控件
+    //    —— 否则面板与遮罩同生共死,用户根本看不到结果。
+    //
+    // popup=false:工具窗口,点别处不会关。用户常常要对照着原图一段段挑文本,
+    // 点一下就被关掉会很难用;关闭由用户自己点「关闭」。
+    // anchor=this:定位时仍以遮罩(此刻还在)为基准,夹进屏幕可用区。
+    // ⚠️ 基准是**选区**的全局矩形,不是 this。
+    //    this 是整屏遮罩,frameGeometry() 就是整块屏 —— 传它会把面板摆到屏幕边角,
+    //    而不是用户刚框的那块内容旁边(用户报的缺陷)。
+    OcrResultPanel::showResult(text, reason, source, anchorGlobal, /*popup=*/false);
+}
+
 // ---- 滚动长截图态(docs/19 §3.2)----
 
 void OverlayWidget::enterStitching() {
@@ -1346,7 +1556,22 @@ void OverlayWidget::enterStitching() {
     if (!selectionUsable()) return;   // 没有选区就没有采集窗口
     // 标注与长截图**互斥**:标注锚定在选区上,而长截图的选区是采集窗口。
     // 两者同时生效会让"画在选区里的笔画"跟着长图一起被滚走,语义混乱。
-    if (m_engine) exitAnnotating();
+    //
+    // ⚠️ 但**不能静默丢弃**:此前这里直接 exitAnnotating(),用户画完标注再点
+    //    「长截图」,画的东西一声不响就没了。有标注时必须先问一句 —— 只在
+    //    "真的有标注"时问,空引擎(进了标注态但没画)照旧静默退出。
+    if (m_engine) {
+        if (hasAnnotations()) {
+            const auto answer = QMessageBox::question(
+                this, QStringLiteral("长截图"),
+                QStringLiteral("长截图会重新采集滚动内容,当前选区上的 %1 条标注将被丢弃。\n"
+                               "要继续吗?")
+                    .arg(m_engine->undoStack()->count()),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+            if (answer != QMessageBox::Yes) return;   // 用户反悔:留在标注态,什么也不变
+        }
+        exitAnnotating();
+    }
     m_stitch = StitchState::Ready;
     m_stitchTotalHeight = 0;
     m_stitchGaps = 0;
@@ -1542,6 +1767,12 @@ void OverlayWidget::handleStitchPanelClick(const QPoint& pos) {
     abortStitchFromPanel();
 }
 
+void OverlayWidget::leaveEvent(QEvent* e) {
+    QWidget::leaveEvent(e);
+    // 光标离开遮罩(切到别的屏 / 退到任务栏):浮条上不该留着高亮。
+    setHoverButton(-1);
+}
+
 void OverlayWidget::resizeEvent(QResizeEvent* e) {
     QWidget::resizeEvent(e);
     // 就绪态面板是算出来的几何,窗口尺寸变了要重算(采集期以 HUD 为准,与遮罩无关)
@@ -1624,34 +1855,46 @@ void OverlayWidget::stopStitchSampling() {
 void OverlayWidget::drawStitchPanel(QPainter& painter) const {
     // 采集期遮罩已隐藏,面板由 HUD 画;这里只负责**就绪态**(「开始」按钮)。
     if (!stitchActive() || m_stitchOverlayHidden) return;
+    const ui::ThemeTokens& t = ui::themeTokens();
     const QRect rc = m_stitchPanelRect;
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(0x26, 0x27, 0x2E, barAlpha()));
-    painter.drawRoundedRect(rc, 8, 8);
+
+    // 底板与主浮条**同一套**(主题 surface + 用户档位 alpha + 1px border):
+    // 长截图就绪态面板与浮条在同一次交互里先后出现,底色/圆角不一致会显得像两个控件。
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(QPen(ui::panelBorder(), 1));
+    painter.setBrush(ui::panelPlate(barAlpha()));
+    painter.drawRoundedRect(QRectF(rc).adjusted(0.5, 0.5, -0.5, -0.5), 8, 8);
+    painter.setRenderHint(QPainter::Antialiasing, false);
 
     const int count = overlay::kStitchButtons;
     const int bw = rc.width() / count;
-    const QColor baseFg = barNeedsContrastBoost() ? QColor(0xFF, 0xFF, 0xFF)
-                                                  : QColor(0xDF, 0xE1, 0xE8);
     for (int i = 0; i < count; ++i) {
         const QRect btn(rc.x() + i * bw, rc.y(), bw, rc.height());
-        const QColor fg = (i == 0) ? QColor(0x40, 0xC0, 0x57) : QColor(0xE0, 0x31, 0x31);
-        painter.setPen(fg);
+        // 「开始」= success(推进动作),「取消」= error(丢弃)—— 语义色两套主题都成立。
+        painter.setPen((i == 0) ? t.success : t.error);
         const QString label =
             (i == 0) ? QStringLiteral("开始") : QStringLiteral("取消");
         painter.drawText(btn, Qt::AlignCenter, label);
         if (i < count - 1) {
-            painter.setPen(QColor(255, 255, 255, 28));
-            painter.drawLine(btn.topRight() + QPoint(0, 8),
-                             btn.bottomRight() - QPoint(0, 8));
+            painter.setPen(ui::withAlpha(t.borderStrong, 170));
+            painter.drawLine(btn.topRight() + QPoint(0, 9),
+                             btn.bottomRight() - QPoint(0, 9));
         }
     }
 
     if (!m_stitchNotice.isEmpty()) {
-        // 就绪态:文案挂在面板下方
-        painter.setPen(QColor(255, 255, 255, 210));
-        painter.drawText(QRect(rc.x() - 60, rc.bottom() + 6, rc.width() + 120, 20),
-                         Qt::AlignCenter, m_stitchNotice);
+        // 就绪态:文案挂在面板下方。
+        // ⚠️ 这段文字**不在面板底板上**,而是直接压在冻结底图上 —— 浅色页面上用
+        //    主题前景色(浅色主题=深字)是对的,但深色页面上深字会消失。故按
+        //    "是否已有面板底板"区分:有底板用主题正文色,没底板(浮在图上)用白字+描边。
+        //    这里面板**总是**画了底板(见上),但文案在底板**外面** → 仍需自保证对比度。
+        //    做法:先画深色描边再画白字,任意底图上都读得清(与尺寸提示同一手法)。
+        const QRect textRect(rc.x() - 60, rc.bottom() + 6, rc.width() + 120, 20);
+        painter.setPen(QColor(0, 0, 0, 160));
+        for (const QPoint& d : {QPoint(1, 0), QPoint(-1, 0), QPoint(0, 1), QPoint(0, -1)})
+            painter.drawText(textRect.translated(d), Qt::AlignCenter, m_stitchNotice);
+        painter.setPen(QColor(0xFF, 0xFF, 0xFF, 235));
+        painter.drawText(textRect, Qt::AlignCenter, m_stitchNotice);
     }
 }
 
@@ -1691,16 +1934,19 @@ void OverlayWidget::enterAnnotating() {
                 [this](EditorTool tool) { setAnnoTool(tool); });
         connect(m_subbar, &AnnotationToolbar::colorChanged, this, [this](const QColor& c) {
             m_annoColor = c;
+            saveAnnotationPrefs();   // 改了即记(与 cycleBarAlpha 同一口吻)
             if (m_engine) m_engine->setColor(c);
             update();
         });
         connect(m_subbar, &AnnotationToolbar::strokeWidthChanged, this, [this](int w) {
             m_penSize = w;
+            saveAnnotationPrefs();   // 改了即记
             if (m_engine) m_engine->setStrokeWidth(w);
             update();
         });
         connect(m_subbar, &AnnotationToolbar::fontSizeChanged, this, [this](int px) {
             m_fontSize = px;
+            saveAnnotationPrefs();   // 改了即记
             if (m_engine) m_engine->setFontSize(px);
             update();
         });
@@ -1737,10 +1983,16 @@ void OverlayWidget::beginInlineText(const QPoint& widgetPos) {
     // 字号档位是**物理像素**(场景单位),控件上按逻辑像素显示才对得上落字效果
     f.setPixelSize(qBound(10, qRound(m_fontSize / dpr()), 96));
     edit->setFont(f);
-    edit->setStyleSheet(QStringLiteral("QLineEdit{background:rgba(38,39,46,235);"
-                                       "color:%1;border:1px solid #1C7ED6;"
-                                       "border-radius:3px;padding:2px 4px;}")
-                            .arg(m_annoColor.name()));
+    // 输入框跟随主题:底板 = 主题 surface(与浮条同一块面),描边 = accent(聚焦态),
+    // 文字色 = 当前标注色(用户正在选的颜色就是输入内容的颜色,所见即所得)。
+    // ⚠️ 原来是写死的深色 rgba(38,39,46,235):浅色主题下突然出现一块深色输入框。
+    const ui::ThemeTokens& t = ui::themeTokens();
+    edit->setStyleSheet(QStringLiteral("QLineEdit{background:rgba(%1,%2,%3,235);"
+                                       "color:%4;border:1px solid %5;"
+                                       "border-radius:3px;padding:2px 4px;"
+                                       "selection-background-color:%5;selection-color:%6;}")
+                            .arg(t.surface.red()).arg(t.surface.green()).arg(t.surface.blue())
+                            .arg(m_annoColor.name(), t.accent.name(), t.accentText.name()));
     const int w = qBound(160, 12 * f.pixelSize(), 420);
     edit->setFixedWidth(w);
     edit->move(qBound(0, widgetPos.x(), qMax(0, width() - w)),
@@ -1834,6 +2086,32 @@ void OverlayWidget::cycleBarAlpha() {
                                 {{"captureBarAlpha", static_cast<int>(next)}});
 }
 
+void OverlayWidget::applyAnnotationPrefs(const QJsonObject& data) {
+    // 容错优先:设置里可能是旧版本写的值、或手工改坏的值。这里**只取值、不抛错** ——
+    // 一个坏值不该让用户无法截图。档位不合法就退回当前值(而 core 的 validate
+    // 会把写入口挡住,所以真出现非法值说明是配置文件被手改过)。
+    const QString color = data.value("annotationColor").toString();
+    const QColor parsed(color);
+    if (parsed.isValid()) m_annoColor = parsed;
+
+    const int pen = data.value("annotationPenSize").toInt(m_penSize);
+    if (strokeSizes().contains(pen)) m_penSize = pen;
+
+    const int font = data.value("annotationFontSize").toInt(m_fontSize);
+    if (textFontSizes().contains(font)) m_fontSize = font;
+}
+
+void OverlayWidget::saveAnnotationPrefs() {
+    // 与 cycleBarAlpha 同一手法:单字段 save_settings(核心是深合并,
+    // 只传要改的键,不会把其余设置清零 —— 见 core 的 merge_settings)。
+    // ⚠️ 必须一次传**三个键**:颜色/粗细/字号的 UI 是三个互斥组,但语义上
+    //    总是一起变化(用户换笔色时粗细往往也刚调过),分开传会多写两次盘。
+    CoreBridge::instance().call("save_settings",
+                                {{"annotationColor", m_annoColor.name()},
+                                 {"annotationPenSize", m_penSize},
+                                 {"annotationFontSize", m_fontSize}});
+}
+
 QString OverlayWidget::barAlphaTip() const {
     if (m_barAlpha >= kBarAlphaSolid) return QStringLiteral("底板不透明(点按切换)");
     if (m_barAlpha <= kBarAlphaMinimal) return QStringLiteral("底板极简(尽量不挡原图)");
@@ -1855,10 +2133,16 @@ void OverlayWidget::drawSubbar(QPainter& painter) const {
     // ⚠️ 只画**底板**。条目(工具/颜色/粗细/字号/撤销重做)已换成共享控件
     //    AnnotationToolbar(§17.3 A),不再自绘 —— 自绘版的"绘制与命中测试各写
     //    一份"是反复错位的来源。控件本体带透明背景,底板由这里统一画,
-    //    视觉随主浮条(barAlpha 三档)。
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(0x26, 0x27, 0x2E, barAlpha()));
-    painter.drawRoundedRect(m_subbarRect, 8, 8);
+    //    视觉随主浮条(barAlpha 三档 + 主题 surface)。
+    //
+    // ⚠️ 底板颜色**必须与主浮条同源**:控件里的图标描边取的是 QPalette 的
+    //    ButtonText(见 tool_icons.cpp iconInkFor),即**跟随主题**;底板若还写死
+    //    深色,浅色主题下就是"浅底 + 深字"以外的错配 —— 深底配深图标,整条看不清。
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(QPen(ui::panelBorder(), 1));
+    painter.setBrush(ui::panelPlate(barAlpha()));
+    painter.drawRoundedRect(QRectF(m_subbarRect).adjusted(0.5, 0.5, -0.5, -0.5), 8, 8);
+    painter.setRenderHint(QPainter::Antialiasing, false);
 }
 
 void OverlayWidget::bakeSaveDialog(const QImage& image) {

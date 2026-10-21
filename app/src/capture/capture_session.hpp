@@ -19,6 +19,8 @@
 
 class QLineEdit;
 class QScreen;
+class QTimer;
+class QJsonObject;
 
 namespace nb {
 
@@ -107,8 +109,16 @@ public:
     void cycleBarAlpha();
     /// 当前档位的说明文案(按钮 ToolTip 用)。
     QString barAlphaTip() const;
-    /// 极简档下底板仅 70% 不透明 → 按钮文字需更高对比度,否则"透到看不清"。
+    /// 从已读到的设置对象里取标注偏好(颜色/粗细/字号)。
+    /// **由会话层在构造后立刻调用**(每块遮罩都要),故必须是 public。
+    void applyAnnotationPrefs(const QJsonObject& data);
+
+    /// 极简档下底板仅 70% 不透明 → 普通按钮文字需更高对比度,否则"透到看不清"。
+    /// **只影响"未激活"按钮的前景色**:语义色(完成/取消/激活)已由主题保证对比度。
     bool barNeedsContrastBoost() const { return m_barAlpha <= kBarAlphaMinimal; }
+
+    /// OCR 是否正在进行(验收断言"连点不会并发"用;也供宿主置灰按钮)。
+    bool ocrPending() const { return m_ocrPending; }
 
     /// 本遮罩所属屏幕(验收与调试用;会话层用不到,它自己持有 QScreen*)。
     QScreen* screen() const { return m_screen; }
@@ -205,6 +215,8 @@ protected:
     void mouseDoubleClickEvent(QMouseEvent* e) override;
     void keyPressEvent(QKeyEvent* e) override;
     void resizeEvent(QResizeEvent* e) override;
+    /// 鼠标离开窗口:清掉浮条按钮悬停态(否则高亮会"卡"在最后悬停的按钮上)。
+    void leaveEvent(QEvent* e) override;
     /// 文字工具的宿主内联输入框:Enter/失焦提交,Esc 取消。
     bool eventFilter(QObject* watched, QEvent* event) override;
 
@@ -255,6 +267,11 @@ private:
     /// Enter/双击/「完成」三条确认路径共用 —— 否则"Enter 确认"会把标注丢掉。
     void confirmSelection();
     bool toolbarContains(const QPoint& pos) const;   // mousePress 命中判定
+    /// 第 index 个按钮的矩形(局部逻辑坐标)。**绘制与命中测试共用这一份** ——
+    /// 各写一份算式是"点到的位置和看到的字对不上"的老来源。
+    QRect toolbarButtonRect(int index) const;
+    /// 按钮下标(命中不到返回 -1)。悬停高亮与点击分发共用。
+    int toolbarButtonAt(const QPoint& pos) const;
     void handleToolbarClick(const QPoint& pos);      // 分发按钮动作
     void drawToolbar(QPainter& painter) const;       // paintEvent 内绘制
 
@@ -353,15 +370,47 @@ private:
     QPointer<AnnotationToolbar> m_subbar;
     /// 控件命中:鼠标在共享控件上时,遮罩不得把它当成"选区外点击"去取消。
     bool subbarWidgetContains(const QPoint& pos) const;
+    // 标注偏好:初值与 core settings 的默认值一致(default_annotation_*),
+    // 真正生效的值在 startCaptureSession 里从设置覆盖(见 loadAnnotationPrefs)。
     int m_penSize = 4;                       // 二级条选中的粗细档位
     int m_fontSize = 36;                     // 二级条选中的字号
     EditorTool m_annoTool = EditorTool::Pen; // 当前标注工具
     QColor m_annoColor = QColor(0xE0, 0x31, 0x31);
     bool m_draggingStroke = false;           // 标注笔画拖拽中
+    /// 把当前标注偏好写回设置(与 cycleBarAlpha 同一口吻:改了即记,不点确定)。
+    /// 只在**用户主动改变**时调用(颜色/粗细/字号),不在读取时写。
+    void saveAnnotationPrefs();
+
 
     int m_barAlpha = kBarAlphaHalf;   // 浮条底板不透明度(默认半透;设置可覆盖)
     QRect m_toolbarRect;        // 当前浮条几何(缓存,翻转后更新)
-    QString m_ocrPending;       // 非空 = OCR 进行中(浮条按钮置灰语义)
+    /// 鼠标悬停的浮条按钮下标(-1 = 无)。只影响高亮,不参与命中判定。
+    int m_hoverButton = -1;
+    /// 悬停变化时只重绘浮条及其上方一条边(整屏重绘在 4K 上很吃帧)。
+    void setHoverButton(int index);
+
+    /// 悬停**停留**后才弹的按钮说明(见 cpp 里 kHoverTipDelayMs 的理由)。
+    /// 自绘浮条拿不到 QHelpEvent(QToolTip 事件),所以提示得自己起表。
+    QTimer* m_hoverTipTimer = nullptr;
+    int m_hoverTipShownFor = -1;   // 已经为哪个按钮弹过提示(避免重复弹)
+    /// 按钮的说明文案(含快捷键)。空串 = 该按钮无说明。
+    QString toolbarButtonTip(int index) const;
+    void scheduleHoverTip(int index);
+    void hideHoverTip();
+    /// OCR 正在识别(非空 = 进行中)。用途:**防重入** —— 识别是 0.4~5s 的异步任务,
+    /// 连点 N 次会并发起 N 个识别,每个完成还会各自 emit cancelled()
+    /// (表现为"点一次取字,截图会话被取消好几次")。同时用于按钮置灰。
+    bool m_ocrPending = false;
+    /// 弹出识别结果驻留面板(与编辑器共用 ui/ocr_result_panel)。
+    /// **必须用顶层窗口**:本方法调用后会话立即 cancelled → 遮罩销毁,
+    /// 子控件会跟着消失(见 ocr_result_panel.hpp 的说明)。
+    /// @param source 被识别的原图(选区图)。**当前只保存不渲染** ——
+    ///        留给后续"图中取字"(需要 core 返回逐行 bbox,见 ocr_result_panel.hpp)。
+    /// @param anchorGlobal 面板定位基准 = 选区在桌面上的全局矩形。
+    ///        由调用方在**点击那一刻**算好传进来,而不是在这里现算 ——
+    ///        回调发生在识别完成后,那时遮罩可能已在关闭链路上,窗口几何不再可靠。
+    void showOcrResultPanel(const QString& text, const QString& reason,
+                            const QImage& source, const QRect& anchorGlobal);
 };
 
 } // namespace nb

@@ -1,5 +1,7 @@
 #include "editor/annotation_toolbar.hpp"
 
+#include "ui_theme.hpp"
+
 #include <QAction>
 #include <QActionGroup>
 #include <QHBoxLayout>
@@ -19,7 +21,9 @@ QIcon swatchIcon(const QColor& color) {
     QPainter painter(&pixmap);
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setBrush(color);
-    painter.setPen(QPen(QColor(0x33, 0x35, 0x3D), 1));
+    // 色块描边跟随主题:深色主题描深灰、浅色主题描浅灰(写死深灰时,浅色主题下
+    // 每块色卡都像被黑框框住,整行显得很脏)。
+    painter.setPen(QPen(ui::themeTokens().borderStrong, 1));
     painter.drawRoundedRect(QRectF(0.5, 0.5, 13, 13), 3, 3);
     painter.end();
     return QIcon(pixmap);
@@ -39,6 +43,12 @@ AnnotationToolbar::AnnotationToolbar(QWidget* parent) : QWidget(parent) {
         bar->setIconSize(QSize(kIconPx, kIconPx));
         // 只显图标:文字进 ToolTip —— 这是"编辑页文字太多"的直接解法
         bar->setToolButtonStyle(Qt::ToolButtonIconOnly);
+        // ⚠️ QToolBar 会**自己画底板**(PE_PanelToolBar,取 QPalette::Window)。两个宿主
+        //    都要求"底板由外层画":遮罩浮条由 OverlayWidget::drawSubbar 画面板(主题
+        //    surface + 用户档位 alpha),编辑器由窗口背景承担。不置透明的话:
+        //      - 浮条上会多出一层不透明条,用户调"透明档"看不出变化;
+        //      - 浅色主题下这层浅色板压在半透浮条上,底板描边与档位全部失效。
+        bar->setStyleSheet(QStringLiteral("QToolBar{background:transparent;border:none;}"));
     }
 
     // 参数行 = 「粗细/字号/撤销重做(左)」+「宿主动作按钮(右)」。

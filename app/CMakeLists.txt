@@ -50,6 +50,7 @@ add_executable(nextboard WIN32
     src/panel/qml_bootstrap.cpp
     src/panel/core_facade.cpp
     src/panel/clip_entry_model.cpp
+    src/ui/ocr_result_panel.cpp
     src/capture/capture_session.cpp
     src/capture/overlay_geometry.cpp
     src/capture/stitch_hud.cpp
