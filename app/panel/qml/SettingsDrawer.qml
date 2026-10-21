@@ -415,6 +415,14 @@ AppDrawer {
         const stitchR = (s.stitchOverlapRatio === undefined || s.stitchOverlapRatio === null)
                         ? 3 : s.stitchOverlapRatio
         stitchOverlap.value = stitchR
+        // v2 新增:采样间隔(默认 150ms)与字节预算(默认 128MB)。
+        // 兜底值必须与 settings.rs 的默认一致,否则"显示与行为分叉"。
+        const stitchMs = (s.stitchSampleIntervalMs === undefined
+                          || s.stitchSampleIntervalMs === null) ? 150 : s.stitchSampleIntervalMs
+        stitchSampleMs.value = stitchMs
+        const stitchBytes = (s.stitchMaxBytes === undefined || s.stitchMaxBytes === null)
+                            ? 134217728 : s.stitchMaxBytes
+        stitchMaxBytesMb.value = Math.round(stitchBytes / (1024 * 1024))
         // 0 = 不自动取消,必须原样保留;缺失时按 core 默认 60 秒
         // ⚠️ 兜底值必须与 settings.rs / capture_session.cpp 一致(都取 60):
         //    这里原先写 600,get_settings 失败时显示"10 分钟"而实际行为是 60s ——
@@ -517,6 +525,8 @@ AppDrawer {
         s.captureDelaySecs = captureDelay.value
         s.stitchMaxHeight = stitchMaxHeight.value
         s.stitchOverlapRatio = stitchOverlap.value
+        s.stitchSampleIntervalMs = stitchSampleMs.value
+        s.stitchMaxBytes = stitchMaxBytesMb.value * 1024 * 1024
         s.overlayIdleSecs = overlayIdle.value * 60
         s.theme = ["system", "light", "dark"][themeCombo.currentIndex]
         s.softwareRender = softwareRenderCheck.checked
@@ -866,6 +876,32 @@ AppDrawer {
                 HintLabel {
                     text: "门槛越低,越容易把重复图案(表格线/纯色块)误认为已重叠 —— 长图会缺行;"
                           + "越高则要求每次滚动幅度更小。默认 3。"
+                }
+
+                Label { text: "长截图采样间隔(ms)"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
+                ReadableSpinBox {
+                    id: stitchSampleMs
+                    Layout.fillWidth: true
+                    from: 80; to: 1000; stepSize: 10
+                    editable: true
+                    onValueModified: root.scheduleSave()
+                }
+                HintLabel {
+                    text: "两次采样之间的间隔。越小越跟手,但快速滚动时相邻画面重叠更少、"
+                          + "漏行风险更高;越大越省 CPU。默认 150。"
+                }
+
+                Label { text: "长截图内存预算(MB)"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
+                ReadableSpinBox {
+                    id: stitchMaxBytesMb
+                    Layout.fillWidth: true
+                    from: 16; to: 1024; stepSize: 16
+                    editable: true
+                    onValueModified: root.scheduleSave()
+                }
+                HintLabel {
+                    text: "拼接结果的内存上限,与上面的高度上限**取更严的那个**。"
+                          + "宽选区(如 4K 全屏)会被它先卡住 —— 只按像素限高会让内存先爆。默认 128。"
                 }
 
                 Label { text: "主题"; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }

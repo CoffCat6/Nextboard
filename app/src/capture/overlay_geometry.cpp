@@ -48,31 +48,91 @@ QRect subbarRectFor(const QRect& toolbarRect, const QSize& barSize, int gap,
     return QRect(x, y, w, h);
 }
 
-QRect stitchPanelRectFor(const QRect& selectionLogical, const QSize& widgetSize,
-                         const QSize& panelSize, int margin) {
+QList<QRect> stitchPanelCandidates(const QRect& selectionLogical, const QSize& widgetSize,
+                                   const QSize& panelSize, int margin) {
     const QRect sel = selectionLogical.normalized();
     const int w = panelSize.width();
     const int h = panelSize.height();
-    // 首选:贴选区右下角(下方)
-    int x = sel.right() - w + 1;
-    int y = sel.bottom() + margin;
-    if (y + h > widgetSize.height() - 4) y = sel.top() - margin - h;   // 翻到上方
-    if (y < 4) y = sel.bottom() - h - margin;                          // 压进选区底部内侧
-    y = qBound(4, y, qMax(4, widgetSize.height() - h - 4));
-    x = qBound(4, x, qMax(4, widgetSize.width() - w - 4));
+    const int maxX = qMax(4, widgetSize.width() - w - 4);
+    const int maxY = qMax(4, widgetSize.height() - h - 4);
+    // 横向对齐:默认贴选区右边(鼠标滚到底时就在那一侧),但必须夹进窗口
+    const auto alignRight = [&] { return qBound(4, sel.right() - w + 1, maxX); };
+    const auto alignLeft = [&] { return qBound(4, sel.left(), maxX); };
+    const auto center = [&] { return qBound(4, sel.center().x() - w / 2, maxX); };
+
+    QList<QRect> out;
+    const auto push = [&out, w, h](int x, int y) {
+        const QRect r(x, y, w, h);
+        if (!out.contains(r)) out.append(r);
+    };
+
+    // ① 选区下方(最不碍事:注意力在选区内容与滚动条上,下方通常是空白)
+    push(alignRight(), sel.bottom() + margin);
+    push(center(), sel.bottom() + margin);
+    // ② 选区上方(下方放不下时)
+    push(alignRight(), sel.top() - margin - h);
+    push(center(), sel.top() - margin - h);
+    // ③ 选区左右两侧(整屏选区时上下都没有空间,只剩左右)
+    push(sel.right() + margin, qBound(4, sel.top(), maxY));
+    push(sel.left() - margin - w, qBound(4, sel.top(), maxY));
+    push(sel.right() + margin, qBound(4, sel.bottom() - h + 1, maxY));
+    push(sel.left() - margin - w, qBound(4, sel.bottom() - h + 1, maxY));
+    // ④ 四个角外侧
+    push(widgetSize.width() - w - 4, 4);
+    push(4, widgetSize.height() - h - 4);
+
+    // 统一夹进窗口后**剔除与选区相交者** —— 这是本函数的全部意义所在
+    QList<QRect> fits;
+    for (const QRect& raw : out) {
+        QRect r(raw);
+        r.moveLeft(qBound(4, r.left(), maxX));
+        r.moveTop(qBound(4, r.top(), maxY));
+        if (stitchPanelFitsOutside(r, sel) && !fits.contains(r)) fits.append(r);
+    }
+    return fits;
+}
+
+bool stitchPanelFitsOutside(const QRect& panelRect, const QRect& selectionLogical) {
+    return !panelRect.intersects(selectionLogical.normalized());
+}
+
+QRect stitchPanelRectFor(const QRect& selectionLogical, const QSize& widgetSize,
+                         const QSize& panelSize, int margin) {
+    const QRect sel = selectionLogical.normalized();
+    const QList<QRect> fits = stitchPanelCandidates(sel, widgetSize, panelSize, margin);
+    if (!fits.isEmpty()) return fits.first();
+    // 无处可放:退到选区右下角外侧并夹进窗口。调用方必须用
+    // stitchPanelFitsOutside() 判出这种局面并走"浮窗不进画面"的降级路径
+    // (docs/19 v2 §3.2)。这里**不**再像旧实现那样压进选区内侧 ——
+    // 那块区域画不出来也点不到,等于面板凭空消失。
+    const int w = panelSize.width();
+    const int h = panelSize.height();
+    const int x = qBound(4, sel.right() - w + 1, qMax(4, widgetSize.width() - w - 4));
+    const int y = qBound(4, sel.bottom() + margin, qMax(4, widgetSize.height() - h - 4));
     return QRect(x, y, w, h);
 }
 
-QRect stitchProgressRectFor(const QRect& selectionLogical, const QSize& widgetSize,
-                            int height) {
+QList<QRect> stitchFrameRects(const QRect& selectionLogical, const QSize& widgetSize,
+                              int thickness) {
     const QRect sel = selectionLogical.normalized();
-    const int w = qMin(sel.width(), qMax(0, widgetSize.width() - 8));
-    const int h = qMax(0, height);
-    int x = sel.center().x() - w / 2;
-    int y = sel.bottom() - h + 1;
-    y = qBound(4, y, qMax(4, widgetSize.height() - h - 4));
-    x = qBound(4, x, qMax(4, widgetSize.width() - w - 4));
-    return QRect(x, y, w, h);
+    const int t = qMax(1, thickness);
+    QList<QRect> out;
+    const int maxX = widgetSize.width() - 1;
+    const int maxY = widgetSize.height() - 1;
+    // 上边:选区上方 t 像素,横向覆盖选区宽度
+    const int topY = sel.top() - t;
+    out.append(topY >= 0 ? QRect(sel.left(), topY, sel.width(), t) : QRect());
+    // 下边
+    const int bottomY = sel.bottom() + 1;
+    out.append(bottomY + t <= maxY ? QRect(sel.left(), bottomY, sel.width(), t) : QRect());
+    // 左边:纵向覆盖选区高度(含上下两条描边的角,避免出现缺口)
+    const int leftX = sel.left() - t;
+    out.append(leftX >= 0 ? QRect(leftX, sel.top() - t, t, sel.height() + 2 * t) : QRect());
+    // 右边
+    const int rightX = sel.right() + 1;
+    out.append(rightX + t <= maxX ? QRect(rightX, sel.top() - t, t, sel.height() + 2 * t)
+                                  : QRect());
+    return out;
 }
 
 } // namespace nb::overlay

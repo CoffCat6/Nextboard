@@ -826,6 +826,11 @@ void runStitchSettingsFlow() {
     check(before.value("stitchMaxHeight").toInt() == 30000,
           "默认上限 = 30000px(docs/19 §9 Q4)");
     check(before.value("stitchOverlapRatio").toInt() == 3, "默认重叠门槛 = 3%");
+    // v2 新增两项:采样间隔与字节预算。默认值必须与 settings.rs 一致。
+    check(before.value("stitchSampleIntervalMs").toInt() == 150,
+          "默认采样间隔 = 150ms(v2 从 500ms 收紧,直抓选区后单帧更便宜)");
+    check(before.value("stitchMaxBytes").toLongLong() == 128LL * 1024 * 1024,
+          "默认字节预算 = 128MB(v2:只按像素限高会让内存先爆)");
     check(beforeHotkeys.value("captureScrolling").toString() == QStringLiteral("Ctrl+Shift+L"),
           "默认热键 = Ctrl+Shift+L(Q3 要求预置)");
 
@@ -833,6 +838,8 @@ void runStitchSettingsFlow() {
     const bool saved = core.call("save_settings", QVariantMap{
         {"stitchMaxHeight", 45000},
         {"stitchOverlapRatio", 7},
+        {"stitchSampleIntervalMs", 220},
+        {"stitchMaxBytes", 64LL * 1024 * 1024},
         {"hotkeys", QVariantMap{{"captureScrolling", QStringLiteral("Ctrl+Shift+U")}}},
     }).value("ok").toBool();
     const QVariantMap after = core.call("get_settings").value("data").toMap();
@@ -844,6 +851,9 @@ void runStitchSettingsFlow() {
     check(saved, "save_settings 成功");
     check(after.value("stitchMaxHeight").toInt() == 45000, "上限读回 45000");
     check(after.value("stitchOverlapRatio").toInt() == 7, "门槛读回 7");
+    check(after.value("stitchSampleIntervalMs").toInt() == 220, "采样间隔读回 220ms");
+    check(after.value("stitchMaxBytes").toLongLong() == 64LL * 1024 * 1024,
+          "字节预算读回 64MB");
     check(afterHotkeys.value("captureScrolling").toString() == QStringLiteral("Ctrl+Shift+U"),
           "热键读回 Ctrl+Shift+U");
     // 合并不能把同级其余快捷键清零
@@ -860,6 +870,13 @@ void runStitchSettingsFlow() {
             << "reject ratio:" << !badRatio;
     check(!badHigh, "上限 999999 被拒绝(超出 2k~100k)");
     check(!badRatio, "门槛 99% 被拒绝(超出 1~20)");
+    const bool badMs = core.call("save_settings",
+                                 QVariantMap{{"stitchSampleIntervalMs", 5}}).value("ok").toBool();
+    const bool badBytes = core.call("save_settings",
+                                    QVariantMap{{"stitchMaxBytes", 8}}).value("ok").toBool();
+    qInfo() << "STITCH-SETTINGS STEP2b reject ms:" << !badMs << "reject bytes:" << !badBytes;
+    check(!badMs, "采样间隔 5ms 被拒绝(低于 80ms 会挤满 CPU)");
+    check(!badBytes, "字节预算 8 字节被拒绝(低于 16MB)且 0 才表示不限制");
     // 被拒后原值必须保持不变(不能出现"半个设置写进去了")
     const QVariantMap afterBad = core.call("get_settings").value("data").toMap();
     check(afterBad.value("stitchMaxHeight").toInt() == 45000, "被拒后上限保持 45000");
@@ -868,6 +885,8 @@ void runStitchSettingsFlow() {
     core.call("save_settings", QVariantMap{
         {"stitchMaxHeight", before.value("stitchMaxHeight").toInt()},
         {"stitchOverlapRatio", before.value("stitchOverlapRatio").toInt()},
+        {"stitchSampleIntervalMs", before.value("stitchSampleIntervalMs").toInt()},
+        {"stitchMaxBytes", before.value("stitchMaxBytes").toLongLong()},
         {"hotkeys", QVariantMap{{"captureScrolling",
                                  beforeHotkeys.value("captureScrolling").toString()}}},
     });

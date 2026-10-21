@@ -10,6 +10,7 @@
 // 杜绝"画在一处、点在另一处"。
 #pragma once
 
+#include <QList>
 #include <QPoint>
 #include <QPointF>
 #include <QRect>
@@ -64,27 +65,45 @@ constexpr int kStitchButtons = 2;
 constexpr int kStitchButtonWidth = 96;
 constexpr int kStitchPanelWidth = kStitchButtons * kStitchButtonWidth;
 constexpr int kStitchPanelHeight = 44;
-/// 采集中选区底部的进度条高度(独立于面板)。
-constexpr int kStitchProgressHeight = 22;
-/// 长截图的采集节拍(毫秒)。
+/// 采集节拍的**默认**值(毫秒)。实际值取设置项 stitchSampleIntervalMs。
 ///
-/// 500ms 是"整屏捕获 + 裁剪 + 指纹比对"(4K 上 ~10–20ms)与"用户滚动手感"的折中:
-/// - 太快(100ms):4K 上恒定吃 10~20% CPU,而用户滚动的加速度远没这么细;
-/// - 太慢(1500ms):快速滚动时相邻两帧重叠不足 → 核心判 no-overlap → 长图缺行。
-/// 重复帧由核心按 `duplicate` 丢弃(不占内存),故"定频采样"不会因为手停而膨胀。
-constexpr int kStitchSampleIntervalMs = 500;
+/// v2 从 500ms 收到 150ms:采集从"整屏捕获 + 裁剪"改成"直抓选区"后单帧成本
+/// 降到约 1/8,收紧节拍既更跟手,也让快速滚动时相邻帧重叠更充分(缺行更少)。
+/// 重复帧由核心按 duplicate 丢弃(不占内存),故"定频采样"不会因为手停而膨胀。
+constexpr int kStitchSampleIntervalMs = 150;
+/// 节拍的合法范围(与核心 settings 的 MIN/MAX_STITCH_SAMPLE_MS 同口径)。
+constexpr int kStitchSampleMinMs = 80;
+constexpr int kStitchSampleMaxMs = 1000;
 
-/// 长截图面板矩形(局部逻辑坐标)。
+/// 长截图控制面板矩形(局部逻辑坐标)。
 ///
-/// 首选摆在选区**右下角下方** —— 长截图时注意力在选区内容与滚动条上,
-/// 面板压在选区外的空白处最不碍事;右下角离"滚到底"的鼠标位置也近。
-/// 放不下时依次退让:翻到选区上方 → 压进选区底部内侧 → 夹进窗口。
+/// ## 硬约束:绝不能与选区相交(docs/19 v2 §3.2)
+///
+/// 旧实现在"上下都放不下"时会**压进选区底部内侧** —— 而选区正是被挖掉的采集窗口:
+/// 那块区域不属于本窗口(画不出来)、鼠标事件直达下层(点不到)。于是整屏选区下
+/// 用户看到的是"面板消失",点「开始」的点击被下层页面吃掉,采集根本不会启动。
+///
+/// 新约束:**面板与选区零相交**。退让顺序:下方 → 上方 → 左右两侧 → 最后夹进窗口
+/// 并**继续避开选区**(宁可压住选区外的边缘内容,也不进采集区)。
+/// 若窗口内确实无处可放(选区占满整窗且面板比剩余空白大),返回的矩形可能与选区
+/// 相交 —— 调用方必须用 stitchPanelFitsOutside() 判一次并走降级路径。
 QRect stitchPanelRectFor(const QRect& selectionLogical, const QSize& widgetSize,
                          const QSize& panelSize, int margin);
 
-/// 采集中进度条矩形:贴选区**底边内侧**,宽度 = 选区宽度(夹进窗口)。
-/// 选底边是因为"已拼接高度"与选区往下长的方向一致,视线不必来回跳。
-QRect stitchProgressRectFor(const QRect& selectionLogical, const QSize& widgetSize,
-                            int height);
+/// 面板是否完全落在选区之外(即"画得出来、点得到")。
+/// 与 stitchPanelRectFor 配套:false 时调用方必须换形态(见 stitchPanelRectFor 注释)。
+bool stitchPanelFitsOutside(const QRect& panelRect, const QRect& selectionLogical);
+
+/// **候选**面板位置(按优先级排序,已剔除与选区相交者)。
+///
+/// 为什么给一串而不是一个:选区可能贴满某几条边,第一个位置放不下时调用方还要
+/// 依次试后面的。返回空表 = 窗口内没有任何位置能放下(只能让面板浮在选区内,
+/// 此时依赖"浮窗不进画面"的机制,见 docs/19 v2 §3.2 第 2/3 道保险)。
+QList<QRect> stitchPanelCandidates(const QRect& selectionLogical, const QSize& widgetSize,
+                                   const QSize& panelSize, int margin);
+
+/// 采集期"描边"四条边(局部逻辑坐标):只在选区**外侧**画 2px,故天然不进入抓取区域。
+/// 返回的顺序固定为 上/下/左/右,空矩形表示该边在屏外(或选区贴边)无需描边。
+QList<QRect> stitchFrameRects(const QRect& selectionLogical, const QSize& widgetSize, int thickness);
 
 } // namespace nb::overlay

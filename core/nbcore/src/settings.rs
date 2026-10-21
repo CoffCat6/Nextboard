@@ -14,6 +14,13 @@ const CONFIG_FILE: &str = "app_config.json";
 /// 待迁移标记：位于默认数据目录，内容为迁移源目录（Phase 4）。
 const DATA_MOVE_MARKER: &str = "data-move-pending.txt";
 
+/// 长截图采样间隔的合法范围(毫秒)。
+///
+/// 下限 80:4K 上一次选区捕获本身要 10~20ms,再密就挤满 CPU;
+/// 上限 1000:再慢快速滚动时相邻帧重叠不足,长图会缺行。
+pub const MIN_STITCH_SAMPLE_MS: i64 = 80;
+pub const MAX_STITCH_SAMPLE_MS: i64 = 1000;
+
 /// 配置加载警告(进程级,只增不减直到被取走)。
 ///
 /// 动机:配置损坏/缺键时 `load()` 会整体回退默认值——**所有设置一起丢**
@@ -144,6 +151,22 @@ pub struct Settings {
     /// 过高则对"一行动态内容(时间戳/光标)"过于敏感。3% 配合 12 行的绝对下限
     /// (见 stitch::MIN_OVERLAP_ROWS)覆盖 200~4000 行的常见选区高度。
     pub stitch_overlap_ratio: i64,
+    /// 滚动长截图的**字节预算**(字节,默认 128MB)。
+    ///
+    /// 为什么要有它(docs/19 v2 §4.2):只按像素限高是不够的 —— 1200 宽 × 30000 高
+    /// 的 RGBA 就是 144MB,像素数没超、内存先炸。有效上限 = min(像素上限,
+    /// 字节预算 / 每行字节),字节预算更小时以它为准。
+    ///
+    /// 取值 16MB~1GB(stitch::MIN_MAX_BYTES / MAX_MAX_BYTES);0 = 不限制。
+    pub stitch_max_bytes: i64,
+    /// 长截图的**采样间隔**(毫秒,默认 150)。
+    ///
+    /// 旧实现是 500ms:一是每帧要整屏捕获 + 裁剪(4K 上 60MB 级拷贝),二是当时
+    /// 没有"只抓选区"的通道。v2 改为直抓选区后单帧成本降到 1/8,间隔也就能收到
+    /// 150ms —— 更跟手,且快速滚动时相邻帧重叠更充分(缺行更少)。
+    ///
+    /// 取值 80~1000ms。
+    pub stitch_sample_interval_ms: i64,
     /// 截图遮罩的**空闲超时**秒数（默认 60 秒；0 = 不自动取消）。
     ///
     /// 动机（内存）：框选遮罩持有该屏的整屏冻结底图（4K 约 33MB），会话期常驻。
@@ -478,6 +501,10 @@ impl Default for Settings {
             // 30000px 已能覆盖"长网页/长聊天记录",再高会让 PNG 撞 max_image_mb。
             stitch_max_height: 30_000,
             stitch_overlap_ratio: 3,
+            // 128MB:1200 宽约合 26000 行,与 30000px 的像素上限基本同量级,
+            // 但 4K 宽选区会被它先钳住 —— 那正是它存在的意义。
+            stitch_max_bytes: 128 * 1024 * 1024,
+            stitch_sample_interval_ms: 150,
             // 实测遮罩会话常驻 +77.5MB(3 屏:冻结底图 + 全屏窗口 backing store + 合成缓冲),
             // 而"误触截图热键后走开"是常见场景。10 分钟太长 —— 60s 足够完成框选,
             // 超时自动取消(与手动 Esc 同语义)即回收。0 = 不自动取消仍受支持。
@@ -554,6 +581,30 @@ impl Settings {
             return Err(AppError::InvalidInput(
                 "长截图重叠门槛须在 1 ~ 20 之间(百分比)".into(),
             ));
+        }
+        // 字节预算(docs/19 v2 §4.2):0 = 不限制;否则须在 16MB~1GB。
+        // 有下限是因为"预算比一屏还小"没有意义(核心会按至少容纳一帧处理),
+        // 有上限是因为再高必然先撞 max_image_mb(入库那张 PNG 的限额)。
+        if self.stitch_max_bytes != 0
+            && !(crate::stitch::MIN_MAX_BYTES..=crate::stitch::MAX_MAX_BYTES)
+                .contains(&self.stitch_max_bytes)
+        {
+            return Err(AppError::InvalidInput(format!(
+                "长截图字节预算须为 0(不限制)或 {} ~ {} 字节",
+                crate::stitch::MIN_MAX_BYTES,
+                crate::stitch::MAX_MAX_BYTES
+            )));
+        }
+        // 采样间隔 80~1000ms:低于 80ms 单帧捕获本身就要 10~20ms(4K),
+        // 节拍会挤满 CPU;高于 1000ms 快速滚动时相邻帧重叠不足,长图缺行。
+        if !(crate::settings::MIN_STITCH_SAMPLE_MS..=crate::settings::MAX_STITCH_SAMPLE_MS)
+            .contains(&self.stitch_sample_interval_ms)
+        {
+            return Err(AppError::InvalidInput(format!(
+                "长截图采样间隔须在 {} ~ {} ms 之间",
+                crate::settings::MIN_STITCH_SAMPLE_MS,
+                crate::settings::MAX_STITCH_SAMPLE_MS
+            )));
         }
         // 快捷键：**允许留空**（空 = 不绑定该动作，用户可只绑自己需要的几个）；
         // 非空项仍需合法，且两两不重复（相同组合键不能绑定多个动作）。

@@ -14,6 +14,7 @@
 
 #include <functional>
 
+#include "capture/stitch_hud.hpp"
 #include "editor/annotation_engine.hpp"
 
 class QLineEdit;
@@ -115,7 +116,7 @@ public:
     /// 长截图的进度更新(总高/缺口/结论)。**由会话层回调** ——
     /// 采集与拼接在会话层(它才持有屏与核心句柄),遮罩只负责显示。
     /// 之所以放 public 而非 private:会话层的 lambda 不是本类的成员。
-    void updateStitchProgress(int totalHeight, int gaps, const QString& reason);
+    void updateStitchProgress(int totalHeight, int gaps, int bands, const QString& reason);
 
     /// 标记"上一拍已返回",允许节拍器投下一帧。
     ///
@@ -127,6 +128,40 @@ public:
     bool stitching() const { return m_stitch != StitchState::Off; }
     bool stitchCapturing() const { return m_stitch == StitchState::Capturing; }
 
+    /// 采集选区在**本屏内的设备像素矩形**(相对屏左上角)。
+    /// 进入采集时固化,采集期只读 —— 这是长截图唯一的坐标真值。
+    QRect stitchRegionDevice() const { return m_stitchRegionDevice; }
+
+    /// 采集期是否已隐藏遮罩(遮罩不可见时它不能画自己的面板)。
+    bool stitchOverlayHidden() const { return m_stitchOverlayHidden; }
+
+    /// 会话层在合成成功后回调本遮罩,转发 stitchFinished(信号必须由本类发出)。
+    ///
+    /// 为什么需要这个 public 转发:合成发生在会话层的 lambda 里(它持有核心句柄),
+    /// 而 emit 只能在本类作用域内做。验收(--stitch-live-flow)靠这条信号拿到
+    /// 最终长图并断言"高度 > 选区高度",否则只能从日志肉眼核对。
+    void reportStitchFinished(const QImage& composed) { emit stitchFinished(composed); }
+
+    /// 采集期由 HUD 的「结束」走**同一条**收尾路径(验收用同一入口,不另造捷径)。
+    void requestStitchFinishForTest() {
+        if (m_stitch == StitchState::Capturing) toggleStitchCapture();
+    }
+
+    /// 采集期隐藏/恢复本遮罩。
+    ///
+    /// ## 为什么要整块藏起来(docs/19 v2 §3.1)
+    ///
+    /// 旧实现在遮罩上"挖洞"(SetWindowRgn 把选区从窗口区域里去掉),既能看见页面
+    /// 又能点面板 —— 但那条路有两个死结:
+    /// - 窗口区域是**设备像素**,而 m_selection 是 Qt **逻辑像素**;150% 屏上洞会
+    ///   按 1:1 挖出来,选区实际被盖住一部分 → 每帧采到的都是遮罩上的静止画面
+    ///   → 核心判 duplicate → 长图只有一屏高(真机实测现象);
+    /// - 选区 = 整屏时"整窗减选区"是空区域 → 遮罩整块消失,面板也一起消失。
+    ///
+    /// v2 改法:采集期**整个遮罩隐藏**,页面完全可见可交互;选区描边与「结束/取消」
+    /// 面板由会话层的独立浮窗承担(见 capture_session.cpp 的 StitchHud)。
+    void setStitchOverlayHidden(bool hidden);
+
 signals:
     /// 选区确认:**本屏物理像素**坐标,相对该屏左上角(直接供 nb_capture_crop)。
     void regionConfirmed(const QRect& physicalRect);
@@ -137,11 +172,13 @@ signals:
     /// 用户在本遮罩上有鼠标/键盘动作 —— 会话据此重置空闲超时(S6.1)。
     void activity();
 
-    /// 长截图:请求采集一帧(由会话层在内容变化时投递,宿主侧据此调核心拼接)。
+    /// 长截图:请求采集一帧。
     ///
-    /// 参数是**本屏物理像素**的选区矩形,相对该屏左上角 —— 与 regionConfirmed 同口径。
-    /// 宿主收到后重新捕获该屏并裁这个矩形(不能用 m_frozen:那是框选时的静止画面)。
-    void stitchFrameRequested(const QRect& physicalRect);
+    /// ⚠️ v2 起**不再带矩形参数**:选区在进入采集时已固化成
+    /// (屏, 设备像素矩形) 并交给核心 begin;每帧都用同一份,不允许中途重算
+    /// (重算就是混合 DPI 下"采到别处"的来源)。参数留空是为了让信号签名保持
+    /// 简单可读:接收方从 stitchRegionDevice() 取。
+    void stitchFrameRequested();
     /// 长截图:用户点了「结束」,请求会话层收尾(核心 finish → 入库 → 剪贴板)。
     /// 与 stitchFrameRequested 分开:**这件事只发生一次**,不复用帧通道。
     void stitchFinishRequested();
@@ -160,7 +197,6 @@ protected:
     void mouseReleaseEvent(QMouseEvent* e) override;
     void mouseDoubleClickEvent(QMouseEvent* e) override;
     void keyPressEvent(QKeyEvent* e) override;
-    /// 窗口尺寸变化时重算长截图的挖洞区域(见 refreshStitchHole)。
     void resizeEvent(QResizeEvent* e) override;
     /// 文字工具的宿主内联输入框:Enter/失焦提交,Esc 取消。
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -231,39 +267,15 @@ private:
     bool stitchPanelContains(const QPoint& pos) const;
     void handleStitchPanelClick(const QPoint& pos);
     void drawStitchPanel(QPainter& painter) const;
+    /// 面板「取消」:丢会话 + 退出长截图态(选区保留)。
+    void abortStitchFromPanel();
 
     /// 采集中宿主投递的一帧(物理像素,相对本屏)。宿主不采集时不调用。
     QRect stitchCaptureRect() const;
 
 
 
-    /// 长截图采集时的"挖洞":把选区**设为鼠标穿透**,让滚轮/点击直达底下的真实窗口。
-    ///
-    /// ## 为什么必须挖洞 —— 这是长截图能否成立的前提
-    ///
-    /// 遮罩是铺满整屏的置顶窗口,它会**吞掉所有鼠标事件**。用户在选区上滚动时,
-    /// 滚轮被遮罩接收,底下的浏览器/记事本根本不动 —— 页面不滚,采到的每一帧
-    /// 都是同一张图,长截图等于不工作(docs/19 §7 R2)。
-    ///
-    /// ## 三种方案的取舍
-    ///
-    /// | 方案 | 效果 | 问题 |
-    /// | --- | --- | --- |
-    /// | ① 转发滚轮(SendInput 给下层) | 能滚 | 用户看不到结果 —— 遮罩上仍是冻结画面,等于**盲滚**;且要猜目标窗口 |
-    /// | ② 整个遮罩 WA_TransparentForMouseEvents | 能滚 | 连「结束」按钮都点不到,无法收尾 |
-    /// | ③ **选区挖洞**(本方案) | 能滚且**看得见** | 需要按选区实时更新窗口区域 |
-    ///
-    /// 实现走 ③:用 `SetWindowRgn` 把窗口区域设成"整屏减去选区"?不行 ——
-    /// 那样选区外的遮罩也没了。正确做法反过来:采集期间把**选区那块**从窗口区域
-    /// 里挖掉,再把遮罩的鼠标穿透打开;**同时**用一个独立的小窗口显示"冻结的选区
-    /// 首帧"作为视觉参照,它本身也穿透。
-    ///
-    /// 简化实现(实际采用):采集期间只把选区**挖掉窗口区域**(下层真实窗口因此
-    /// 可见、可交互),遮罩其余部分保持。用户看到的是**真实的页面**,滚动即时可见。
-    /// 面板与进度条在挖洞**之外**,仍然可点。
-    void applyStitchHole(bool enable);
-    /// 按当前选区重算挖洞(选区在长截图态是锁定的,故只在进入/退出时调用)。
-    void refreshStitchHole();
+
 
     /// 采集节拍:定时截一帧并交给会话层拼接(docs/19 §3.3 I4)。
     ///
@@ -279,13 +291,19 @@ private:
 
     enum class StitchState { Off, Ready, Capturing };
     StitchState m_stitch = StitchState::Off;
-    QRect m_stitchPanelRect;      // 缓存(翻转/夹屏后)
-    QString m_stitchNotice;       // 面板下方的一行状态文案(空 = 不显示)
+    QRect m_stitchPanelRect;      // 就绪态面板缓存(翻转/夹屏后)
+    QString m_stitchNotice;       // 面板上的一行状态文案(空 = 不显示)
     /// 框完直接进长截图就绪态(CaptureIntent::Scrolling)。见构造函数注释。
     bool m_autoStartStitching = false;
-    int m_stitchTotalHeight = 0;  // 已拼接总高(物理像素;文案按 dpr 折算显示)
+    int m_stitchTotalHeight = 0;  // 已拼接总高(设备像素)
     int m_stitchGaps = 0;         // 累计缺口数(供宿主提示"有内容漏掉")
-    bool m_stitchHoleApplied = false;  // 采集期间窗口区域已挖洞(退出时必须还原)
+    int m_stitchBands = 0;        // 已插入产物的警示条数
+    /// 采集期固化的选区(本屏设备像素,相对屏左上角)。采集期只读。
+    QRect m_stitchRegionDevice;
+    /// 采集期遮罩是否已隐藏(隐藏后自己不画面板,面板由 HUD 承担)。
+    bool m_stitchOverlayHidden = false;
+    /// 采集期 UI(选区描边 + 结束/取消面板)。采集结束/取消时销毁。
+    QPointer<StitchHud> m_stitchHud;
     /// 采集节拍定时器(只在 Capturing 态运行)。
     QTimer* m_stitchTimer = nullptr;
     /// 上一拍是否还在采集(防止定时器在合成中又投一帧)。

@@ -354,108 +354,79 @@ void runCaptureToolbarFlow() {
                     qInfo() << "CAPTURE-TOOLBAR  stitch snapshot ->" << snapPath;
                 }
 
-                // ---- 挖洞是否真的生效(docs/19 §7 R2 的核心)----
+                // ---- v2:采集期遮罩整体隐藏 + 面板不进选区(docs/19 v2 §3.1/§3.2)----
                 //
-                // 这是"长截图能不能用"的前提:遮罩不挖洞就会吞掉滚轮,页面不滚,
-                // 每一帧都是同一张图。这里直接问系统拿窗口区域,验证
-                // ① 选区中心点在区域**之外**(洞真的挖掉了)
-                // ② 选区外的一个点在区域**之内**(遮罩还在,按钮仍可点)
+                // v1 在这里验的是"窗口区域挖洞"(GetWindowRgn / WindowFromPoint)。
+                // v2 把那条整个删掉了,原因是两个死结:
+                //  ① 窗口区域吃**设备像素**、选区是 Qt **逻辑像素**,150% 屏上洞按
+                //     1:1 挖小 → 选区被遮罩盖住一部分 → 每帧都是静止画面 → 核心判
+                //     duplicate → 长图只有一屏高(真机现象);
+                //  ② 选区 = 整屏时"整窗减选区"是空区域 → 遮罩与面板一起消失。
+                //
+                // 现在的判据更直接:**遮罩必须整个不见了**(它还可见 = 页面点不到),
+                // 且面板/描边不得与采集区重叠。
                 {
-                    // 点「开始」进入采集中(挖洞在这一刻生效)
-                    const QRect panelNow = overlay::stitchPanelRectFor(
-                        sel, geo.size(),
-                        QSize(overlay::kStitchPanelWidth, overlay::kStitchPanelHeight),
-                        overlay::kBarMargin);
-                    const int pbw = panelNow.width() / overlay::kStitchButtons;
-                    click(QPoint(panelNow.x() + pbw / 2, panelNow.y() + panelNow.height() / 2));
-                    check(overlay->stitchCapturing(),
-                          QStringLiteral("点「开始」后进入采集中"));
+                    const QSize panelSize(overlay::kStitchPanelWidth,
+                                          overlay::kStitchPanelHeight);
+                    // ---- 面板候选位置必须全部与选区零相交(v1 的 D1 正脸)----
+                    //
+                    // v1 在"上下都放不下"时把面板压进选区底部内侧,而那块区域在
+                    // 采集期画不出来也点不到 —— 整屏选区下表现为"面板凭空消失"
+                    // 且"点开始没反应"。
+                    const QList<QRect> cands = overlay::stitchPanelCandidates(
+                        sel, geo.size(), panelSize, overlay::kBarMargin);
+                    bool allOutside = true;
+                    for (const QRect& c : cands) {
+                        if (!overlay::stitchPanelFitsOutside(c, sel)) allOutside = false;
+                    }
+                    qInfo() << "CAPTURE-TOOLBAR  panel candidates =" << cands.size()
+                            << "allOutside =" << allOutside;
+                    check(!cands.isEmpty() && allOutside,
+                          QStringLiteral("面板候选位置全部与选区零相交(v1 的 D1 回归)"));
 
-                    const HWND hwnd = reinterpret_cast<HWND>(overlay->winId());
-                    const HRGN rgn = ::CreateRectRgn(0, 0, 0, 0);
-                    const int kind = ::GetWindowRgn(hwnd, rgn);
-                    // kind: NULLREGION/ SIMPLEREGION/ COMPLEXREGION/ ERROR
-                    const QPoint inside(sel.center());
-                    const QPoint outside(sel.left() / 2, sel.top() / 2);
-                    const bool holeIsHole = ::PtInRegion(rgn, inside.x(), inside.y()) == 0;
-                    const bool maskAlive = ::PtInRegion(rgn, outside.x(), outside.y()) != 0;
-                    qInfo() << "CAPTURE-TOOLBAR  window region kind =" << kind
-                            << "hole(center)=" << inside << "inRegion=" << !holeIsHole
-                            << "mask(outside)=" << outside << "inRegion=" << maskAlive;
-                    ::DeleteObject(rgn);
-                    check(kind != ERROR,
-                          QStringLiteral("采集期间窗口区域已设置(SetWindowRgn 生效)"));
-                    check(holeIsHole,
-                          QStringLiteral("选区被**挖掉**(滚轮可直达下层窗口,页面能滚)"));
-                    check(maskAlive,
-                          QStringLiteral("选区外遮罩仍在(「结束」按钮可点)"));
+                    // ---- 面板矩形本身也不得落进选区 ----
+                    const QRect panelRect = overlay::stitchPanelRectFor(
+                        sel, geo.size(), panelSize, overlay::kBarMargin);
+                    qInfo() << "CAPTURE-TOOLBAR  chosen panel" << panelRect
+                            << "selection" << sel;
+                    check(overlay::stitchPanelFitsOutside(panelRect, sel),
+                          QStringLiteral("选定的面板位置与选区零相交"));
 
-                    // ---- 挖洞的**真正目的**:鼠标事件要送到下层窗口 ----
+                    // ---- 整屏选区:面板必须仍然点得到 ----
                     //
-                    // 这条是长截图能否成立的分水岭:遮罩不挖洞时,选区上的滚轮被
-                    // 遮罩自己接收,底下的浏览器/记事本**根本不会滚**,于是每一帧
-                    // 采到的都是同一张图 —— 功能静默失效,且没有任何报错。
-                    //
-                    // 用 WindowFromPoint 直接问系统"这个屏幕坐标上的顶层窗口是谁":
-                    // 挖洞生效 → 返回下层窗口;未挖洞 → 返回遮罩自己。
-                    // ⚠️ 必须在**补洞之前**断言 —— 补洞后命中遮罩才是正确的。
-                    const QPoint screenCenter = overlay->mapToGlobal(sel.center());
-                    const HWND hitHole = ::WindowFromPoint(
-                        POINT{screenCenter.x(), screenCenter.y()});
-                    const QPoint screenOutside =
-                        overlay->mapToGlobal(QPoint(sel.left() / 2, sel.top() / 2));
-                    const HWND hitMask = ::WindowFromPoint(
-                        POINT{screenOutside.x(), screenOutside.y()});
-                    const auto className = [](HWND h) {
-                        wchar_t buf[256] = {0};
-                        ::GetClassNameW(h, buf, 255);
-                        return QString::fromWCharArray(buf);
-                    };
-                    qInfo() << "CAPTURE-TOOLBAR  WindowFromPoint hole =" << (void*)hitHole
-                            << "class =" << className(hitHole)
-                            << "| mask =" << (void*)hitMask << "class =" << className(hitMask)
-                            << "| overlay hwnd =" << (void*)hwnd
-                            << "| below hwnd =" << (void*)(g_below ? g_below->winId() : 0);
-                    check(hitHole != hwnd,
-                          QStringLiteral("挖洞处命中**不是遮罩**(滚轮可直达下层,页面能滚)"));
-                    // ⚠️ 这一条只**打印不断言**。
-                    //
-                    // 原因:WindowFromPoint 反映的是**当前桌面层级**,而本用例跑在
-                    // 无人值守/可能锁屏的机器上 —— 一旦系统覆盖层(锁屏
-                    // LockScreenBackstopFrame、UAC 暗幕、其它置顶窗口)压在最上面,
-                    // 洞内外会**同时**返回那个覆盖层,于是"洞内外命中不同"必然不成立,
-                    // 尽管挖洞本身完全正常(上面两条 PtInRegion 断言已经证明了区域形状)。
-                    //
-                    // 把环境相关的现象判成失败,只会制造假红、并让真正的回归淹没在
-                    // 噪声里。故此处降级为信息:人工在正常桌面上跑时看这一行即可。
-                    qInfo() << "CAPTURE-TOOLBAR  (info) 洞内外命中目标:"
-                            << "hole =" << (void*)hitHole << "mask =" << (void*)hitMask
-                            << "-> 洞内外不同:" << (hitHole != hitMask)
-                            << "(锁屏/覆盖层下会相同,属环境现象)";
-                    // 命中的应当是一个**真实的应用窗口**(本环境实测是
-                    // Chrome_RenderWidgetHostHWND —— 那是宿主 GUI 自己占着这块屏)。
-                    // 不要求它等于我们造的 g_below:它在别的窗口下面,是否露在
-                    // 最上层取决于桌面现状,拿它做基准会让用例对**环境**敏感。
-                    // 真正要证明的是"事件交给了下层应用,而不是被遮罩吞掉"。
-                    check(!className(hitHole).isEmpty() && hitHole != hwnd,
-                          QStringLiteral("挖洞处命中的是**真实应用窗口**"
-                                         "(证明事件已交给下层,而非被遮罩吞掉)"));
+                    // v1 在这个几何下必挂(空区域 → 遮罩与面板整块消失)。
+                    const QRect fullSel(QPoint(0, 0), geo.size());
+                    const QRect fullPanel = overlay::stitchPanelRectFor(
+                        fullSel, geo.size(), panelSize, overlay::kBarMargin);
+                    const QRect winRect(QPoint(0, 0), geo.size());
+                    qInfo() << "CAPTURE-TOOLBAR  full-screen selection panel =" << fullPanel;
+                    check(winRect.contains(fullPanel),
+                          QStringLiteral("整屏选区下面板仍完整落在窗口内(点得到)"));
 
-                    // 点「结束」→ 挖洞必须补回,否则遮罩会破一块
-                    click(QPoint(panelNow.x() + pbw / 2, panelNow.y() + panelNow.height() / 2));
-                    const HRGN rgn2 = ::CreateRectRgn(0, 0, 0, 0);
-                    const int kind2 = ::GetWindowRgn(hwnd, rgn2);
-                    ::DeleteObject(rgn2);
-                    // 补洞后区域应恢复整窗 → 仍是非空区域,且中心点回到区域内
-                    const HRGN rgn3 = ::CreateRectRgn(0, 0, 0, 0);
-                    ::GetWindowRgn(hwnd, rgn3);
-                    const bool centerBack = ::PtInRegion(rgn3, sel.center().x(),
-                                                         sel.center().y()) != 0;
-                    ::DeleteObject(rgn3);
-                    qInfo() << "CAPTURE-TOOLBAR  after finish: region kind =" << kind2
-                            << "center back in region =" << centerBack;
-                    check(centerBack,
-                          QStringLiteral("结束采集后挖洞已补回(遮罩恢复完整)"));
+                    // ---- 描边四边必须在选区**外侧**(几何保证不进抓取区)----
+                    const QList<QRect> frameRects = overlay::stitchFrameRects(sel, geo.size(), 2);
+                    int outside = 0;
+                    for (const QRect& r : frameRects) {
+                        if (r.isNull()) continue;
+                        if (!r.intersects(sel)) ++outside;
+                    }
+                    qInfo() << "CAPTURE-TOOLBAR  frame rects outside selection =" << outside
+                            << "of" << frameRects.size();
+                    check(outside > 0 && outside == frameRects.size(),
+                          QStringLiteral("描边四边全部在选区之外(不与采集区重叠)"));
+
+                    // ---- 采集期隐藏/恢复:用公开钩子直接验状态迁移 ----
+                    //
+                    // 真正的"点开始 → 隐藏遮罩"还要核心 begin 成功(依赖可用屏),
+                    // 那是 --stitch-live-flow 的职责;这里只钉死"隐藏/恢复"这条
+                    // 状态迁移本身不出错、且不会留下一个隐形的遮罩。
+                    check(overlay->isVisible(), QStringLiteral("就绪态遮罩可见"));
+                    overlay->setStitchOverlayHidden(true);
+                    check(overlay->stitchOverlayHidden() && !overlay->isVisible(),
+                          QStringLiteral("采集期遮罩整体隐藏(页面完全可交互)"));
+                    overlay->setStitchOverlayHidden(false);
+                    check(!overlay->stitchOverlayHidden() && overlay->isVisible(),
+                          QStringLiteral("退出采集后遮罩恢复可见(不留隐形遮罩)"));
                 }
 
                 // Esc 分层:就绪态按 Esc → 退出长截图态(**不**取消整次截图)

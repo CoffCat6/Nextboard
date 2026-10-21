@@ -52,6 +52,7 @@ add_executable(nextboard WIN32
     src/panel/clip_entry_model.cpp
     src/capture/capture_session.cpp
     src/capture/overlay_geometry.cpp
+    src/capture/stitch_hud.cpp
     src/editor/annotation_engine.cpp
     src/editor/annotation_toolbar.cpp
     src/editor/tool_icons.cpp

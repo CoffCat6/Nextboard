@@ -126,6 +126,7 @@ int main(int argc, char* argv[]) {
                 || arg == QLatin1String("--dump-monitors")
                 || arg == QLatin1String("--capture-toolbar-flow")
                 || arg == QLatin1String("--autostart-flow")
+                || arg == QLatin1String("--stitch-flow")
                 || arg == QLatin1String("--stitch-settings-flow")
                 || arg == QLatin1String("--stitch-live-flow")
                 || arg == QLatin1String("--note-flow")

@@ -27,6 +27,8 @@
 #include <QThread>
 #include <QTimer>
 
+#include <memory>
+
 namespace nb {
 namespace {
 
@@ -178,16 +180,14 @@ void runStitchLiveFlow() {
 
         // ---- 框选一块区域(全在页面内)----
         const QRect sel(pageRect.left() + 80, pageRect.top() + 80, 400, 300);
-        const QPoint from = sel.topLeft();
-        const QPoint to = sel.bottomRight();
-        sendPress(overlay, from);
-        sendMove(overlay, to, Qt::LeftButton);
-        sendRelease(overlay, to);
+        sendPress(overlay, sel.topLeft());
+        sendMove(overlay, sel.bottomRight(), Qt::LeftButton);
+        sendRelease(overlay, sel.bottomRight());
         QApplication::processEvents();
 
         liveCheck(overlay->stitching(), QStringLiteral("框完进入长截图态(热键意图)"));
 
-        // ---- 点「开始」:挖洞 + 起采集 ----
+        // ---- 点「开始」:进入采集(v2:遮罩隐藏 + HUD 立起 + 直抓选区)----
         const QRect panel = overlay::stitchPanelRectFor(
             sel, geo.size(),
             QSize(overlay::kStitchPanelWidth, overlay::kStitchPanelHeight),
@@ -199,17 +199,54 @@ void runStitchLiveFlow() {
         QApplication::processEvents();
         liveCheck(overlay->stitchCapturing(), QStringLiteral("点「开始」进入采集中"));
 
-        // 给挖洞后的重绘一点时间,并让节拍器采到首帧
+        // 等 HUD 起来、遮罩真正消失、节拍器采到首帧
         QTimer::singleShot(900, qApp, [overlay, page, screen, sel, geo, &core] {
-            // ---- 关键取证:选区中心此刻抓到的是**页面**还是**遮罩**? ----
+            // ================= v2 的核心断言 =================
             //
-            // 这是"没正常拼接"最可能的根因:挖洞后下层窗口没有重绘,屏幕上仍
-            // 残留遮罩的暗化像素 → 每帧都抓到同一张冻结画面 → 核心全判 duplicate
-            // → 长图只有一屏高。
-            // 必须按值捕获:sampleCenter 会被内层 lambda 复制进去并在 900ms 后执行,
-            // 那时外层 lambda 已返回,它引用的 screen/geo/sel/page 全部悬空。
-            // 实测表现为访问违例 0xc0000005,且**首次同步调用正常、第二次才崩** ——
-            // 极易误判成产品缺陷。
+            // ① 遮罩必须**整块隐藏**:只要它还可见,选区上的滚轮就被它吞掉,
+            //    页面不滚、每帧同一张图 → 长图只有一屏高。v1 靠"挖洞"达到同一
+            //    目的,但窗口区域吃设备像素、选区是逻辑像素,150% 屏上洞会挖小
+            //    → 选区仍被盖住一部分 → 正是真机那个现象。
+            liveCheck(!overlay->isVisible(),
+                      QStringLiteral("采集期遮罩整体隐藏(页面完全可交互)"));
+
+            // ② 采集选区 = 选区设备像素矩形(固化后不再每帧重算)
+            const QRect region = overlay->stitchRegionDevice();
+            const QSize wantRegion(qRound(sel.width() * screen->devicePixelRatio()),
+                                   qRound(sel.height() * screen->devicePixelRatio()));
+            qInfo().nospace() << "STITCH-LIVE  regionDevice =" << region
+                              << " expected ≈" << wantRegion
+                              << " dpr =" << screen->devicePixelRatio();
+            liveCheck(qAbs(region.width() - wantRegion.width()) <= 2
+                          && qAbs(region.height() - wantRegion.height()) <= 2,
+                      QStringLiteral("采集选区 = 选区设备像素(150% 屏上不再是逻辑像素)"));
+
+            // ③ 直抓选区:尺寸必须等于选区设备矩形(1:1,不缩放不裁剪)
+            {
+                const QImage direct = core.captureMonitorRegion(screen, region);
+                qInfo().nospace() << "STITCH-LIVE  region capture =" << direct.size()
+                                  << " requested =" << region.size();
+                liveCheck(!direct.isNull()
+                              && direct.width() == region.width()
+                              && direct.height() == region.height(),
+                          QStringLiteral("直抓选区返回尺寸与请求**完全一致**"
+                                         "(150% 屏上也不缩放)"));
+            }
+
+            // ④ 跳过"窗口区域"这套机制:v2 不再设 SetWindowRgn
+            {
+                const HWND hwnd = reinterpret_cast<HWND>(overlay->winId());
+                const HRGN rgn = ::CreateRectRgn(0, 0, 0, 0);
+                const int kind = ::GetWindowRgn(hwnd, rgn);
+                ::DeleteObject(rgn);
+                qInfo() << "STITCH-LIVE  overlay window region kind =" << kind
+                        << "(v1 曾是 COMPLEXREGION 的挖洞区域)";
+                // 遮罩隐藏时无关紧要;这条只作信息,不进断言 —— 真正的判据是①。
+            }
+
+            // ⑤ 选区里看到的是**真实页面**:直接读屏幕像素与页面自报的颜色比对
+            //
+            // ⚠️ 全部按值捕获:内层 lambda 会延后执行,引用会悬空(实测 0xc0000005)
             const auto sampleCenter = [screen, geo, sel, page, &core](const char* tag) {
                 const QImage shot = core.captureMonitorMatched(screen);
                 if (shot.isNull()) {
@@ -217,14 +254,12 @@ void runStitchLiveFlow() {
                     ++g_liveFailures;
                     return QColor();
                 }
-                // 选区中心:逻辑坐标 -> 物理像素
                 const QPoint c = sel.center();
                 const qreal sx = static_cast<qreal>(shot.width()) / geo.width();
                 const qreal sy = static_cast<qreal>(shot.height()) / geo.height();
                 const int px = qBound(0, qRound(c.x() * sx), shot.width() - 1);
                 const int py = qBound(0, qRound(c.y() * sy), shot.height() - 1);
                 const QColor got = shot.pixelColor(px, py);
-                // 期望:页面在该点的颜色。屏幕逻辑 y - 页面顶 + 页面偏移
                 const int contentY = (c.y() - page->y()) + page->offset();
                 const QColor want = LivePage::colorAt(contentY);
                 qInfo().nospace() << "STITCH-LIVE  sample[" << tag << "] at(" << px << ","
@@ -233,87 +268,74 @@ void runStitchLiveFlow() {
                 return got;
             };
 
-            // ---- 取证:窗口区域的真实形状(是否真的挖了洞)----
-            {
-                const HWND hwnd = reinterpret_cast<HWND>(overlay->winId());
-                const HRGN rgn = ::CreateRectRgn(0, 0, 0, 0);
-                const int kind = ::GetWindowRgn(hwnd, rgn);
-                const QRect win = overlay->rect();
-                const int probeL = sel.left(), probeT = sel.top();
-                const int probeR = sel.right(), probeB = sel.bottom();
-                const bool inCenter = ::PtInRegion(rgn, sel.center().x(), sel.center().y()) != 0;
-                const bool inEdge = ::PtInRegion(rgn, win.left() + 2, win.top() + 2) != 0;
-                // 洞的四条边:应都不在区域内
-                const bool inHoleTL = ::PtInRegion(rgn, probeL + 2, probeT + 2) != 0;
-                const bool inHoleBR = ::PtInRegion(rgn, probeR - 2, probeB - 2) != 0;
-                ::DeleteObject(rgn);
-                qInfo().nospace() << "STITCH-LIVE  region kind=" << kind
-                                  << " win=" << win << " sel=" << sel
-                                  << " | centerInRegion=" << inCenter
-                                  << " edgeInRegion=" << inEdge
-                                  << " holeTLInRegion=" << inHoleTL
-                                  << " holeBRInRegion=" << inHoleBR;
-                liveCheck(!inCenter && !inHoleTL && !inHoleBR,
-                          QStringLiteral("选区三处采样点都在窗口区域**之外**(洞真的挖掉了)"));
-                liveCheck(inEdge,
-                          QStringLiteral("窗口边缘仍在区域**之内**(遮罩没整块消失)"));
-            }
-
-            // 配对体检:采到的整屏尺寸必须等于"本屏几何 × DPR"。
-            // 配错屏是多屏下最隐蔽的失效 —— 内容看着有,但全是别的屏。
-            {
-                const QImage m = core.captureMonitorMatched(screen);
-                const QSize want(qRound(screen->geometry().width() * screen->devicePixelRatio()),
-                                 qRound(screen->geometry().height() * screen->devicePixelRatio()));
-                qInfo().nospace() << "STITCH-LIVE  matched capture =" << m.size()
-                                  << " expected =" << want << " screen =" << screen->name();
-                liveCheck(qAbs(m.width() - want.width()) <= 2
-                              && qAbs(m.height() - want.height()) <= 2,
-                          QStringLiteral("按屏配对捕获的尺寸与本屏几何自洽(没配到别屏)"));
-            }
-
             const QColor before = sampleCenter("start");
-            const int contentYBefore = (sel.center().y() - page->y()) + page->offset();
-            const QColor wantBefore = LivePage::colorAt(contentYBefore);
+            const QColor wantBefore =
+                LivePage::colorAt((sel.center().y() - page->y()) + page->offset());
             const bool pageVisible = qAbs(before.red() - wantBefore.red()) <= 12
                 && qAbs(before.green() - wantBefore.green()) <= 12
                 && qAbs(before.blue() - wantBefore.blue()) <= 12;
             liveCheck(pageVisible,
-                      QStringLiteral("挖洞后选区里看到的是**真实页面**(不是遮罩残影) "
+                      QStringLiteral("选区里看到的是**真实页面**(不是遮罩残影) "
                                      "got=%1 want=%2").arg(before.name(), wantBefore.name()));
 
-            // ---- 滚动页面,再采一次:内容必须跟着变 ----
-            page->scrollBy(60);
-            QApplication::processEvents();
-            QTimer::singleShot(900, qApp, [overlay, page, sel, sampleCenter] {
-                qInfo() << "STITCH-LIVE  scroll-lambda entered, page ptr=" << (void*)page;
-                const QColor after = sampleCenter("after-scroll");
-                qInfo() << "STITCH-LIVE  after-scroll sampled";
-                const int contentYAfter = (sel.center().y() - page->y()) + page->offset();
-                const QColor wantAfter = LivePage::colorAt(contentYAfter);
-                const bool scrolled = qAbs(after.red() - wantAfter.red()) <= 12
-                    && qAbs(after.green() - wantAfter.green()) <= 12
-                    && qAbs(after.blue() - wantAfter.blue()) <= 12;
-                liveCheck(scrolled,
-                          QStringLiteral("页面滚动后抓到的内容**跟着变**(offset=%1 got=%2 want=%3)")
-                              .arg(page->offset()).arg(after.name(), wantAfter.name()));
+            // ⑥ 收尾:等几拍,再让页面滚动,确认**拼接真的在长高**
+            //
+            // 这是"长图只有一屏高"最直接的回归判据:滚动之后产物高度必须
+            // 大于选区高度。v1 若每帧都判 duplicate,这里必然失败。
+            // ⚠️ 必须堆分配:emit 发生在**另一个** QTimer 回调里,而此时本 lambda
+            //    早已返回 —— 按引用捕获栈上的 QImage 就是写已销毁的内存,
+            //    实测正是 0xc0000005(docs/progress.md:3927 记过同类坑)。
+            auto finishedImage = std::make_shared<QImage>();
+            QObject::connect(overlay, &OverlayWidget::stitchFinished, overlay,
+                             [finishedImage](const QImage& img) { *finishedImage = img; });
 
-                qInfo() << "STITCH-LIVE  about-to-click-end";
-                // ---- 点「结束」:应当完成合成并入库 ----
-                const QRect panel2 = overlay::stitchPanelRectFor(
-                    sel, overlay->size(),
-                    QSize(overlay::kStitchPanelWidth, overlay::kStitchPanelHeight),
-                    overlay::kBarMargin);
-                const int bw2 = panel2.width() / overlay::kStitchButtons;
-                const QPoint endBtn(panel2.x() + bw2 / 2, panel2.y() + panel2.height() / 2);
-                sendPress(overlay, endBtn);
-                sendRelease(overlay, endBtn);
-                qInfo() << "STITCH-LIVE  end-clicked";
+            QTimer::singleShot(400, qApp,
+                               [overlay, page, sel, screen, sampleCenter, finishedImage] {
+                page->scrollBy(80);
                 QApplication::processEvents();
-                qInfo() << "STITCH-LIVE  events-processed";
+                QTimer::singleShot(500, qApp,
+                                   [overlay, page, sel, screen, sampleCenter, finishedImage] {
+                    const QColor after = sampleCenter("after-scroll");
+                    const QColor wantAfter =
+                        LivePage::colorAt((sel.center().y() - page->y()) + page->offset());
+                    const bool scrolled = qAbs(after.red() - wantAfter.red()) <= 12
+                        && qAbs(after.green() - wantAfter.green()) <= 12
+                        && qAbs(after.blue() - wantAfter.blue()) <= 12;
+                    liveCheck(scrolled,
+                              QStringLiteral("页面滚动后抓到的内容**跟着变**"
+                                             "(offset=%1 got=%2 want=%3)")
+                                  .arg(page->offset())
+                                  .arg(after.name(), wantAfter.name()));
 
-                qInfo() << "STITCH-LIVE  RESULT failures =" << g_liveFailures;
-                QApplication::quit();
+                    // ---- 点「结束」:产物高度必须 > 选区高度 ----
+                    //
+                    // v2 遮罩已隐藏,「结束」在 HUD 面板上;这里直接走状态机
+                    // (HUD 的几何/可点性已由 --capture-toolbar-flow 的纯几何断言
+                    // 与 panelOutsideSelection 覆盖)。
+                    overlay->requestStitchFinishForTest();
+                    QTimer::singleShot(700, qApp,
+                                       [overlay, sel, screen, finishedImage] {
+                        qInfo() << "STITCH-LIVE  finished image ="
+                                << finishedImage->width() << "x" << finishedImage->height()
+                                << " (selection device height ≈"
+                                << qRound(sel.height() * screen->devicePixelRatio()) << ")";
+                        const int selDeviceH =
+                            qRound(sel.height() * screen->devicePixelRatio());
+                        liveCheck(!finishedImage->isNull(),
+                                  QStringLiteral("点「结束」产出了长图"));
+                        liveCheck(finishedImage->height() > selDeviceH,
+                                  QStringLiteral("长图高度**大于**选区高度"
+                                                 "(滚动内容真的拼进去了;实得 %1 vs %2)")
+                                      .arg(finishedImage->height())
+                                      .arg(selDeviceH));
+                        liveCheck(finishedImage->width() ==
+                                      qRound(sel.width() * screen->devicePixelRatio()),
+                                  QStringLiteral("长图宽度 = 选区设备像素宽"));
+
+                        qInfo() << "STITCH-LIVE  RESULT failures =" << g_liveFailures;
+                        QApplication::quit();
+                    });
+                });
             });
         });
     });

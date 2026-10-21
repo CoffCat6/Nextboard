@@ -174,16 +174,22 @@ pub fn match_monitor<'a>(monitors: &'a [MonitorInfo], hint: &MonitorHint) -> Opt
             return Some(m);
         }
     }
-    if let Some(m) = monitors
-        .iter()
-        .find(|m| m.x == hint.x && m.y == hint.y)
-    {
+    if let Some(m) = monitors.iter().find(|m| m.x == hint.x && m.y == hint.y) {
         return Some(m);
     }
+    // 第三级:物理尺寸。⚠️ 只在**唯一命中**时才采纳。
+    //
+    // 同型号同分辨率的双屏(办公最常见的配置)在这一级会命中两台,而原点又各自
+    // 不同(说明前面两级都没对上:主机换了、缩放改了、或枚举口径变了)。
+    // 此时「取第一个」等于随机挑一块屏 —— 长截图会把 A 屏的画面拼进 B 屏的长图,
+    // 用户看到的是"内容对了但位置不对"的长图。宁可硬失败让调用方提示用户。
     let (pw, ph) = hint.physical_size();
-    monitors
-        .iter()
-        .find(|m| m.width == pw && m.height == ph)
+    let mut candidates = monitors.iter().filter(|m| m.width == pw && m.height == ph);
+    let first = candidates.next()?;
+    if candidates.next().is_some() {
+        return None;
+    }
+    Some(first)
 }
 
 /// 按**宿主屏幕描述**捕获整屏(多屏遮罩配对的正确入口)。
@@ -229,6 +235,98 @@ pub fn capture_monitor(index: u32) -> AppResult<CapturedImage> {
         AppError::InvalidInput(format!("显示器序号越界: {index}(共 {} 台)", list.len()))
     })?;
     XCapCapturer.capture(target)
+}
+
+/// 按**宿主屏幕描述**捕获显示器内的一个矩形(设备像素,相对显示器左上角)。
+///
+/// ## 为什么需要单独的入口
+///
+/// 长截图按固定节拍反复采同一块区域。走「capture_monitor_matched 整屏 + crop_rgba」
+/// 每帧要搬整屏(4K 约 33MB)再拷一份裁剪图,而实际需要的只有选区那一小块。
+/// xcap 本身就提供 monitor.capture_region(相对坐标、带越界校验),直接用它。
+///
+/// ## 与整屏捕获的两点不同
+///
+/// 1. **不做索引回退**:配对失败一律报错。索引在 Qt 与 xcap 两端口径不同
+///    (Qt 主屏在前、xcap 主屏在后),回退等于把 A 屏内容拼进 B 屏长图。
+/// 2. **尺寸必须原样返回**:调用方(拼接会话)会逐帧把返回尺寸与选区比对,
+///    任何"算了别处"的偏差都会在下一次 append 变成显式错误,而不是错位长图。
+pub fn capture_monitor_region(
+    hint: &MonitorHint,
+    region_x: u32,
+    region_y: u32,
+    region_w: u32,
+    region_h: u32,
+) -> AppResult<CapturedImage> {
+    if region_w == 0 || region_h == 0 {
+        return Err(AppError::InvalidInput(format!(
+            "选区尺寸为 0: {region_w}x{region_h}"
+        )));
+    }
+    let all = xcap::Monitor::all()?;
+    if all.is_empty() {
+        return Err(AppError::Internal("枚举显示器为空".into()));
+    }
+    let infos: Vec<MonitorInfo> = all
+        .iter()
+        .map(|m| MonitorInfo {
+            name: m.name().unwrap_or_default(),
+            x: m.x().unwrap_or_default(),
+            y: m.y().unwrap_or_default(),
+            width: m.width().unwrap_or_default(),
+            height: m.height().unwrap_or_default(),
+            scale_factor: m.scale_factor().unwrap_or(1.0),
+            is_primary: m.is_primary().unwrap_or(false),
+        })
+        .collect();
+    // 配对失败 → 硬失败(附两端实际布局,便于用户把显示器布局贴进 issue)
+    let target = match_monitor(&infos, hint).ok_or_else(|| {
+        AppError::InvalidInput(format!(
+            "无法为屏幕(name={:?}, {},{} {}x{} dpr={})匹配显示器;核心侧有: {}",
+            hint.name,
+            hint.x,
+            hint.y,
+            hint.width,
+            hint.height,
+            hint.dpr,
+            infos
+                .iter()
+                .map(|m| format!("{}@{},{} {}x{}", m.name, m.x, m.y, m.width, m.height))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        ))
+    })?;
+    let monitor = all
+        .iter()
+        .find(|m| m.name().ok().as_deref() == Some(target.name.as_str()))
+        .ok_or_else(|| AppError::Internal("目标显示器已消失".into()))?;
+
+    // 越界在 xcap 里会报 InvalidCaptureRegion;这里先给出**带数值**的可读错误,
+    // 因为该路径的典型成因是"混合 DPI 下区域按逻辑像素算了",需要数字才能定位。
+    let mw = monitor.width()?;
+    let mh = monitor.height()?;
+    if region_w > mw || region_h > mh || region_x.saturating_add(region_w) > mw
+        || region_y.saturating_add(region_h) > mh
+    {
+        return Err(AppError::InvalidInput(format!(
+            "采集区域 ({region_x},{region_y} {region_w}x{region_h}) 超出显示器 {} 范围 {mw}x{mh}(坐标须为**设备像素**且相对该屏左上角)",
+            target.name
+        )));
+    }
+
+    let image = monitor.capture_region(region_x, region_y, region_w, region_h)?;
+    let (width, height) = (image.width(), image.height());
+    if width != region_w || height != region_h {
+        // 后端"按请求尺寸返回"是拼接正确性的前提;不符就必须说出来。
+        return Err(AppError::Internal(format!(
+            "采集区域尺寸不符:请求 {region_w}x{region_h},实得 {width}x{height}"
+        )));
+    }
+    Ok(CapturedImage {
+        rgba: image.into_raw(),
+        width,
+        height,
+    })
 }
 
 /// 按**设备名**捕获整屏(形如 `\\.\DISPLAY1`)。

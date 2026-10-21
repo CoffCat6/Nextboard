@@ -4036,6 +4036,62 @@ true shift 120 -> k=120 OK  (evidence 30)
 
 ---
 
+
+---
+
+## 2026-10-21(三)长截图 v2 重构:取消遮罩与挖洞,直抓选区 + 独立 HUD
+
+### 用户报障(三条,均已修)
+
+| # | 现象 | 根因 |
+| --- | --- | --- |
+| S1 | 页面能滚,但长图**只有一屏高** | 挖洞用 Qt 逻辑像素喂 `CreateRectRgn`/`ClientToScreen`(要设备像素)。150% 屏上洞按 1:1 挖小 → 选区仍被遮罩盖住一部分 → 每帧采到静止画面 → 核心判 `duplicate` → 只吸首帧 |
+| S2 | 点「开始」后**完全没有采集** | `stitchPanelRectFor` 在上下都放不下时**压进选区底部内侧**,而那块正是被挖掉、鼠标穿透的采集区 → 面板画不出、点不到,点击被下层页面吃掉 |
+| S3 | 全屏下「开始/结束」**看不见、无法操作** | 同上;另外「整窗减选区」在选区=整屏时得到 `NULLREGION`,遮罩与面板一起消失 |
+
+S1 与 S2 发生在**不同屏幕**上 —— 这正是两条独立缺陷的旁证。
+
+### 改动(以「结构性消除」代替逐条打补丁)
+
+1. **采集期隐藏整个遮罩**(不再 `SetWindowRgn`)。新增 `app/src/capture/stitch_hud.{hpp,cpp}`:
+   - 描边窗 = 选区**外扩** 2px,描边画在外扩圈里 → 天然不进抓取区域(几何保证);`WS_EX_TRANSPARENT` 穿透;
+   - 面板窗 = 「结束/取消」+ 进度文案,位置由 `stitchPanelCandidates()` 给出,**与选区零相交**;整屏选区时降级为浮在选区内,靠 `WDA_EXCLUDEFROMCAPTURE` + 分层窗口;
+   - Esc 用 `RegisterHotKey` 临时全局注册(采集期页面持有焦点),失败会写在面板上。
+2. **直抓选区**:新增 `nb_capture_monitor_region_matched` → xcap `Monitor::capture_region`。每帧从「整屏 33MB + 两次拷贝」降到「选区 4.3MB」。
+3. **配对失败硬失败**:删掉两处「回退 `captureMonitor(index)`」(索引在 Qt 与 xcap 两端口径不同)。`match_monitor` 第三级(物理尺寸)改为**唯一命中才采纳**,同型号双屏不再随机挑一块。
+4. **拼接契约重做**:`begin/append/finish/abort`,会话归属在 `begin` 固化(显示器 + 设备像素矩形 + 上限);`append` 逐帧校验宽**与**高;回传 `debug{k,run,evidence,overlap,threshold,baselineAge}`。
+5. **算法保留 + 三项增强**:多基线重试(3 帧)、缺口警示条(4px,`finish` 兜底补)、字节预算(`stitchMaxBytes` 默认 128MB)。
+6. 采样间隔 500ms → **150ms**(设置项 `stitchSampleIntervalMs`,80–1000),面板同步新增「采样间隔」与「内存预算」两项。
+
+### 修的过程中发现的两个自身缺陷(都已修)
+
+- **验收自己踩了悬空引用**:`--stitch-live-flow` 用 `[&finishedImage]` 捕获栈变量,而 emit 发生在另一个 timer 回调里 → `0xc0000005`(日志停在「完成 400x380」之后)。改为 `std::make_shared<QImage>`。这是 `progress.md:3927` 记过的同类坑,又踩了一次。
+- **警示条补晚一拍**:首版只在「下一次成功吸收前」补条,若失配后用户直接点「结束」,产物上完全没有缺口的痕迹 —— 正是 docs/19 §4.3 禁止的「静默缺行」。改为 `finish` 收尾兜底补,并新增单测 `no_overlap_then_finish_draws_band`。
+
+### 验收(全部实跑)
+
+| 入口 | 结果 |
+| --- | --- |
+| `cargo test -p nbcore` | **367 passed / 0 failed / 5 ignored** |
+| `--stitch-flow` | **failures = 0**(产物 120×404,含 4px 警示条) |
+| `--stitch-settings-flow` | **failures = 0**(含两个新字段) |
+| `--capture-toolbar-flow` | **failures = 0** |
+| `--stitch-live-flow` | **failures = 0**,长图 `400x380`(选区设备高 300) |
+
+关键取证行(真机判据):滚动后必须出现 `reason="ok"` 且 `shiftPx>0`,长图高度 > 选区高度:
+
+```
+长截图: shift=300 total=300 ... reason="ok"      ← 首帧整吸
+长截图: shift=0   total=300 ... reason="duplicate" ← 未滚动,正确丢弃
+长截图: shift=80  total=380 ... reason="ok"      ← 滚动 80 行,拼进去了
+长截图:完成 400x380 gaps=0 bands=0 monitor="Mi Monitor"
+```
+
+### 仍未验证 / 遗留
+
+- **多屏混合 DPI 端到端**:本机单屏 dpr=1。已验证「直抓选区尺寸严格等于请求」与「洞/面板几何在 150% 下仍零相交」(纯几何),但**没有**双屏 + 150% 的真机实测;
+- **面板浮在选区内时的「不进画面」**:依赖 `WDA_EXCLUDEFROMCAPTURE` 与分层窗口,本机未构造整屏选区 + 面板降级的实拍对照;
+- 真机手感(面板观感、滚动手感)、长图后接 OCR/翻译 —— 均未做。
 ## 2026-10-17(五)长截图:热键直达框选(CaptureIntent::Scrolling)
 
 **用户要求**:「热键应该直接进行长截图框选」。可行,且比原实现更合理 —— 已改。

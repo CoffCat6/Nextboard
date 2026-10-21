@@ -358,6 +358,81 @@ pub unsafe extern "C" fn nb_capture_crop(
     report(result)
 }
 
+/// 滚动长截图:**开始会话**(固化为哪块屏、哪个矩形、什么上限)。
+///
+/// ## 为什么要有 begin —— 这是 v2 重构的核心
+///
+/// 旧契约没有 begin:会话在首次 append 时隐式创建,于是「这个会话截的是哪块屏」
+/// 只能靠宿主的一个全局 uuid 维持。二块屏同时进长截图态就共用会话,帧宽不符
+/// 只报一句 warn 后静默丢帧 —— 用户在副屏上看到的现象是「长截图不生效」。
+///
+/// begin 把 monitor + region(设备像素)+ dpr + 上限在**一处**固化:
+/// - append 逐帧校验帧尺寸,不符即报错(不再静默);
+/// - 采集期不必每帧重算坐标,混合 DPI 的换算错误无从累积;
+/// - 会话归属明确,跨屏混用在契约上不成立。
+///
+/// 出参 out_err:成功为空;失败为**可读的错误文案**(宿主可直接提示用户)。
+/// 这样宿主不必依赖 nbcore.log 才能说明「为什么不能开始」。
+///
+/// # Safety
+/// session / monitor / out_err 必须是 NUL 结尾 UTF-8 串或空指针(monitor 可空);
+/// out_err 为可写指针槽位,成功时不写出参。
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn nb_stitch_begin(
+    session: *const c_char,
+    monitor: *const c_char,
+    region_x: i32,
+    region_y: i32,
+    region_w: u32,
+    region_h: u32,
+    dpr: f32,
+    max_height: i64,
+    max_bytes: i64,
+    overlap_ratio: i64,
+    out_err: *mut *mut c_char,
+) -> i32 {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let session = cstr_to_string(session)?;
+        let monitor = if monitor.is_null() {
+            String::new()
+        } else {
+            cstr_to_string(monitor)?
+        };
+        crate::stitch::begin_session(
+            &session,
+            crate::stitch::SessionSpec {
+                monitor,
+                region_x,
+                region_y,
+                region_w,
+                region_h,
+                dpr,
+                max_height,
+                max_bytes,
+                overlap_ratio,
+            },
+        )
+    }))
+    .unwrap_or_else(|_| Err(AppError::Panicked("nb_stitch_begin panic".into())));
+
+    match result {
+        Ok(()) => NB_OK,
+        Err(err) => {
+            // 失败时把**错误文案本身**交给宿主:没有它,用户只能看到「没反应」。
+            let text = err.to_string();
+            log::warn!("长截图 begin 失败: {text}");
+            if !out_err.is_null() {
+                if let Ok(c) = CString::new(text) {
+                    // SAFETY: out_err 是宿主提供的合法指针槽位
+                    unsafe { *out_err = c.into_raw() };
+                }
+            }
+            NB_ERR
+        }
+    }
+}
+
 /// 滚动长截图:**吸收一帧**(RGBA 直入,不走 base64)。
 ///
 /// 为什么单独开原生导出而不是复用 nb_call("stitch_append"):
@@ -366,7 +441,8 @@ pub unsafe extern "C" fn nb_capture_crop(
 /// docs/06-memory-optimization.md 第 10 节已把"截图 base64 往返"列为待改项的
 /// 头一条 —— 长截图是高频路径,更没有理由重蹈。
 ///
-/// 结果(位移/总高/结论)是**小 JSON**,出参走 out_result(宿主以 nb_free_string 释放)。
+/// 结果(位移/总高/结论/判定数值)是**小 JSON**,出参走 out_result
+/// (宿主以 nb_free_string 释放)。
 ///
 /// # Safety
 /// rgba 由宿主持有,本函数只读;session 必须是 NUL 结尾 UTF-8;
@@ -379,7 +455,6 @@ pub unsafe extern "C" fn nb_stitch_append(
     rgba_len: usize,
     width: u32,
     height: u32,
-    reset: i32,
     out_result: *mut *mut c_char,
 ) -> i32 {
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
@@ -388,16 +463,7 @@ pub unsafe extern "C" fn nb_stitch_append(
         }
         let session = cstr_to_string(session)?;
         let bytes = std::slice::from_raw_parts(rgba, rgba_len);
-        let settings = crate::core::Core::get()?.settings()?;
-        let out = crate::stitch::append_frame(
-            &session,
-            bytes.to_vec(),
-            width,
-            height,
-            reset != 0,
-            settings.stitch_max_height,
-            settings.stitch_overlap_ratio,
-        )?;
+        let out = crate::stitch::append_frame(&session, bytes.to_vec(), width, height)?;
         Ok(serde_json::to_value(out)?.to_string())
     }))
     .unwrap_or_else(|_| Err(AppError::Panicked("nb_stitch_append panic".into())));
@@ -407,7 +473,7 @@ pub unsafe extern "C" fn nb_stitch_append(
 /// 滚动长截图:**结束并取回拼接结果**。
 ///
 /// 产物是 PNG 字节(宿主拿去 ingest_capture_png 入库 / 写剪贴板),
-/// 走 out_png + nb_free_buffer。尺寸与缺口数在 out_meta(小 JSON 字符串)。
+/// 走 out_png + nb_free_buffer。尺寸/缺口/警示条数/采集屏在 out_meta(小 JSON 字符串)。
 /// 会话取完即弃(长截图是一次成型产物,docs/19 第 2.2 节 N5)。
 ///
 /// # Safety
@@ -429,6 +495,11 @@ pub unsafe extern "C" fn nb_stitch_finish(
             "width": finished.width,
             "height": finished.height,
             "gaps": finished.gaps,
+            "bands": finished.bands,
+            "monitor": finished.monitor,
+            "regionX": finished.region_x,
+            "regionY": finished.region_y,
+            "dpr": finished.dpr,
         })
         .to_string();
 
@@ -465,6 +536,68 @@ pub unsafe extern "C" fn nb_stitch_abort(session: *const c_char) -> i32 {
         crate::stitch::abort_session(&session)
     }))
     .unwrap_or_else(|_| Err(AppError::Panicked("nb_stitch_abort panic".into())));
+    report(result)
+}
+
+/// 滚动长截图:**直接捕获某显示器内的一个矩形**(设备像素,相对显示器左上角)。
+///
+/// ## 为什么不再「整屏捕获 + 裁剪」
+///
+/// 旧链路每帧是:整屏 BitBlt(4K 约 33MB)→ 拷进 QImage → convertToFormat 深拷贝
+/// → nb_capture_crop 再分配一份裁剪图。一次采样在 4K 上要搬 60MB 以上,而
+/// 长截图是按固定节拍反复采的 —— 这些拷贝全是纯浪费,还占着采集节拍的上限。
+///
+/// xcap 自带 monitor.capture_region(x, y, w, h)(坐标相对该显示器),本导出直接用它:
+/// 每帧只搬选区大小(1200×900 约 4.3MB)。
+///
+/// ## 配对失败必须硬失败
+///
+/// 参数与 nb_capture_monitor_matched 同款「屏幕描述」,按 match_monitor 配对。
+/// 配对不上**直接报错**,不回退按索引取图 —— 索引在 Qt 与 xcap 两端口径不同
+/// (Qt 主屏在前、xcap 主屏在后),静默回退等于把 A 屏的内容拼进 B 屏的长图。
+///
+/// # Safety
+/// name 必须是 NUL 结尾 UTF-8 串(可为空);out_* 契约同 nb_capture_monitor。
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn nb_capture_monitor_region_matched(
+    name: *const c_char,
+    screen_x: i32,
+    screen_y: i32,
+    screen_w: u32,
+    screen_h: u32,
+    dpr: f32,
+    region_x: u32,
+    region_y: u32,
+    region_w: u32,
+    region_h: u32,
+    out_rgba: *mut *mut u8,
+    out_w: *mut u32,
+    out_h: *mut u32,
+) -> i32 {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let name = if name.is_null() {
+            String::new()
+        } else {
+            cstr_to_string(name)?
+        };
+        let hint = crate::capture::MonitorHint {
+            name,
+            x: screen_x,
+            y: screen_y,
+            width: screen_w,
+            height: screen_h,
+            dpr,
+        };
+        let image =
+            crate::capture::capture_monitor_region(&hint, region_x, region_y, region_w, region_h)?;
+        write_rgba_out(image, out_rgba, out_w, out_h)
+    }))
+    .unwrap_or_else(|_| {
+        Err(AppError::Panicked(
+            "nb_capture_monitor_region_matched panic".into(),
+        ))
+    });
     report(result)
 }
 

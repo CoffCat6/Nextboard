@@ -64,9 +64,15 @@ bool CoreBridge::init(bool /*startHidden*/, QString* error) {
     m_captureMonitorMatched =
         reinterpret_cast<NbCaptureMonitorMatched>(resolve("nb_capture_monitor_matched"));
     m_captureCrop = reinterpret_cast<NbCaptureCrop>(resolve("nb_capture_crop"));
+    // 直抓选区(长截图逐帧用):可选导出 —— 旧核心没有时宿主仍可回退
+    // "整屏 + 裁剪",但那条路径更慢,故 hasRegionCapture() 会给出提示。
+    m_captureMonitorRegion =
+        reinterpret_cast<NbCaptureMonitorRegionMatched>(
+            resolve("nb_capture_monitor_region_matched"));
     m_ocrRgba = reinterpret_cast<NbOcrRgba>(resolve("nb_ocr_rgba"));
     // 长截图导出:同样是**可选**导出(旧核心没有)→ 不进"致命缺失"检查。
     // 功能侧用 hasStitch() 判断是否可用,不可用时热键给出可读提示而非静默无反应。
+    m_stitchBegin = reinterpret_cast<NbStitchBegin>(resolve("nb_stitch_begin"));
     m_stitchAppend = reinterpret_cast<NbStitchAppend>(resolve("nb_stitch_append"));
     m_stitchFinish = reinterpret_cast<NbStitchFinish>(resolve("nb_stitch_finish"));
     m_stitchAbort = reinterpret_cast<NbStitchAbort>(resolve("nb_stitch_abort"));
@@ -280,7 +286,69 @@ QImage CoreBridge::captureCrop(const QImage& screen, const QRect& rect) {
 
 // ---- 滚动长截图(docs/19) ----
 
-QJsonObject CoreBridge::stitchAppend(const QString& session, const QImage& frame, bool reset) {
+QImage CoreBridge::captureMonitorRegion(QScreen* screen, const QRect& regionDevice) {
+    if (!m_captureMonitorRegion || !m_freeBuffer || !screen) return {};
+    if (regionDevice.width() <= 0 || regionDevice.height() <= 0) return {};
+    const QRect geo = screen->geometry();
+    const QByteArray nameUtf8 = screen->name().toUtf8();
+    unsigned char* rgba = nullptr;
+    unsigned w = 0, h = 0;
+    const int rc = m_captureMonitorRegion(
+        nameUtf8.constData(),
+        geo.x(), geo.y(),
+        static_cast<unsigned>(geo.width()), static_cast<unsigned>(geo.height()),
+        static_cast<float>(screen->devicePixelRatio()),
+        static_cast<unsigned>(regionDevice.x()), static_cast<unsigned>(regionDevice.y()),
+        static_cast<unsigned>(regionDevice.width()), static_cast<unsigned>(regionDevice.height()),
+        &rgba, &w, &h);
+    if (rc != 0 || !rgba || w == 0 || h == 0) {
+        if (rgba) m_freeBuffer(rgba, 0);
+        return {};
+    }
+    // 零拷贝:与 captureMonitor / captureCrop 同一套 CoreBuffer 托管
+    auto* buffer = new CoreBuffer{
+        rgba, static_cast<unsigned long long>(w) * h * 4, m_freeBuffer};
+    return QImage(rgba, static_cast<int>(w), static_cast<int>(h), QImage::Format_RGBA8888,
+                  &releaseCoreBuffer, buffer);
+}
+
+bool CoreBridge::stitchBegin(const QString& session, QScreen* screen, const QRect& regionDevice,
+                            int maxHeight, qint64 maxBytes, int overlapRatio, QString* error) {
+    if (!m_stitchBegin || !m_freeString) {
+        if (error) *error = QStringLiteral("当前 nbcore.dll 没有 nb_stitch_begin(核心版本过旧)");
+        return false;
+    }
+    if (session.isEmpty() || regionDevice.width() <= 0 || regionDevice.height() <= 0) {
+        if (error) *error = QStringLiteral("长截图会话 id 或选区为空");
+        return false;
+    }
+    // screen 允许为空:仅 --stitch-flow 用它验"拼接契约"(与哪块屏无关)。
+    // 生产路径(capture_session)一定带屏,monitor 名会写进核心日志与 finish 元信息。
+    const QByteArray sessionUtf8 = session.toUtf8();
+    const QByteArray nameUtf8 = screen ? screen->name().toUtf8() : QByteArray();
+    char* err = nullptr;
+    const int rc = m_stitchBegin(
+        sessionUtf8.constData(),
+        nameUtf8.constData(),
+        regionDevice.x(), regionDevice.y(),
+        static_cast<unsigned>(regionDevice.width()), static_cast<unsigned>(regionDevice.height()),
+        static_cast<float>(screen ? screen->devicePixelRatio() : 1.0),
+        static_cast<long long>(maxHeight), static_cast<long long>(maxBytes),
+        static_cast<long long>(overlapRatio),
+        &err);
+    if (rc != 0) {
+        if (error) {
+            *error = err ? QString::fromUtf8(err)
+                         : QStringLiteral("核心拒绝开始长截图会话(原因见 nbcore.log)");
+        }
+        if (err) m_freeString(err);
+        return false;
+    }
+    if (err) m_freeString(err);   // 成功时不写出参;防御性释放
+    return true;
+}
+
+QJsonObject CoreBridge::stitchAppend(const QString& session, const QImage& frame) {
     if (!m_stitchAppend || !m_freeString || frame.isNull()) return {};
     if (session.isEmpty()) return {};
     // 核心按 RGBA8888 紧凑排布读(与 captureCrop / ocrImage 同口径)
@@ -292,7 +360,6 @@ QJsonObject CoreBridge::stitchAppend(const QString& session, const QImage& frame
         src.constBits(),
         static_cast<unsigned long long>(src.sizeInBytes()),
         static_cast<unsigned>(src.width()), static_cast<unsigned>(src.height()),
-        reset ? 1 : 0,
         &out);
     if (rc != 0 || !out) {
         if (out) m_freeString(out);

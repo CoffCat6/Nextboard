@@ -4,7 +4,7 @@
 | --- | --- |
 | 版本 | v1(设计) |
 | 日期 | 2026-10-17 |
-| 状态 | **S1–S6 全部落地**(核心算法 / 宿主通道 / 遮罩状态机 / 滚动穿透 / 浮条入口与入库 / 设置与热键)。S5 的"自动滚动"子项按 Q1 裁定不做,其余交付 |
+| 状态 | **v2 重构已落地(2026-10-21)**:采集期取消遮罩与挖洞,改为「隐藏遮罩 + 直抓选区 + 独立 HUD」;拼接契约改为 begin/append/finish/abort。v1 的 S1–S6 历史记录保留在 §5,其中「挖洞」与「整屏捕获+裁剪」已**作废**(见 §12) |
 | 关联 | [14-capture-toolbar-plan.md](./14-capture-toolbar-plan.md)(浮条形态 A)· [17-editor-ui-unification.md](./17-editor-ui-unification.md)(标注引擎共享)· [03-roadmap.md](./03-roadmap.md) §「第一版明确不做」 |
 | 前置结论 | 路线图把「滚动长截图」列为 **v1 明确不做、进 backlog**;本文把它提为 v2 首个功能项,理由见 §1 |
 
@@ -383,6 +383,78 @@ Snipaste 之外的主流截图工具(FastStone、PixPin、微信/QQ 截图、Sha
 
 ---
 
+## 12. v2 重构(2026-10-21):取消遮罩与挖洞
+
+### 12.1 为什么要推翻 v1 的采集形态
+
+v1 的做法是「全屏半透明遮罩 + `SetWindowRgn` 把选区从窗口区域挖掉」。真机上三个现象说明这条路走不通:
+
+| 现象 | 根因 |
+| --- | --- |
+| 页面能滚,但长图**只有一屏高** | 窗口区域是**设备像素**,而选区是 Qt **逻辑像素**。150% 缩放屏上洞按 1:1 挖小 → 选区仍被遮罩盖住一部分 → 每帧采到的都是遮罩上的静止画面 → 核心判 `duplicate` → 只吸首帧 |
+| 全屏下「开始/结束」面板**看不见、点不到** | 面板退让逻辑在「上下都放不下」时**压进选区底部内侧**,而选区正是被挖掉的那块:画不出来、也点不到 → 点「开始」的点击被下层页面吃掉,采集压根不启动 |
+| 选区 = 整屏时功能整体失效 | 「整窗减选区」得到**空区域** = `NULLREGION` → 遮罩与面板一起消失 |
+
+并且「挖洞」与「在选区上画 UI」**本质互斥**:洞里既画不出东西也点不到。四条验收入口当时全绿却挡不住这些,因为没有任何一条断言「面板与洞不相交 / 洞非空 / 非 100% DPI / 整屏选区」。
+
+### 12.2 新形态
+
+采集期**隐藏整个遮罩**,页面完全可见、可交互、可滚动。UI 由 `StitchHud` 承担:
+
+1. **描边窗**:窗口 = 选区**外扩** 2px,描边画在外扩出来那一圈 → 像素天然在抓取区域之外(几何保证,不依赖抓图后端行为);`WS_EX_TRANSPARENT` 鼠标穿透。
+2. **面板窗**:「结束」「取消」+ 进度文案。位置由 `overlay::stitchPanelCandidates()` 给出,**硬约束:与选区零相交**;整屏选区时确实无处可放,则允许浮在选区内,靠 `WDA_EXCLUDEFROMCAPTURE` + 分层窗口两道保险。
+3. **Esc**:采集期页面持有焦点,本进程收不到 Esc → 用 `RegisterHotKey` 临时注册全局 Esc;注册失败**明确写在面板上**,不静默。
+
+好处:不需要 `SetWindowRgn`、不需要补洞重绘、不需要「逻辑像素↔设备像素」换算窗口区域 —— 整整一类缺陷随代码一起消失。
+
+### 12.3 采集链路:直抓选区
+
+旧链路每帧 = 整屏 BitBlt(4K 约 33MB)→ QImage → `convertToFormat` 深拷贝 → `nb_capture_crop` 再分配一份裁剪图。
+新链路 = `nb_capture_monitor_region_matched` → xcap `Monitor::capture_region`,只搬选区(1200×900 约 4.3MB)。
+
+配套:**配对失败硬失败**,删除两处「回退 `captureMonitor(index)`」—— 索引在 Qt 与 xcap 两端口径不同,静默回退等于把 A 屏内容拼进 B 屏长图。
+
+采样间隔因此从 500ms 收到 **150ms**(设置项 `stitchSampleIntervalMs`,80–1000)。
+
+### 12.4 拼接契约:begin/append/finish/abort
+
+```
+nb_stitch_begin(session, monitor, region_x, region_y, region_w, region_h, dpr,
+                max_height, max_bytes, overlap_ratio, out_err) -> i32
+nb_stitch_append(session, rgba, len, width, height, out_result_json) -> i32
+nb_stitch_finish(session, out_png, out_png_len, out_meta_json) -> i32
+nb_stitch_abort(session) -> i32
+```
+
+- `begin` 固化显示器 + 设备像素矩形 + 上限;重复 begin 报错(会话泄漏检测)。
+- `append` **逐帧校验帧宽与帧高**;不符即报错(旧实现只查宽度,高度变化会被「看似合理」的位移掩盖)。
+- `append` 回传 `debug{k, run, evidence, overlap, threshold, baselineAge}` —— 真机上判断「为什么判 duplicate」不再靠猜。
+
+算法本身**保留**(行指纹 + 连续相等 + 非空白证据行择优,是拿真机数据修正过的),新增三项:
+
+| 新增 | 理由 |
+| --- | --- |
+| **多基线重试**(保留最近 3 帧指纹) | 一帧动态内容不再让后续全部失配;命中较老基线如实记缺口 |
+| **缺口警示条**(4px 橙红,写入结果图) | §4.3 早就承诺「漏行要能被看见」,v1 从未实现。失配后就点结束时在 `finish` 兜底补条 |
+| **字节预算**(`stitchMaxBytes`,默认 128MB) | 1200×30000 RGBA 就是 144MB;只按像素限高会让内存先爆。有效上限 = min(像素, 字节/每行) |
+
+### 12.5 v2 验收(2026-10-21 实跑)
+
+| 入口 | 结果 |
+| --- | --- |
+| `cargo test -p nbcore` | **367 passed / 0 failed / 5 ignored** |
+| `--stitch-flow` | **failures = 0**(begin 契约 / 位移 / duplicate / 缺口 / 警示条 / 会话隔离 / 二次 finish / abort 幂等 / 帧宽不符 / 帧高不符 / 重复 begin / 未 begin) |
+| `--stitch-settings-flow` | **failures = 0**(含 v2 新字段默认值、往返、非法值拒绝) |
+| `--capture-toolbar-flow` | **failures = 0**(含「面板候选全部与选区零相交」「整屏选区下面板仍点得到」「描边四边全在选区外」「采集期遮罩隐藏/恢复」) |
+| `--stitch-live-flow` | **failures = 0**,长图 `400x380`(选区设备高 300 → 滚动 80 行真的拼进去了) |
+
+### 12.6 遗留
+
+- **真机手感**:面板与进度条的实际观感、用户滚动手感,只能在真机确认;
+- **多屏混合 DPI**:本机为单屏 dpr=1,150% 屏的端到端只验到「直抓选区尺寸严格 1:1」,未做双屏实测;
+- 长图完成后的 OCR / 翻译接续仍未接(与 v1 相同)。
+
+---
 ## 10. 与既有文档的关系
 
 - 本文取代 [03-roadmap.md](./03-roadmap.md) 「第一版明确不做」里「滚动长截图」一条的地位;

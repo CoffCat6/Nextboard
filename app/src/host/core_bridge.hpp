@@ -31,13 +31,22 @@ using NbCaptureCrop = int(__cdecl*)(const unsigned char*, unsigned long long,
 /// OCR(RGBA 直入):出参为 JSON 字符串,宿主以 nb_free_string 释放。
 using NbOcrRgba = int(__cdecl*)(const unsigned char*, unsigned long long,
                                 unsigned, unsigned, char**);
-/// 长截图吸收一帧(RGBA 直入,不走 base64):出参为小 JSON(位移/总高/结论)。
+/// 长截图开始会话(固化显示器/选区/上限):失败时 out_err 带**可读错误文案**
+/// (宿主以 nb_free_string 释放;成功时不写出参)。
+using NbStitchBegin = int(__cdecl*)(const char*, const char*, int, int, unsigned, unsigned,
+                                    float, long long, long long, long long, char**);
+/// 长截图吸收一帧(RGBA 直入,不走 base64):出参为小 JSON(位移/总高/结论/判定数值)。
 using NbStitchAppend = int(__cdecl*)(const char*, const unsigned char*, unsigned long long,
-                                     unsigned, unsigned, int, char**);
+                                     unsigned, unsigned, char**);
 /// 长截图取回结果:out_png 走 nb_free_buffer,out_meta 走 nb_free_string。
 using NbStitchFinish = int(__cdecl*)(const char*, unsigned char**, unsigned long long*, char**);
 /// 长截图丢弃会话(幂等)。
 using NbStitchAbort = int(__cdecl*)(const char*);
+/// 按屏幕描述**直接捕获显示器内的一个矩形**(设备像素,相对该屏左上角)。
+/// 长截图逐帧采集走这条:免掉"整屏捕获 + 裁剪 + 格式转换"的三次大拷贝。
+using NbCaptureMonitorRegionMatched = int(__cdecl*)(const char*, int, int, unsigned, unsigned,
+                                                   float, unsigned, unsigned, unsigned, unsigned,
+                                                   unsigned char**, unsigned*, unsigned*);
 /// 截图入库(RGBA 直入,不走 base64/PNG):出参为**裸**小 JSON {"entry": …|null}。
 using NbIngestCaptureRgba = int(__cdecl*)(const unsigned char*, unsigned long long,
                                           unsigned, unsigned, const char*, char**);
@@ -106,15 +115,36 @@ public:
 
     /// 核心是否提供长截图导出(旧 nbcore.dll 没有)。
     bool hasStitch() const {
-        return m_stitchAppend && m_stitchFinish && m_stitchAbort;
+        return m_stitchBegin && m_stitchAppend && m_stitchFinish && m_stitchAbort;
     }
 
-    /// 吸收一帧。`session` 由宿主生成(建议 UUID);`reset` = 丢弃该会话已有内容。
-    /// 返回核心给出的小 JSON(含 matched/shiftPx/totalHeight/reason/gaps);
-    /// 失败返回空对象(失败原因由核心写 nbcore.log,与既有 captureCrop 同口径)。
+    /// 核心是否提供"直抓选区"(旧 DLL 只能整屏 + 裁剪)。
+    bool hasRegionCapture() const { return m_captureMonitorRegion != nullptr; }
+
+    /// 开始长截图会话:把「哪块屏、哪个矩形(设备像素)、什么上限」固化在核心侧。
     ///
-    /// ⚠️ 阻塞调用(帧比对 + 拷贝):大帧上 ~几毫秒到几十毫秒,**别在 UI 线程高频调用**。
-    QJsonObject stitchAppend(const QString& session, const QImage& frame, bool reset);
+    /// @param screen        采集所属屏幕(用它做配对,配对失败**硬失败**)。
+    /// @param regionDevice  选区在该屏内的**设备像素**矩形(相对屏左上角)。
+    /// @param maxHeight     像素高度上限(设置项 stitchMaxHeight)。
+    /// @param maxBytes      字节预算(设置项 stitchMaxBytes;0 = 不限制)。
+    /// @param overlapRatio  重叠门槛百分比(设置项 stitchOverlapRatio)。
+    /// @param error         失败时回填**可读原因**(核心给的原文,可直接提示用户)。
+    /// @return 是否成功。
+    ///
+    /// 为什么把 error 做成出参而不是让宿主去读 nbcore.log:begin 失败意味着
+    /// "这个屏根本采不了"(配对不上/选区退化),用户需要当场看到原因
+    /// (docs/19 v2:静默降级是这类问题的头号来源)。
+    bool stitchBegin(const QString& session, QScreen* screen, const QRect& regionDevice,
+                     int maxHeight, qint64 maxBytes, int overlapRatio, QString* error);
+
+    /// 吸收一帧(尺寸必须与 begin 时约定的选区一致,否则核心报错)。
+    /// 返回核心给出的小 JSON(含 matched/shiftPx/totalHeight/reason/gaps/bands/debug);
+    /// 失败返回空对象。
+    QJsonObject stitchAppend(const QString& session, const QImage& frame);
+
+    /// 按屏幕描述**直抓选区**(设备像素,相对屏左上角)。
+    /// 配对失败/越界返回空图(原因见 lastError()),**不回退按索引取图**。
+    QImage captureMonitorRegion(QScreen* screen, const QRect& regionDevice);
 
     /// 结束并取回拼接结果。`ok` 为 false 时 outMeta 亦为空。
     /// 成功时 *outPng 为独立 QImage(核心缓冲已在内部转为 PNG 解码后的自有数据,
@@ -190,7 +220,9 @@ private:
     NbCaptureMonitor m_captureMonitor = nullptr;
     NbCaptureMonitorMatched m_captureMonitorMatched = nullptr;
     NbCaptureCrop m_captureCrop = nullptr;
+    NbCaptureMonitorRegionMatched m_captureMonitorRegion = nullptr;
     NbOcrRgba m_ocrRgba = nullptr;
+    NbStitchBegin m_stitchBegin = nullptr;
     NbStitchAppend m_stitchAppend = nullptr;
     NbStitchFinish m_stitchFinish = nullptr;
     NbStitchAbort m_stitchAbort = nullptr;
