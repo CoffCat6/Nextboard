@@ -47,6 +47,7 @@ QVariant ClipEntryModel::data(const QModelIndex& index, int role) const {
         case TodoRemindRole: return r.todoRemindAt;
         case TodoDoneRole: return r.todoDone;
         case TodoOverdueRole: return r.todoOverdue;
+        case TodoNoteRole: return r.todoNote;
     }
     return {};
 }
@@ -60,6 +61,7 @@ QHash<int, QByteArray> ClipEntryModel::roleNames() const {
         {BlobPathRole, "blobPath"}, {TagsRole, "tags"},
         {TodoDueRole, "todoDueAt"}, {TodoRemindRole, "todoRemindAt"},
         {TodoDoneRole, "todoDone"}, {TodoOverdueRole, "todoOverdue"},
+        {TodoNoteRole, "todoNote"},
     };
 }
 

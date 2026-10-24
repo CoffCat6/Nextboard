@@ -1912,6 +1912,7 @@ Rectangle {
                 required property real todoRemindAt
                 required property bool todoDone
                 required property bool todoOverdue
+                required property string todoNote
 
                 width: list.width
                 implicitHeight: groupLabel.visible
@@ -2003,7 +2004,7 @@ Rectangle {
                     todoRemindAt: rowWrap.todoRemindAt
                     todoDone: rowWrap.todoDone
                     todoOverdue: rowWrap.todoOverdue
-                    todoNote: model.todoNote ? model.todoNote : ""
+                    todoNote: rowWrap.todoNote
                     // 搜索命中高亮:直接绑搜索框文本(改词即重算,无需模型参与)
                     query: searchInput.text
                     // 键盘光标行:与"菜单打开"同用强调语言(两者都是"正在被操作的对象"),
