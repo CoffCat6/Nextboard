@@ -1476,13 +1476,14 @@ void OverlayWidget::handleToolbarClick(const QPoint& pos) {
                                           m_selection.normalized().size());
             emit activity();
             update(m_toolbarRect.adjusted(-2, -2, 2, 2));   // 「OCR取字」按钮置灰
-            auto* watcher = new QFutureWatcher<QString>(this);
-            // cropped 按值捕获:识别结果面板要保存它(为"图中取字"预留),
+            auto* watcher = new QFutureWatcher<OcrTextWithLines>(this);
+            // cropped 按值捕获:识别结果面板要保存它(图中取字的高亮底图),
             // 而本函数返回后就地销毁了选区状态。
-            connect(watcher, &QFutureWatcher<QString>::finished, this,
+            connect(watcher, &QFutureWatcher<OcrTextWithLines>::finished, this,
                     [this, watcher, cropped, ocrAnchor] {
                 watcher->deleteLater();
-                const QString text = watcher->result();
+                const OcrTextWithLines ocr = watcher->result();
+                const QString& text = ocr.text;
                 // 「取字」的落点是**系统剪贴板**:识别到就写进去,用户 Ctrl+V 直接可用。
                 // ⚠️ 此前这里只把文本塞进 QToolTip 展示、**从不写剪贴板** ——
                 //    用户点「OCR取字」后剪贴板里当然什么都没有(docs/14 §16 只写了
@@ -1503,14 +1504,14 @@ void OverlayWidget::handleToolbarClick(const QPoint& pos) {
                 // 此前只用 QToolTip 提示 4 秒并立刻结束会话:用户既看不清整段文本,
                 // 也没法只取其中几行 —— 同一个 OCR 能力在两处体验完全不同。
                 // 现在弹一个可驻留、可鼠标选取的面板,用户读完自己关。
-                showOcrResultPanel(text, notice, cropped, ocrAnchor);
+                showOcrResultPanel(text, notice, cropped, ocrAnchor, ocr.lines);
                 update();
                 emit cancelled();
             });
-            connect(watcher, &QFutureWatcher<QString>::canceled, watcher,
+            connect(watcher, &QFutureWatcher<OcrTextWithLines>::canceled, watcher,
                     &QObject::deleteLater);
-            watcher->setFuture(QtConcurrent::run([cropped]() -> QString {
-                return CoreBridge::instance().ocrImage(cropped);
+            watcher->setFuture(QtConcurrent::run([cropped]() -> OcrTextWithLines {
+                return CoreBridge::instance().ocrImageDetailed(cropped);
             }));
             // 进行中提示仍走轻量 tooltip(此刻没有可操作的文本,弹面板只是噪音)
             QToolTip::showText(mapToGlobal(m_toolbarRect.topLeft()),
@@ -1535,7 +1536,8 @@ void OverlayWidget::handleToolbarClick(const QPoint& pos) {
 // ---- OCR 结果驻留面板 ----
 
 void OverlayWidget::showOcrResultPanel(const QString& text, const QString& reason,
-                                       const QImage& source, const QRect& anchorGlobal) {
+                                       const QImage& source, const QRect& anchorGlobal,
+                                       const QVector<OcrLineBox>& lines) {
     // ⚠️ 调用点紧跟着 emit cancelled():遮罩会被 close() 销毁。因此这里
     //    **必须**用顶层窗口(内部 new 的 parent 是 nullptr),不能挂 this 当子控件
     //    —— 否则面板与遮罩同生共死,用户根本看不到结果。
@@ -1546,7 +1548,7 @@ void OverlayWidget::showOcrResultPanel(const QString& text, const QString& reaso
     // ⚠️ 基准是**选区**的全局矩形,不是 this。
     //    this 是整屏遮罩,frameGeometry() 就是整块屏 —— 传它会把面板摆到屏幕边角,
     //    而不是用户刚框的那块内容旁边(用户报的缺陷)。
-    OcrResultPanel::showResult(text, reason, source, anchorGlobal, /*popup=*/false);
+    OcrResultPanel::showResult(text, reason, source, anchorGlobal, /*popup=*/false, lines);
 }
 
 // ---- 滚动长截图态(docs/19 §3.2)----

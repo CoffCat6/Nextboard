@@ -321,8 +321,11 @@ pub unsafe extern "C" fn nb_ocr_rgba(
         let bytes = std::slice::from_raw_parts(rgba, len);
         let settings = crate::core::Core::get()?.settings()?;
         let options = crate::ocr::OcrOptions::from_settings(&settings);
-        let text = crate::ocr::recognize_configured(bytes.to_vec(), width, height, &options)?;
-        Ok(serde_json::json!({ "text": text }).to_string())
+        // 一次推理同时产出文本与行框(图中取字);行框是**可选**字段:
+        // 旧宿主只读 text 不受影响,新宿主没有框(如引擎内部契约变化)也能降级成纯文本。
+        let (text, lines) =
+            crate::ocr::recognize_configured_lines(bytes.to_vec(), width, height, &options)?;
+        Ok(serde_json::json!({ "text": text, "lines": lines }).to_string())
     }))
     .unwrap_or_else(|_| Err(AppError::Panicked("nb_ocr_rgba panic".into())));
     report_out_text(result, out_text)
@@ -1648,7 +1651,9 @@ mod contract_tests {
 
     /// nb_ocr_rgba 自己构造返回体的那段逻辑(与函数体保持同形)。
     fn ocr_payload(text: &str) -> String {
-        serde_json::json!({ "text": text }).to_string()
+        // 行框序列化口径与函数体一致:serde 拍平成 {text,x,y,width,height}
+        let lines: Vec<crate::ocr::OcrLineBox> = vec![];
+        serde_json::json!({ "text": text, "lines": lines }).to_string()
     }
 
     /// 只有 text 字段 —— **没有** ok/data 信封。宿主若加信封会在此失败。
@@ -1660,6 +1665,34 @@ mod contract_tests {
         assert!(
             v.get("data").is_none() && v.get("ok").is_none(),
             "OCR 返回体不应带 ok/data 信封(宿主按裸对象解析);实际: {raw}"
+        );
+    }
+
+
+    /// lines 字段:行框数组(可为空数组),元素含 text/x/y/width/height。
+    /// 宿主「图中取字」按它渲染高亮;缺字段 = 契约断裂。
+    #[test]
+    fn ocr_payload_carries_line_boxes() {
+        let raw = serde_json::json!({
+            "text": "第一行\nsecond line",
+            "lines": [
+                { "text": "第一行", "x": 10, "y": 4, "width": 88, "height": 24 },
+                { "text": "second line", "x": 10, "y": 36, "width": 120, "height": 18 }
+            ]
+        })
+        .to_string();
+        let v: serde_json::Value = serde_json::from_str(&raw).expect("必须是合法 JSON");
+        let arr = v.get("lines").and_then(|l| l.as_array()).expect("lines 必须是数组");
+        assert_eq!(arr.len(), 2, "每行一个框");
+        let first = &arr[0];
+        assert_eq!(first.get("text").and_then(|t| t.as_str()), Some("第一行"));
+        for key in ["x", "y", "width", "height"] {
+            assert!(first.get(key).is_some(), "行框缺字段 {key}: {raw}");
+        }
+        // 反向:整体文本仍按换行拼接,与行序一致(宿主降级路径依赖)。
+        assert_eq!(
+            v.get("text").and_then(|t| t.as_str()),
+            Some("第一行\nsecond line")
         );
     }
 

@@ -6,6 +6,7 @@
 #include <windows.h>
 
 #include <QString>
+#include <QVector>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QJsonDocument>
@@ -55,6 +56,24 @@ using NbCopyRgbaToClipboard = int(__cdecl*)(const unsigned char*, unsigned long 
                                             unsigned, unsigned);
 
 namespace nb {
+
+/// OCR 识别出的**一行**:文本 + 在被识别图像素坐标中的包围盒。
+///
+/// 坐标口径与 core 的 OcrLineBox 一致(原图物理像素,左上角原点),
+/// 直接对应「OCR取字」时传给识别的那张 QImage(截图链路 = 选区合成图)。
+struct OcrLineBox {
+    QString text;
+    QRect rect;
+};
+
+/// nb_ocr_rgba 的完整返回:整体文本 + 每行包围盒。
+///
+/// lines 为空 ≠ 失败:引擎可能没给出框(内部契约变化时 core 侧会宁缺毋滥),
+/// 此时取字功能降级为纯文本面板,整体 text 照常可用。
+struct OcrTextWithLines {
+    QString text;
+    QVector<OcrLineBox> lines;
+};
 
 // nbcore 通知消息(与 core/nbcore/src/core.rs 对应)
 constexpr UINT WM_APP_CLIP_CHANGED = 0x8000 + 1;
@@ -179,6 +198,11 @@ public:
     /// ⚠️ 阻塞调用 —— det 推理 0.4~5s,**必须在非 UI 线程调用**。
     /// 失败/不可用时返回空串(错误文本见 lastError())。
     QString ocrImage(const QImage& image);
+
+    /// [`ocrImage`] 的**带行框**版本(「图中取字」的数据来源):
+    /// 一次推理同时拿整体文本与每行包围盒(core 返回体的可选 lines 数组)。
+    /// 阻塞口径与 ocrImage 相同;失败时 text 为空且 lines 为空。
+    OcrTextWithLines ocrImageDetailed(const QImage& image);
 
     /// 把文本写进系统剪贴板(经核心,与其它复制路径同一通道 —— 核心的
     /// clipboard_win 带打开重试,宿主直接用 Qt 剪贴板在别的进程占用时会静默失败)。

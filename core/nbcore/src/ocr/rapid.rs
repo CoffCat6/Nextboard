@@ -313,6 +313,22 @@ pub fn recognize_with(
     _language: &super::LanguageChoice,
     _preprocess: Preprocess,
 ) -> AppResult<String> {
+    recognize_with_lines(rgba, width, height, _language, _preprocess).map(|(text, _)| text)
+}
+
+/// [`recognize_with`] 的**带行框**版本:每行文本 + 原图物理像素包围盒。
+///
+/// 框来源:det 阶段的四点检测框 —— 引擎内部已用 `map_boxes_to_original`
+/// 映射回原图坐标(pad/缩放已还原),这里只取四点外接矩形(AABB),
+/// 不再做缩放换算。框与行一一对应靠**同序同长**的引擎契约;
+/// 长度不符时宁可整体丢框(文本照常),也不给错位的框。
+pub fn recognize_with_lines(
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+    _language: &super::LanguageChoice,
+    _preprocess: Preprocess,
+) -> AppResult<(String, Vec<super::OcrLineBox>)> {
     if width == 0 || height == 0 {
         return Err(AppError::InvalidInput("图片尺寸为空,无法识别".into()));
     }
@@ -322,7 +338,7 @@ pub fn recognize_with(
     }
 
     let started = Instant::now();
-    let text = with_engine(|engine| {
+    let (text, boxes) = with_engine(|engine| {
         // 复用 nbcore 既有的 owned RGBA 缓冲,避免整图拷贝。
         let input = crate::ocr::rapid::OcrInput::RgbaU8 {
             width: width as usize,
@@ -333,14 +349,41 @@ pub fn recognize_with(
             .run(input, crate::ocr::rapid::OcrCallOptions::default())
             .map_err(|err| AppError::Internal(format!("OCR 识别失败:{err}")))?;
 
-        let lines: Vec<String> = out
-            .txts
-            .unwrap_or_default()
-            .into_iter()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        Ok(lines.join("\n"))
+        let txts = out.txts.unwrap_or_default();
+        let det_boxes = out.boxes.unwrap_or_default();
+        let paired = txts.len() == det_boxes.len();
+        if !paired && !det_boxes.is_empty() {
+            log::warn!(
+            "RapidOCR 行框数({})与文本行数({})不一致,丢弃行框",
+            det_boxes.len(),
+            txts.len()
+            );
+        }
+        let mut boxes = Vec::with_capacity(txts.len());
+        let mut lines = Vec::with_capacity(txts.len());
+        for (i, raw) in txts.into_iter().enumerate() {
+            let line = raw.trim().to_string();
+            if line.is_empty() {
+                continue;
+            }
+            if paired {
+                // 四点外接矩形;框已是原图坐标,只做取整。
+                let q = &det_boxes[i];
+                let min_x = q.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min);
+                let min_y = q.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
+                let max_x = q.iter().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max);
+                let max_y = q.iter().map(|p| p[1]).fold(f32::NEG_INFINITY, f32::max);
+                boxes.push(super::OcrLineBox {
+                    text: line.clone(),
+                    x: min_x.round() as i32,
+                    y: min_y.round() as i32,
+                    width: (max_x - min_x).round().max(0.0) as u32,
+                    height: (max_y - min_y).round().max(0.0) as u32,
+                });
+            }
+            lines.push(line);
+        }
+        Ok((lines.join("\n"), boxes))
     })?;
 
     info!(
@@ -352,7 +395,7 @@ pub fn recognize_with(
         },
         started.elapsed()
     );
-    Ok(text)
+    Ok((text, boxes))
 }
 
 /// 探测可用性(不建 session,只查文件)。

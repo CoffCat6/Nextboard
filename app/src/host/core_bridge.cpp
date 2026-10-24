@@ -7,6 +7,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QImage>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QScreen>
 
@@ -447,7 +448,12 @@ bool CoreBridge::copyRgbaToClipboard(const QImage& image) {
 }
 
 QString CoreBridge::ocrImage(const QImage& image) {
-    if (!m_ocrRgba || !m_freeString || image.isNull()) return {};
+    return ocrImageDetailed(image).text;
+}
+
+OcrTextWithLines CoreBridge::ocrImageDetailed(const QImage& image) {
+    OcrTextWithLines out;
+    if (!m_ocrRgba || !m_freeString || image.isNull()) return out;
     // 核心按 RGBA8888 紧凑排布读取(与 captureCrop 同口径)
     const QImage src = image.convertToFormat(QImage::Format_RGBA8888);
     char* text = nullptr;
@@ -458,28 +464,42 @@ QString CoreBridge::ocrImage(const QImage& image) {
         &text);
     if (rc != 0 || !text) {
         if (text) m_freeString(text);
-        return {};
+        return out;
     }
-    // nb_call 同款生命周期:由此接管并立刻转 QString(拷贝不可避免 ——
-    // 解析 JSON 本来就要这份内容),随即归还核心缓冲。
+    // nb_call 同款生命周期:由此接管并立刻拷出(解析 JSON 本来就要这份内容),
+    // 随即归还核心缓冲。
     const QByteArray owned(text);
     m_freeString(text);
-    // ⚠️ 返回体是**裸** {"text": …}(core/nbcore/src/ffi.rs 的 nb_ocr_rgba 直接
-    //    report_out_text(json!({"text": text}))),**没有** nb_call 那层 {ok,data} 信封。
+    // ⚠️ 返回体是**裸** {"text": …, "lines": […]}(core/nbcore/src/ffi.rs 的
+    //    nb_ocr_rgba 直接 report_out_text),**没有** nb_call 那层 {ok,data} 信封。
     //    这里曾照抄 nb_call 的解析写成 resp["data"]["text"] —— data 不存在,
     //    于是**每次 OCR 都"识别成功但取到空串"**:核心日志里明明有
     //    "RapidOCR 完成:…,62 行",用户却什么都拿不到。
     const QJsonObject resp = QJsonDocument::fromJson(owned).object();
-    QString result = resp.value("text").toString();
-    if (result.isEmpty() && resp.contains("data")) {
+    out.text = resp.value("text").toString();
+    if (out.text.isEmpty() && resp.contains("data")) {
         // 兼容带信封的形态(核心若统一成 nb_call 风格则无需改宿主)
-        result = resp.value("data").toObject().value("text").toString();
+        out.text = resp.value("data").toObject().value("text").toString();
     }
-    if (result.isEmpty() && !resp.isEmpty()) {
+    if (out.text.isEmpty() && !resp.isEmpty()) {
         // 自诊断:有返回体却取不到文本 = 契约变了,别静默当"没识别到"
         qWarning() << "OCR 返回体没有 text 字段,契约可能已变:" << owned.left(200);
     }
-    return result;
+    // 行框:可选字段(旧 nbcore.dll 没有 → 空数组,取字降级为纯文本面板)。
+    // 单条无效(空文本/空框)直接丢弃:错位或空框画出来的高亮比没有框更误导。
+    const QJsonArray lines = resp.value("lines").toArray();
+    for (const QJsonValue& v : lines) {
+        const QJsonObject o = v.toObject();
+        OcrLineBox line;
+        line.text = o.value("text").toString();
+        line.rect = QRect(o.value("x").toInt(), o.value("y").toInt(),
+                          o.value("width").toInt(), o.value("height").toInt());
+        if (!line.text.isEmpty() && !line.rect.isEmpty()) out.lines.push_back(line);
+    }
+    if (!lines.isEmpty() && out.lines.isEmpty()) {
+        qWarning() << "OCR lines 数组存在但全部无效,行框已丢弃:" << owned.left(200);
+    }
+    return out;
 }
 
 bool CoreBridge::copyTextToClipboard(const QString& text) {

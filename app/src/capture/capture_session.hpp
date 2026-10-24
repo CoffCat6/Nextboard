@@ -24,6 +24,8 @@ class QJsonObject;
 
 namespace nb {
 
+struct OcrLineBox;   // host/core_bridge.hpp(图中取字的行数据;此处只需前向声明)
+
 class AnnotationToolbar;   // 二级条共享控件(编辑器/浮条同一类)
 
 /// 截图会话的**意图**,决定"框完之后去哪儿"。
@@ -404,13 +406,15 @@ private:
     /// 弹出识别结果驻留面板(与编辑器共用 ui/ocr_result_panel)。
     /// **必须用顶层窗口**:本方法调用后会话立即 cancelled → 遮罩销毁,
     /// 子控件会跟着消失(见 ocr_result_panel.hpp 的说明)。
-    /// @param source 被识别的原图(选区图)。**当前只保存不渲染** ——
-    ///        留给后续"图中取字"(需要 core 返回逐行 bbox,见 ocr_result_panel.hpp)。
+    /// @param source 被识别的原图(选区图),行框高亮的底图。
+    /// @param lines 每行识别结果及其在 source 中的包围盒(图中取字);
+    ///        可为空(引擎没给出框时,面板降级为纯文本)。
     /// @param anchorGlobal 面板定位基准 = 选区在桌面上的全局矩形。
     ///        由调用方在**点击那一刻**算好传进来,而不是在这里现算 ——
     ///        回调发生在识别完成后,那时遮罩可能已在关闭链路上,窗口几何不再可靠。
     void showOcrResultPanel(const QString& text, const QString& reason,
-                            const QImage& source, const QRect& anchorGlobal);
+                            const QImage& source, const QRect& anchorGlobal,
+                            const QVector<OcrLineBox>& lines = {});
 };
 
 } // namespace nb

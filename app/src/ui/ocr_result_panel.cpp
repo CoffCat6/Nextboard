@@ -78,10 +78,12 @@ QPoint placeNextTo(const QSize& panelSize, const QRect& anchor) {
 } // namespace
 
 OcrResultPanel::OcrResultPanel(const QString& text, const QString& reason,
-                               const QImage& source, bool popup)
+                               const QImage& source, bool popup,
+                               const QVector<OcrLineBox>& lines)
     : QFrame(nullptr, popup ? (Qt::Popup | Qt::FramelessWindowHint)
                             : (Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint)),
-      m_source(source) {
+      m_source(source),
+      m_lines(lines) {
     setObjectName(QStringLiteral("ocrResultPanel"));
     setFrameShape(QFrame::NoFrame);
     // 顶层窗口要透明底,自绘圆角才不会被直角盖住(与贴图工具条同手法)。
@@ -181,6 +183,19 @@ OcrResultPanel::OcrResultPanel(const QString& text, const QString& reason,
     connect(m_closeBtn, &QPushButton::clicked, this, &QWidget::close);
     buttons->addWidget(m_closeBtn);
     layout->addLayout(buttons);
+
+    // ---- 图中取字:行级交互 ----
+    //
+    // 事件装在 **viewport** 而不是 QTextEdit 本身:QTextEdit 把鼠标事件交给
+    // 内部的 QWidget(QAbstractScrollArea::viewport),装在 m_body 上收不到 move/leave。
+    // 行模型 = 文档 block:纯文本 setPlainText 按 \n 分块,块号即行号
+    // (软换行不产生新块,与"识别行"口径一致)。
+    if (m_body && !m_lines.isEmpty()) {
+        m_body->viewport()->installEventFilter(this);
+        m_body->setMouseTracking(true);          // 不按键也能收到 move(悬停高亮)
+        m_body->viewport()->setMouseTracking(true);
+    }
+    buildPreview();
 
     applyTheme();
     fitBodyToContent();
@@ -294,6 +309,193 @@ void OcrResultPanel::applyTheme() {
              ui::withAlpha(t.textTertiary, 170).name(QColor::HexArgb)));
 }
 
+// ---- 图中取字:行级交互 ----
+
+namespace {
+
+/// 预览浮窗里源图的**放大倍数**:行框太小时(单行 12~40px 高)直接显示看不清;
+/// 统一放大到 4 倍封顶、宽 240 起步 —— "看清这一行"够了,再大就成了第二块面板。
+constexpr int kPreviewMinWidth = 240;
+constexpr int kPreviewMaxScale = 4;
+
+} // namespace
+
+/// 悬停预览浮窗:一个小型无框顶层窗口,内容 = 源图该行区域(放大) + 说明行。
+/// 独立顶层而不是面板子控件:它要**盖在面板外**(贴行旁边),子控件画不出父窗口边界。
+void OcrResultPanel::buildPreview() {
+    m_preview = new QWidget(nullptr, Qt::ToolTip | Qt::FramelessWindowHint);
+    m_preview->setObjectName(QStringLiteral("ocrLinePreview"));
+    auto* lay = new QVBoxLayout(m_preview);
+    lay->setContentsMargins(1, 1, 1, 1);
+    lay->setSpacing(0);
+    m_previewImage = new QLabel(m_preview);
+    m_previewImage->setAlignment(Qt::AlignCenter);
+    lay->addWidget(m_previewImage);
+    m_previewCaption = new QLabel(m_preview);
+    m_previewCaption->setObjectName(QStringLiteral("ocrLinePreviewCaption"));
+    m_previewCaption->setAlignment(Qt::AlignCenter);
+    lay->addWidget(m_previewCaption);
+    // 浮窗配色跟面板底板走(themeTokens 与 paintEvent 同源),风格不漂移。
+    const ui::ThemeTokens& t = ui::themeTokens();
+    m_preview->setStyleSheet(
+        QStringLiteral("#ocrLinePreview{background:%1;border:1px solid %2;}")
+            .arg(t.surface.name(), ui::withAlpha(t.border, 230).name()));
+    m_previewCaption->setStyleSheet(
+        QStringLiteral("color:%1;font-size:11px;padding:2px 6px 3px;background:transparent;")
+            .arg(t.textSecondary.name()));
+}
+
+void OcrResultPanel::hidePreview() {
+    m_hoverLine = -1;
+    m_previewAnchorGlobal = QRect();
+    if (m_preview) m_preview->hide();
+}
+
+QRect OcrResultPanel::sourceRectForLine(int lineIndex) const {
+    if (lineIndex < 0 || lineIndex >= m_lines.size()) return QRect();
+    return m_lines.at(lineIndex).rect;
+}
+
+bool OcrResultPanel::lineCopyable(int lineIndex) const {
+    if (lineIndex < 0 || lineIndex >= m_lines.size()) return false;
+    return !m_lines.at(lineIndex).text.trimmed().isEmpty();
+}
+
+int OcrResultPanel::lineIndexForDocumentPosition(int position) const {
+    if (!m_body || position < 0) return -1;
+    QTextCursor c = m_body->textCursor();
+    c.setPosition(qBound(0, position, m_body->document()->characterCount() - 1));
+    return c.blockNumber();   // 纯文本:block 号 == \n 拆分的行号
+}
+
+QPoint OcrResultPanel::previewTopLeftForLine(int lineIndex) const {
+    if (lineIndex < 0 || lineIndex >= m_lines.size() || m_source.isNull()) return QPoint();
+    // 锚 = 该行文字在**面板全局坐标**下的可视矩形(cursorRect 口径,含滚动换行)。
+    if (m_previewAnchorGlobal.isEmpty()) return QPoint();
+    const QSize size = m_preview ? m_preview->size() : QSize(kPreviewMinWidth, 80);
+    // 默认放锚点**右侧** 12px;放不下(屏幕右缘)退到左侧。
+    QPoint p(m_previewAnchorGlobal.right() + 12, m_previewAnchorGlobal.top());
+    QScreen* screen = QGuiApplication::screenAt(p);
+    if (!screen) screen = QGuiApplication::primaryScreen();
+    if (screen) {
+        const QRect avail = screen->availableGeometry();
+        if (p.x() + size.width() > avail.right() - 4) {
+            p.setX(m_previewAnchorGlobal.left() - size.width() - 12);
+        }
+        p.setY(qBound(avail.top() + 4, p.y(),
+                      qMax(avail.top() + 4, avail.bottom() - size.height() - 4)));
+    }
+    return p;
+}
+
+/// 悬停行 → 显示预览浮窗(内容 = 源图该行区域放大)。
+/// 每次都整窗重建内容:行切换频繁,局部更新(QPixmap 原位换)反而要处理大小抖动。
+void OcrResultPanel::showPreviewForLine(int lineIndex) {
+    if (!m_preview || !m_previewImage || !m_previewCaption) return;
+    if (lineIndex < 0 || lineIndex >= m_lines.size() || m_source.isNull()) {
+        hidePreview();
+        return;
+    }
+    const QRect srcRect = m_lines.at(lineIndex).rect;
+    if (srcRect.isEmpty() || !m_source.rect().intersects(srcRect)) {
+        hidePreview();
+        return;
+    }
+    // 上下各放 2px 余量,避免字形贴边;并与源图求交(行框理论上不出图,防御)
+    const QRect clipped = (srcRect.adjusted(-2, -2, 2, 2)).intersected(m_source.rect());
+    const QImage crop = m_source.copy(clipped);
+    if (crop.isNull()) {
+        hidePreview();
+        return;
+    }
+    // 放大倍数:把行框高度撑到 ~64px,封顶 4 倍;宽度同倍率,再封到 520(约一屏行宽)。
+    const int targetH = 64;
+    const qreal scale = qMin<qreal>(kPreviewMaxScale,
+                                    qMax<qreal>(1.0, qreal(targetH) / qMax(1, crop.height())));
+    QImage scaled = crop.scaled(qRound(crop.width() * scale), qRound(crop.height() * scale),
+                                Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    if (scaled.width() > 520) {
+        scaled = scaled.scaledToWidth(520, Qt::SmoothTransformation);
+    }
+    if (scaled.width() < kPreviewMinWidth) {
+        scaled = scaled.scaledToWidth(kPreviewMinWidth, Qt::SmoothTransformation);
+    }
+    m_previewImage->setPixmap(QPixmap::fromImage(scaled));
+    m_previewCaption->setText(m_lines.at(lineIndex).text);
+    m_preview->adjustSize();
+    const QPoint p = previewTopLeftForLine(lineIndex);
+    if (p.isNull()) {
+        hidePreview();
+        return;
+    }
+    m_preview->move(p);
+    m_preview->show();
+    m_preview->raise();
+}
+
+bool OcrResultPanel::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == (m_body ? m_body->viewport() : nullptr) && m_body) {
+        switch (event->type()) {
+        case QEvent::MouseMove: {
+            // 悬停行:找鼠标所在 block,有行框数据就高亮 + 预览。
+            const QPoint vpPos = static_cast<QMouseEvent*>(event)->pos();
+            QTextCursor cursor = m_body->cursorForPosition(vpPos);
+            const int line = cursor.blockNumber();
+            if (line >= 0 && line < m_lines.size() && lineCopyable(line)) {
+                if (m_hoverLine != line) {
+                    m_hoverLine = line;
+                    // 锚 = 该 block 在 viewport 中的可视矩形 → 面板 → 全局。
+                    const QRect blockRect = m_body->cursorRect(cursor);
+                    const QRect vpRect(blockRect.topLeft() + m_body->viewport()->pos(),
+                                       blockRect.size());
+                    const QRect panelRect = QRect(m_body->mapTo(this, vpRect.topLeft()), vpRect.size());
+                    m_previewAnchorGlobal = QRect(mapToGlobal(panelRect.topLeft()), panelRect.size());
+                    showPreviewForLine(line);
+                }
+            } else {
+                hidePreview();
+            }
+            break;
+        }
+        case QEvent::Leave:
+            hidePreview();
+            break;
+        case QEvent::MouseButtonDblClick: {
+            // **点行复制**:双击某行 = 只复制该行(整体复制仍由「再次复制」承担)。
+            // 双击而不是单击:单击是 QTextEdit 划选/定位文本的原生手势,不能抢;
+            // "取这一行"是低频明确动作,双击的确认感正好。
+            auto* me = static_cast<QMouseEvent*>(event);
+            if (me->button() == Qt::LeftButton) {
+                const int line = m_body->cursorForPosition(me->pos()).blockNumber();
+                if (line >= 0 && line < m_lines.size() && lineCopyable(line)) {
+                    if (CoreBridge::instance().copyTextToClipboard(
+                            m_lines.at(line).text)) {
+                        if (m_status) {
+                            m_status->setText(
+                                QStringLiteral("已复制第 %1 行").arg(line + 1));
+                        }
+                    }
+                    me->accept();
+                    hidePreview();
+                    return true;   // 已消费:不再让 QTextEdit 处理这次双击
+                }
+            }
+            break;
+        }
+        default:
+            break;
+        }
+    }
+    return QFrame::eventFilter(watched, event);
+}
+
+void OcrResultPanel::closeEvent(QCloseEvent* e) {
+    // 预览浮窗是独立顶层:面板走 WA_DeleteOnClose 后它若不主动关,
+    // 会留一个看不见的常驻窗口(与面板"不留尸"的约束同源)。
+    hidePreview();
+    QFrame::closeEvent(e);
+}
+
 // ---- 拖动 ----
 
 void OcrResultPanel::mousePressEvent(QMouseEvent* e) {
@@ -398,8 +600,9 @@ QPoint OcrResultPanel::placeForTest(const QSize& panelSize, const QRect& anchorG
 
 OcrResultPanel* OcrResultPanel::showResult(const QString& text, const QString& reason,
                                            const QImage& source, const QRect& anchorRectGlobal,
-                                           bool popup) {
-    auto* panel = new OcrResultPanel(text, reason, source, popup);
+                                           bool popup,
+                                           const QVector<OcrLineBox>& lines) {
+    auto* panel = new OcrResultPanel(text, reason, source, popup, lines);
 
     // 顺序有讲究:
     //   ① 先按**当前屏可用高度**定正文上限(内容长时封顶,剩下的交给滚动条);
@@ -422,12 +625,13 @@ OcrResultPanel* OcrResultPanel::showResult(const QString& text, const QString& r
 }
 
 OcrResultPanel* OcrResultPanel::showResult(const QString& text, const QString& reason,
-                                           const QImage& source, QWidget* anchor, bool popup) {
+                                           const QImage& source, QWidget* anchor, bool popup,
+                                           const QVector<OcrLineBox>& lines) {
     // 便捷重载:退化成"贴这个控件"(编辑器用)。
     // ⚠️ 调用方**不要**把整屏窗口(截图遮罩)传进来 —— 那会算成屏幕边角,
     //    截图链路必须走 anchorRectGlobal 重载传选区矩形。
     const QRect r = anchor ? anchor->frameGeometry() : QRect();
-    return showResult(text, reason, source, r, popup);
+    return showResult(text, reason, source, r, popup, lines);
 }
 
 } // namespace nb

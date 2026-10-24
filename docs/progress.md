@@ -5312,3 +5312,81 @@ QTextEdit 本来就能滚到末尾,与窗口多高无关。
 新增断言:标题行存在 / 拖动位移 = 鼠标位移(实测 (60,45))/(正文区按下不拖动)。
 
 反向验证:删掉正文排除 → 断言仍 PASS(证实它是防御而非修复,见上)。
+
+## 2026-10-24 图中取字(OCR 行级数据 + 面板行交互)
+
+### 背景与目标
+
+用户此前定的计划:「OCR 识别后在图中取字」。此前 core 的 OCR 只返回按行拼接的
+纯文本(`rapid.rs` 的 `lines.join("\n")` / `system.rs` 的 `line.Text()`),
+行位置信息在出口处被丢弃,面板只能整段展示,无法与原图对应。本轮把
+**每行文本 + 原图包围盒** 打通到面板,并实现三件套交互。
+
+### core 侧:两个引擎统一输出行框
+
+- `ocr/mod.rs`:新增 `OcrLineBox { text, x, y, width, height }`(坐标系 =
+  **预处理放大之前的输入图**,即宿主拿到的 QImage 的像素坐标)与
+  `recognize_configured_lines`(带行框入口);纯文本入口签名不动,既有调用方零感知。
+- `system.rs`(Windows OCR):逐行没有整行框,只有词级 `BoundingRect` ——
+  行框 = 该行全部词框的并集(`LineRect::union`),再**除以预处理放大倍率**还原
+  (倍率按原图尺寸重算 `effective_scale`,与 apply_preprocess 同式;末边向上取整)。
+- `rapid.rs`(RapidOCR):det 阶段的四点框**已经**被引擎的
+  `map_boxes_to_original` 映射回原图坐标(pad/缩放已还原),直接取四点 AABB。
+  框与行靠「同序同长」的引擎契约配对;长度不符宁可整体丢框(文本照常)——
+  错位的框比没有框更误导。
+- `ffi.rs` `nb_ocr_rgba`:返回体从裸 `{"text"}` 扩为
+  `{"text", "lines":[{text,x,y,width,height}]}`,**可选字段向后兼容**
+  (旧宿主只读 text 不受影响)。契约测试钉住字段形状与无信封约束。
+
+### 宿主侧:接线与降级
+
+- `CoreBridge::ocrImageDetailed`:一次推理同时拿文本与行框,`ocrImage` 变薄包装;
+  单条无效(空文本/空框)直接丢弃。`lines` 缺失/全无效 → 面板降级纯文本,不报错。
+- 截图链路:`handleToolbarClick` 的 QFutureWatcher 从 QString 换成
+  `OcrTextWithLines`(⚠️ `canceled` 信号的模板参数**必须同步改**,
+  否则重载解析静默选到另一个 signal——编译器不报错,行为是断连)。
+  行框随 `showOcrResultPanel` 传入面板;编辑器链路存 `EditorWindow::m_ocrLines`。
+
+### 面板:行级交互三件套
+
+1. **悬停高亮预览**:鼠标在某行文字上 → 小型无框浮窗(`Qt::ToolTip`)贴在该行旁,
+   显示源图对应区域(放大到 ~64px 高,4 倍封顶)+ 行文本说明。浮窗是**独立顶层**
+   (要盖在面板外),`closeEvent` 回收,不留隐形窗口。
+2. **双击行复制**:双击某行 = 只复制该行(整体复制仍由「再次复制」承担)。
+   双击而不是单击:单击是 QTextEdit 划选的原生手势,不能抢。
+3. 行模型 = 文档 block:纯文本按 \n 分块,块号即行号;事件装在
+   **viewport**(QTextEdit 的鼠标处理所在)而非 QTextEdit 本身 —— 与 B10 的教训同源。
+
+### 顺手修掉的既有缺陷(B11 暴露)
+
+B11 测试经 core 写剪贴板 → 剪贴板监听入库 → 列表模型重建,炸出
+`Main.qml:2006 ReferenceError: model is not defined`(基线无此告警):
+委托根给所有角色都声明了 `required property`,唯独 todoNote 漏了,
+2006 行却写了作用域里不存在的 `model.todoNote`。进一步发现 `roleNames()`
+与 `data()` **也都没暴露** `TodoNoteRole` —— 三处一起补齐。修复后
+capture-toolbar-flow 全程零 WARN(此前每次都会打这条)。
+
+### 踩坑记录
+
+1. **`LineRect::default()` 从 (0,0) 起**:union 直接并入会把首个词框的并集
+   拖向原点(单测实测 (100,50) 并入后得 (0,0,140,70))。修复:退化词框忽略、
+   空矩形以首个有效词框为初值 —— 新增单测在实现**之前**就抓住了它。
+2. **`div_ceil` 在本工具链未稳定**(E0658):手写 `(v + s - 1) / s`。
+3. **First-run 五项 e2e 失败是虚惊**:同一份代码复跑两次均 0 失败;
+   首跑失败伴随「Complete 合成图 0x0 + 重做失效」的组合,与后台残留实例
+   (日志里有热键 1409 冲突)的时序吻合。教训:**先复跑再归因**。
+
+### 验证
+
+| 项 | 结果 |
+| --- | --- |
+| `--capture-toolbar-flow` | **87 项 / 0 失败**(上轮 78,+9:B11 行交互) |
+| `--stitch-flow` / `--todo-layout-flow` / `--todo-flow` | 0 失败 |
+| cargo test | 375 passed(+2 LineRect);唯一失败为既有环境相关的 SOCKS5 用例(stash 对照验证与本轮无关) |
+| app 构建 | 0 error / 0 warning;全程 QML 零告警 |
+
+B11 九项断言:行框与喂入一致 ×2 / 越界行号返回空框 / 悬停命中行 /
+预览浮窗出现 / 预览完整在屏内 / 移出收起 / 双击行只复制该行(剪贴板实测)。
+
+反向验证:把悬停处理短路(`if (false && …)`)→「悬停命中」「预览浮窗出现」
+两项立即变红(failures 0→2),断言有效。

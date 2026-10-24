@@ -551,10 +551,11 @@ void EditorWindow::ocrTakeText() {
     if (composed.isNull()) return;
     // OCR 必须**异步**:det 推理 0.4~5s(全屏),UI 线程跑会冻结工具栏。
     // 模式照抄 CoreFacade::ocrEntry(QThreadPool + 结果回 UI 线程)。
-    auto* watcher = new QFutureWatcher<QString>(this);
-    connect(watcher, &QFutureWatcher<QString>::finished, this, [this, watcher] {
+    auto* watcher = new QFutureWatcher<OcrTextWithLines>(this);
+    connect(watcher, &QFutureWatcher<OcrTextWithLines>::finished, this, [this, watcher] {
         watcher->deleteLater();
-        const QString text = watcher->result();
+        const OcrTextWithLines ocr = watcher->result();
+        const QString& text = ocr.text;
         // 「取字」的落点是**系统剪贴板**(与浮条同一语义,对齐第一代:
         // 见 docs/progress.md「OCR 结果」一条)。此前这里只弹层展示、从不写剪贴板,
         // 用户点了「OCR取字」再 Ctrl+V 什么都没有。
@@ -567,11 +568,14 @@ void EditorWindow::ocrTakeText() {
         } else {
             reason = QStringLiteral("识别成功,但写入剪贴板失败");
         }
+        // 行框存成员:面板收 popup=true 弹出后,编辑器可能继续存活、面板也可能被
+        // 重新弹出(识别中 → 结果),成员是两条路径都能拿到的唯一稳定落点。
+        m_ocrLines = ocr.lines;
         showOcrResult(text, reason);
     });
-    connect(watcher, &QFutureWatcher<QString>::canceled, watcher, &QObject::deleteLater);
-    watcher->setFuture(QtConcurrent::run([image = composed]() -> QString {
-        return CoreBridge::instance().ocrImage(image);
+    connect(watcher, &QFutureWatcher<OcrTextWithLines>::canceled, watcher, &QObject::deleteLater);
+    watcher->setFuture(QtConcurrent::run([image = composed]() -> OcrTextWithLines {
+        return CoreBridge::instance().ocrImageDetailed(image);
     }));
     // 弹层先以"识别中"占位,完成后由 showOcrResult 填充(全屏 4~5s 不能没反馈)
     showOcrResult(QString(), QStringLiteral("识别中…"));
@@ -611,7 +615,7 @@ void EditorWindow::showOcrResult(const QString& text, const QString& reason) {
     // 原图 = 当前合成结果(底图 + 标注),不是 m_base:用户已经画过标注,
     // 面板里"源图"应与他看到的一致(也为后续"图中取字"提供正确底图)。
     const QImage source = m_engine ? m_engine->compose() : QImage();
-    m_ocrPopup = OcrResultPanel::showResult(text, reason, source, this, /*popup=*/true);
+    m_ocrPopup = OcrResultPanel::showResult(text, reason, source, this, /*popup=*/true, m_ocrLines);
 
     // ⚠️ 不自动关编辑器:面板要留给用户阅读/选取片段。
     //    关闭由用户点按钮(或直接关编辑器)完成 —— 曾经的 singleShot 关窗

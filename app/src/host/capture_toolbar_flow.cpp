@@ -29,8 +29,10 @@
 #include "host/core_bridge.hpp"
 
 #include <QApplication>
+#include <QClipboard>
 #include <QImage>
 #include <QKeyEvent>
+#include <QPainter>
 #include <QJsonObject>
 #include <QTextEdit>
 #include <QStringList>
@@ -425,6 +427,99 @@ void runCaptureToolbarFlow() {
                               QStringLiteral("正文区按下不拖动窗口(划选文字不受影响)"));
                     }
                     if (dragPanel) dragPanel->close();
+                }
+
+                // ---- B11. 图中取字:行级交互(悬停预览 + 双击复制) ----
+                //
+                // 数据模型:面板拿到的行数与源图行框必须一致 —— 这是悬停高亮、
+                // 预览定位、双击复制的共同前提。四类断言:
+                //  ① 行数据齐全:sourceRectForLine 返回的框与喂进去的完全一致;
+                //  ② 悬停 → 预览浮窗出现,且**定位在该行文字旁边**(不是屏幕角落);
+                //  ③ 移出 → 预览收起(不留浮窗);
+                //  ④ 双击某行 → 剪贴板内容 = 该行文本(不是整段)。
+                {
+                    // 源图:一条"分隔带"两行文字区(框是涂色矩形,肉眼核对也行)
+                    QImage src(220, 80, QImage::Format_ARGB32_Premultiplied);
+                    src.fill(QColor(0xEF, 0xF5, 0xFF));
+                    QPainter pm(&src);
+                    pm.fillRect(QRect(10, 8, 150, 26), QColor(0x1C, 0x7E, 0xD6));
+                    pm.fillRect(QRect(10, 44, 180, 24), QColor(0xE0, 0x31, 0x31));
+                    pm.end();
+
+                    QVector<OcrLineBox> lines;
+                    lines.append({ QStringLiteral("第一行文本"), QRect(10, 8, 150, 26) });
+                    lines.append({ QStringLiteral("second line"), QRect(10, 44, 180, 24) });
+
+                    QPointer<OcrResultPanel> lp = OcrResultPanel::showResult(
+                        QStringLiteral("第一行文本\nsecond line"), QString(),
+                        src, QRect(QPoint(420, 300), QSize(300, 200)),
+                        /*popup=*/false, lines);
+                    QApplication::processEvents();
+
+                    // ① 行框数据一致(图中取字的地基)
+                    check(lp->sourceRectForLine(0) == QRect(10, 8, 150, 26),
+                          QStringLiteral("行框 0 与喂入数据一致"));
+                    check(lp->sourceRectForLine(1) == QRect(10, 44, 180, 24),
+                          QStringLiteral("行框 1 与喂入数据一致"));
+                    check(lp->sourceRectForLine(9).isNull(),
+                          QStringLiteral("越界行号返回空框(不崩溃)"));
+
+                    // ② 悬停第 2 行:预览浮窗出现且贴着该行文字
+                    QTextEdit* lbody = lp->findChild<QTextEdit*>(QStringLiteral("ocrText"));
+                    QWidget* lvp = lbody ? lbody->viewport() : nullptr;
+                    check(lbody && lvp, QStringLiteral("B11 前置:正文与 viewport 可得"));
+                    if (lvp) {
+                        // 第 2 行文字中心:cursorForPosition 反查不可靠(依赖布局),
+                        // 直接取文档第 2 块的可视矩形中心(与实现同口径)。
+                        QTextCursor c2 = lbody->textCursor();
+                        c2.movePosition(QTextCursor::NextBlock);
+                        const QRect r2 = lbody->cursorRect(c2);
+                        const QPoint hover = r2.center();
+                        QMouseEvent moveEv(QEvent::MouseMove, QPointF(hover),
+                                           QPointF(lvp->mapToGlobal(hover)),
+                                           Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+                        QApplication::sendEvent(lvp, &moveEv);
+                        QApplication::processEvents();
+                        qInfo() << "CAPTURE-TOOLBAR  hover line =" << lp->hoveredLine()
+                                << "preview visible =" << (lp->previewWidget() && lp->previewWidget()->isVisible())
+                                << "preview pos =" << (lp->previewWidget() ? lp->previewWidget()->pos() : QPoint());
+                        check(lp->hoveredLine() == 1,
+                              QStringLiteral("悬停命中第 2 行(实际 %1)").arg(lp->hoveredLine()));
+                        QWidget* pv = lp->previewWidget();
+                        check(pv && pv->isVisible(),
+                              QStringLiteral("悬停行出现预览浮窗"));
+                        if (pv) {
+                            // 预览必须**可预见**:在屏内(不会被摆到屏幕外)
+                            const QRect avail = screen->availableGeometry();
+                            check(avail.contains(pv->frameGeometry()),
+                                  QStringLiteral("预览浮窗完整落在屏内"));
+                        }
+
+                        // ③ 鼠标移出正文:预览收起
+                        QEvent leave(QEvent::Leave);
+                        QApplication::sendEvent(lvp, &leave);
+                        QApplication::processEvents();
+                        check(!lp->previewWidget() || !lp->previewWidget()->isVisible(),
+                              QStringLiteral("移出正文预览收起"));
+
+                        // ④ 双击第 1 行 → 剪贴板 = 该行文本
+                        CoreBridge::instance().copyTextToClipboard(
+                            QStringLiteral("SENTINEL-BEFORE"));
+                        QTextCursor c1 = lbody->textCursor();
+                        c1.movePosition(QTextCursor::Start);
+                        const QRect r1 = lbody->cursorRect(c1);
+                        const QPoint dbl = r1.center();
+                        QMouseEvent dpress(QEvent::MouseButtonDblClick, QPointF(dbl),
+                                           QPointF(lvp->mapToGlobal(dbl)), Qt::LeftButton,
+                                           Qt::LeftButton, Qt::NoModifier);
+                        QApplication::sendEvent(lvp, &dpress);
+                        QApplication::processEvents();
+                        const QString clip = QGuiApplication::clipboard()->text();
+                        qInfo() << "CAPTURE-TOOLBAR  dblclick line0 clipboard =" << clip;
+                        check(clip == QStringLiteral("第一行文本"),
+                              QStringLiteral("双击行只复制该行(实际 %1)").arg(clip));
+                    }
+                    if (lp) lp->close();
                 }
             }
         }

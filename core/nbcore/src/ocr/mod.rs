@@ -131,6 +131,44 @@ impl OcrOptions {
     }
 }
 
+/// OCR 识别出的**一行**文字及其在原图中的包围盒(「图中取字」的数据基础)。
+///
+/// 坐标系:**原图物理像素**(预处理放大之前的输入图),左上角原点 ——
+/// 宿主拿到的截图 QImage 就是这个尺寸,拿到框即可直接换算显示,
+/// 不需要知道 ocr_scale 做过几倍放大(两个引擎都负责还原,见各自实现)。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct OcrLineBox {
+    /// 该行文本(与整体文本按换行拆分后的顺序一一对应)。
+    pub text: String,
+    /// 包围盒左上角与宽高(原图物理像素)。
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// [`recognize_configured`] 的**带行框**版本:整体文本 + 每行包围盒。
+///
+/// 「图中取字」(识别面板悬停某行 → 高亮原图对应区域)需要每行的 bbox;
+/// 纯文本入口 [`recognize_configured`] 保持签名不动,既有调用方零感知。
+/// 返回的 text 与 OcrLineBox 列表按同一顺序一一对应。
+pub fn recognize_configured_lines(
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+    options: &OcrOptions,
+) -> AppResult<(String, Vec<OcrLineBox>)> {
+    match options.backend {
+        Backend::System => {
+            system::recognize_with_lines(rgba, width, height, &options.language, options.preprocess)
+        }
+        // RapidOCR 自带 max_side_len,不应用 ocr_scale 放大;中英混排一体,不分语言。
+        Backend::RapidOcr => {
+            rapid::recognize_with_lines(rgba, width, height, &options.language, options.preprocess)
+        }
+    }
+}
+
 /// 按指定后端/语言/预处理做 OCR(命令层与对比基准共用入口)。
 ///
 /// 收 **owned** RGBA:内部预处理/转换会原地复用这份缓冲(见 `apply_preprocess` 与

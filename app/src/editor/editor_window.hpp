@@ -27,6 +27,8 @@ class QToolBar;
 
 namespace nb {
 
+struct OcrLineBox;   // host/core_bridge.hpp(图中取字的行数据;此处只需前向声明)
+
 // 前置声明必须**在命名空间内**:放在全局作用域会声明出一个 ::AnnotationToolbar,
 // 与本项目真正的 nb::AnnotationToolbar 是两个类型 —— 表现为
 // "无法从 nb::AnnotationToolbar* 转换为 AnnotationToolbar*"。
@@ -103,6 +105,9 @@ private:
     // OCR 弹层:识别中用轻量 QLabel 提示,出结果后换成带按钮的 QFrame 面板,
     // 故类型取公共基类 QWidget*(用 QLabel* 装 QFrame 会编译不过)。
     QWidget* m_ocrPopup = nullptr;
+    /// 最近一次识别的每行结果(图中取字);识别完成后由结果回调填充,
+    /// showOcrResult 弹面板时转发给 OcrResultPanel。
+    QVector<OcrLineBox> m_ocrLines;
 };
 
 } // namespace nb
