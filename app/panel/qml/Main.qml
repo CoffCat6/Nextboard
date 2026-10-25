@@ -28,8 +28,8 @@ Rectangle {
     }
 
     // 自动化验收入口:C++ openSettingsPanel 直调(等价点「设置」按钮)。
-    // 设置抽屉已改 Loader 懒构建,这条链路同时验证"首次构建 + 尺寸对齐面板根"。
-    function openSettings() { settingsDrawerLoader.openAndLoad() }
+    // 「设置」按钮也走这里 —— 统一漏斗进 panelWindow.showSettings()(整窗页面形态)。
+    function openSettings() { panelWindow.showSettings() }
 
     /// 自动化验收入口(待办链路,**零参分步**直调,等价用户操作序列):
     ///   ① acceptanceOpenPicker():打开新建卡片 + 点「截止」字段开浮层(保持打开)
@@ -106,21 +106,21 @@ Rectangle {
         }
     }
 
-    /// 验收:把设置抽屉的内容滚到底(验证"滚动后 ✕ 仍可点" —— 固定头部)。
+    /// 验收:把设置页当前分类的内容滚到底(验证"滚动后 ✕ 仍可点" —— 固定头部)。
     function acceptanceSettingsToBottom() {
-        if (settingsDrawerLoader.item) settingsDrawerLoader.item.scrollToBottom()
+        if (settingsPage.item) settingsPage.item.scrollToBottom()
     }
 
-    /// 验收:把设置抽屉里的某个控件滚入视口(按 objectName 定位)。
+    /// 验收:把设置页里的某个控件滚入视口(按 objectName 定位)。
     ///
     /// 为什么需要:`scrollToBottom()` 会把**靠上**的控件滚出视口顶部,
     /// 而 QML 的 `isVisible()` 对"被裁到视口外"的项**仍返回 true** ——
-    /// 验收点击会落在窗口外坐标上(实测 y=-207)而静默失败。
+    /// 验收点击会落在一个窗口外的坐标上(实测 y=-207)而静默失败。
     function acceptanceSettingsScrollTo(objectName) {
-        const drawer = settingsDrawerLoader.item
-        if (!drawer) return false
-        const target = findChildByName(drawer, objectName)
-        return drawer.acceptanceScrollTo(target)
+        const page = settingsPage.item
+        if (!page) return false
+        const target = findChildByName(page, objectName)
+        return page.acceptanceScrollTo(target)
     }
 
     /// 在 QML 项树里按 objectName 递归查找(QML 无内置 findChild)。
@@ -156,23 +156,23 @@ Rectangle {
     ///    → 真实 Core 调用这一段全走真链路。
     property string acceptanceBackupPath: ""
     function acceptanceOpenRestore() {
-        if (settingsDrawerLoader.item) {
-            settingsDrawerLoader.item.openRestoreConfirm(acceptanceBackupPath)
+        if (settingsPage.item) {
+            settingsPage.item.openRestoreConfirm(acceptanceBackupPath)
         }
     }
     function acceptanceOpenImport() {
-        if (settingsDrawerLoader.item) {
-            settingsDrawerLoader.item.openImportConfirm(acceptanceBackupPath)
+        if (settingsPage.item) {
+            settingsPage.item.openImportConfirm(acceptanceBackupPath)
         }
     }
-    /// 验收(--clear-all-flow):把设置抽屉的「清空全部数据」按钮滚进可视区
-    /// (危险区在表单尾部,不滚过去点击会落空)。
+    /// 验收(--clear-all-flow):把设置页「数据」分类的「清空全部数据」按钮滚进可视区
+    /// (危险区在表单尾部,不滚过去点击会落空;SettingsView 会先切到数据分类)。
     function acceptanceRevealClearAll() {
-        if (settingsDrawerLoader.item) settingsDrawerLoader.item.revealClearAll()
+        if (settingsPage.item) settingsPage.item.revealClearAll()
     }
-    /// 验收(--update-flow):把设置抽屉的「检查更新」按钮滚进可视区(关于区在最末)。
+    /// 验收(--update-flow):把设置页「关于」分类的「检查更新」按钮滚进可视区。
     function acceptanceRevealUpdate() {
-        if (settingsDrawerLoader.item) settingsDrawerLoader.item.revealUpdateCheck()
+        if (settingsPage.item) settingsPage.item.revealUpdateCheck()
     }
 
     /// 读回:是否处于编辑态(供断言"保存成功后卡片已关")。
@@ -232,24 +232,27 @@ Rectangle {
                 out.push(Entries.tagStats[i].tag)
             return out.join(",")
         })(),
-        // 设置抽屉(--settings-flow):开合状态 + 内容滚动位置(验证固定头部)。
-        settingsOpen: !!(settingsDrawerLoader.item && settingsDrawerLoader.item.opened),
-        settingsScrollY: settingsDrawerLoader.item
-                         ? settingsDrawerLoader.item.acceptanceScrollY : -1,
+        // 设置页(--settings-flow):开合状态 + 当前分类内容滚动位置(验证固定头部)。
+        // ⚠️ settingsOpen 读形态而非 Loader:页面壳一旦构建过就常驻(内容页按需装卸),
+        //    "壳在"不等于"设置页开着"。
+        settingsOpen: panelWindow.mode === "settings",
+        settingsScrollY: settingsPage.item
+                         ? settingsPage.item.acceptanceScrollY : -1,
         // 恢复/导入确认卡(--restore-flow):点按钮后确认卡应可见。
-        restoreCardVisible: settingsDrawerLoader.item
-                            ? settingsDrawerLoader.item.acceptanceRestoreCardVisible : false,
-        importCardVisible: settingsDrawerLoader.item
-                           ? settingsDrawerLoader.item.acceptanceImportCardVisible : false,
+        restoreCardVisible: settingsPage.item
+                            ? settingsPage.item.acceptanceRestoreCardVisible : false,
+        importCardVisible: settingsPage.item
+                           ? settingsPage.item.acceptanceImportCardVisible : false,
         // 更新检查(--update-flow):结果文案 + 交给浏览器的下载链接。
-        updateHintText: settingsDrawerLoader.item
-                        ? settingsDrawerLoader.item.acceptanceUpdateHint : "",
-        updateDownloadUrl: settingsDrawerLoader.item
-                           ? settingsDrawerLoader.item.acceptanceUpdateUrl : "",
-        updateEnabled: settingsDrawerLoader.item
-                       ? settingsDrawerLoader.item.acceptanceUpdateEnabled : false,
-        updateNoteVisible: settingsDrawerLoader.item
-                           ? settingsDrawerLoader.item.acceptanceUpdateNoteVisible : false,
+        // 这些状态在设置页壳根上(壳没建过时读不到 → 兜底 false/"")。
+        updateHintText: settingsPage.item
+                        ? settingsPage.item.acceptanceUpdateHint : "",
+        updateDownloadUrl: settingsPage.item
+                           ? settingsPage.item.acceptanceUpdateUrl : "",
+        updateEnabled: settingsPage.item
+                       ? settingsPage.item.acceptanceUpdateEnabled : false,
+        updateNoteVisible: settingsPage.item
+                           ? settingsPage.item.acceptanceUpdateNoteVisible : false,
         // 页签可见性(0 个未完成待办时「待办」页签必须仍在)。
         todoTabVisible: tabRepeater.itemAt(4) ? tabRepeater.itemAt(4).visible : false
     })
@@ -419,8 +422,9 @@ Rectangle {
     /// 而不是让模型去维护一个"光标 id"。
     property int kbIndex: -1
 
-    /// 列表当前是否该接管方向键:浮层(菜单/筛选/标签卡/待办卡/抽屉)打开时
+    /// 列表当前是否该接管方向键:浮层(菜单/筛选/标签卡/待办卡)打开时
     /// **不接管** —— 那些浮层里有自己的焦点与按键语义,抢过来会误触发复制。
+    /// 设置/翻译页(整窗形态)由首个条件 `mode === "list"` 一并排除。
     ///
     /// ⚠️ 必须写成**函数**而不是 readonly property:这些卡片/列表都在本对象**之后**
     ///    创建,根对象的属性绑定在构造期就求值,那时 id 还是 null —— 绑定会静默算成
@@ -428,7 +432,6 @@ Rectangle {
     function listKeysUsable() {
         return panelWindow.mode === "list" && !selectMode && !filterPopupOpen
             && menuTarget === null
-            && !(settingsDrawerLoader.item && settingsDrawerLoader.item.opened)
             && !tagEditorCard.visible && !tagRenameCard.visible
             && !todoComposerCard.visible && !bulkDeleteCard.visible
             && !bulkTagCard.visible && !clearDoneCard.visible
@@ -671,20 +674,19 @@ Rectangle {
     /// 这样"切走再回来"原文/译文还在,且从不翻译的用户完全不付这份开销。
     property bool translatePageBuilt: false
 
-    /// 收掉列表页的全部浮层:设置抽屉 / 右键菜单 / 标签编辑。
-    ///
-    /// ⚠️ 设置抽屉(`AppDrawer` → `Drawer`)继承自 **Popup**,渲染在窗口的 overlay 层 ——
-    /// 它永远盖在所有普通 Item 之上,与"谁先声明"无关。所以切到翻译页时若不清掉,
-    /// 它会**浮在翻译页上面**,而且此时焦点已交给翻译页,抽屉自己的 Esc 也收不到。
+    /// 设置页是否已构建过:壳(标题栏+侧栏)首次打开才实例化,之后常驻;
+    /// 内容区(当前分类表单)由 SettingsView 自己按需装卸 —— 从不进设置的用户
+    /// 完全不付这份开销。
+    property bool settingsPageBuilt: false
+
+    /// 收掉列表页的全部浮层:右键菜单 / 标签编辑 / 筛选浮层。
+    /// (设置页是整窗形态,切形态即隐藏列表页,不再是"要收的浮层"。)
     function dismissListOverlays() {
-        // 设置抽屉已改 Loader 懒构建:item 为空 = 从未打开过,自然没有浮层要收
-        if (settingsDrawerLoader.item && settingsDrawerLoader.item.opened)
-            settingsDrawerLoader.item.close()
         if (root.menuTarget !== null) root.closeEntryMenu()
         if (root.tagEditId !== "") root.tagEditId = ""
         // 标签重命名卡片同理(新增时容易漏,漏了它会残留在翻译页上)
         if (tagRenameCard.visible) tagRenameCard.visible = false
-        // 筛选浮层(Popup)渲染在 overlay 层,不清会浮在翻译页上(同抽屉的坑)
+        // 筛选浮层(Popup)渲染在 overlay 层,不清会浮在翻译页上
         if (root.filterPopupOpen) root.closeFilterPopup()
     }
 
@@ -694,6 +696,13 @@ Rectangle {
         dismissListOverlays()   // 先把列表页的浮层收干净,再进翻译页
         translatePageBuilt = true
         if (translatePage.item) translatePage.item.openWith(text)
+    }
+
+    /// C++ 侧(PanelWindow::showSettings)调用:构建设置页壳并拉取设置回填。
+    /// (showSettings 已完成形态切换与窗口尺寸;这里只管构建 + 数据。)
+    function openSettingsPage() {
+        settingsPageBuilt = true
+        if (settingsPage.item) settingsPage.item.load()
     }
 
     /// 打开标签编辑卡片(右键菜单「标签…」)。
@@ -1030,12 +1039,14 @@ Rectangle {
 
     Keys.onEscapePressed: {
         // 分层处理,一次 Esc 只消费一层(自上而下):
-        //   选择模式 → 筛选浮层 → 设置抽屉 → 翻译页浮层 → 收起面板
+        //   选择模式 → 筛选浮层 → 翻译页浮层 → 设置页(返回列表) → 收起面板
         // 翻译页的 Esc 语义与 ✕ 一致:**直接收起**,不再顺带切回列表页。
+        // 设置页的 Esc 是**返回列表页**而不是收起 —— 设置通常是"从列表进来调一调",
+        // 调完继续干活的频率远高于"到此为止"(要收起走 ✕)。
         // ⚠️ 选择模式排在最前:它是"覆盖整列表的操作态",用户在模式内按 Esc
         //    最可能是想退出多选;且退出比关浮层"损失"更小(选择集可重建)。
-        // ⚠️ 筛选浮层次之:它是"贴在某按钮下的轻浮层",若排在抽屉之后,
-        //    抽屉没开时这一层就永远轮不到。
+        // ⚠️ 筛选浮层次之:它是"贴在某按钮下的轻浮层",若排在页面形态之后,
+        //    列表页没开时这一层就永远轮不到。
         if (root.selectMode) {
             root.exitSelectMode()
             return
@@ -1044,14 +1055,14 @@ Rectangle {
             root.closeFilterPopup()
             return
         }
-        if (settingsDrawerLoader.item && settingsDrawerLoader.item.opened) {
-            settingsDrawerLoader.item.close()
-            return
-        }
         if (panelWindow.mode === "translate") {
             // 翻译页存在时先问它有没有浮层要关(如历史抽屉),没有就收起面板
             if (!translatePage.item || !translatePage.item.dismissTopLayer())
                 panelWindow.hidePanel()
+            return
+        }
+        if (panelWindow.mode === "settings") {
+            panelWindow.showList()
             return
         }
         panelWindow.hidePanel()
@@ -1110,8 +1121,7 @@ Rectangle {
             }
         }
         if ((event.modifiers & Qt.ControlModifier)
-                && !(settingsDrawerLoader.item && settingsDrawerLoader.item.opened)
-                && panelWindow.mode !== "translate"
+                && panelWindow.mode === "list"
                 && event.key >= Qt.Key_1 && event.key <= Qt.Key_9) {
             const resp = Entries.copyByIndex(event.key - Qt.Key_1)
             if (resp.ok) {
@@ -1312,7 +1322,7 @@ Rectangle {
                     iconName: "settings"
                     text: "设置"
                     Layout.alignment: Qt.AlignVCenter
-                    onClicked: settingsDrawerLoader.openAndLoad()
+                    onClicked: root.openSettings()
                 }
                 // 固定:开启后点其它地方不会自动隐藏(选中态用 accent 底反馈)
                 ThemedButton {
@@ -2214,27 +2224,22 @@ Rectangle {
         }
     }
 
-    // ---- 抽屉(设置仍留在面板内;翻译已并入面板为"整窗模式切换") ----
-    // 懒构建:SettingsDrawer 是一个 1200+ 行的重表单(6 组设置 + 多个自绘控件),
-    // 原先作为 Main.qml 的直接子项**启动即整棵实例化**,哪怕从不打开 —— 它单独
-    // 吃掉数 MB 的常驻(含委托/控件对象)。这里改为首次点「设置」才构建,之后常驻
-    // (再次打开省去重建,且保留上次的滚动位置)。
-    //
-    // item 为空 = 从未打开:调用方据此判空(opened 之类属性经 item 访问)。
-    // openAndLoad() 供 Header 的设置按钮调用:先建后开,再拉取设置回填。
+    // ---- 页 3:设置(整窗页面形态,与翻译页同一模式;抽屉已退役,docs/22) ----
+    // 壳(标题栏+侧栏)懒构建 + 之后常驻;内容区(当前分类表单)由 SettingsView
+    // 自己按需装卸 —— 只实例化当前分类,离开设置页即销毁。
+    // 旧抽屉的问题:40+ 字段一次实例化(约 6.6MB 私有)且常驻不释放;
+    // 且 Popup 挂在 overlay 层,与翻译页互相干扰(浮在翻译页上且 Esc 收不到)。
     Loader {
-        id: settingsDrawerLoader
-        active: false
-        // ⚠️ 尺寸必须对齐面板根:AppDrawer 用 `parent.width * 0.52` / `parent.height`
-        // 给自己定尺寸,而经 Loader 构建后它的 `parent` 就是**本 Loader** ——
-        // 不设尺寸会让抽屉拿不到宽高(0×0),打开时不可见。对齐后行为与原先
-        // `SettingsDrawer` 直接挂在 root 下完全一致。
-        width: root.width
-        height: root.height
-        sourceComponent: Component { SettingsDrawer { } }
-        function openAndLoad() {
-            active = true                 // 构建是同步的,置位后 item 立即可用
-            item.openAndLoad()
+        id: settingsPage
+        active: root.settingsPageBuilt
+        anchors.fill: parent
+        visible: panelWindow.mode === "settings"
+        sourceComponent: Component { SettingsView { } }
+        // 页切换时把焦点交接清楚:进设置页→页内拿焦点(输入框/快捷键录制需要);
+        // 回列表页→面板根拿焦点(否则 Esc/Ctrl+F 这些根级按键会留在已隐藏的页里)。
+        onVisibleChanged: {
+            if (visible) { if (item) item.forceActiveFocus() }
+            else root.forceActiveFocus()
         }
     }
 
@@ -2952,10 +2957,10 @@ Rectangle {
                         font.pixelSize: Theme.metrics.fontCaption
                     }
                     Item { Layout.fillWidth: true }
-                    // ⚠️ 不能用 ReadableCheckBox:它只在 SettingsDrawer.qml 内部定义,
-                    //    不是模块级类型 —— 引用会整份 Main.qml 加载失败
-                    //    ("ReadableCheckBox is not a type"),面板直接空白。
-                    //    这里用主面板已有的 ThemedButton,状态靠属性 + 文案表达。
+                    // 备注"展开/收起"用 ThemedButton 而非 ReadableCheckBox:
+                    // 旧抽屉时代 ReadableCheckBox 还是 SettingsDrawer.qml 的内联组件
+                    // (模块级引用不到),如今虽已文件化为模块类型,但这里保持既有
+                    // 按钮形态不变 —— 状态靠属性 + 文案表达,且已有验收覆盖。
                     property bool noteExpanded:
                         todoNoteInput.text.length > 0 || todoNoteInput.activeFocus
                     ThemedButton {

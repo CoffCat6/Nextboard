@@ -80,13 +80,30 @@ qt_add_qml_module(nextboard
         panel/qml/AppMark.qml
         panel/qml/HeaderIcon.qml
         panel/qml/ReadableComboBox.qml
+        panel/qml/ReadableCheckBox.qml
+        panel/qml/ReadableSpinBox.qml
+        panel/qml/ReadableTextField.qml
         panel/qml/TextEditMenu.qml
         panel/qml/ThemedButton.qml
         panel/qml/ThemedMenu.qml
         panel/qml/ThemedMenuItem.qml
         panel/qml/ThemedMenuSeparator.qml
-        panel/qml/AppDrawer.qml
-        panel/qml/SettingsDrawer.qml
+        panel/qml/HotkeyField.qml
+        panel/qml/ColorSwatchGrid.qml
+        panel/qml/SectionDivider.qml
+        panel/qml/SectionTitle.qml
+        panel/qml/FieldLabel.qml
+        panel/qml/HintLabel.qml
+        panel/qml/SettingsView.qml
+        panel/qml/SettingsPageGeneral.qml
+        panel/qml/SettingsPageCapture.qml
+        panel/qml/SettingsPagePin.qml
+        panel/qml/SettingsPageHotkeys.qml
+        panel/qml/SettingsPageOcr.qml
+        panel/qml/SettingsPageTranslate.qml
+        panel/qml/SettingsPageNetwork.qml
+        panel/qml/SettingsPageData.qml
+        panel/qml/SettingsPageAbout.qml
         panel/qml/TranslateView.qml
         panel/qml/Theme.qml
         panel/qml/TodoDatePicker.qml

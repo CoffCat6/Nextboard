@@ -17,13 +17,15 @@ class PanelWindow : public QWidget {
     /// 是否"固定"面板:固定后失焦不自动隐藏(并同步置顶,便于随时可见)。
     /// QML 侧直接绑定 `panelWindow.pinned` 做按钮选中态。
     Q_PROPERTY(bool pinned READ isPinned NOTIFY pinnedChanged)
-    /// 当前页:`list`(剪贴板历史)/ `translate`(翻译视图)。
-    /// QML 据此互斥显示两页;尺寸、最小尺寸与失焦策略也随它切换(见 Mode)。
+    /// 当前页:`list`(剪贴板历史)/ `translate`(翻译视图)/ `settings`(设置页)。
+    /// QML 据此互斥显示各页;尺寸、最小尺寸与失焦策略也随它切换(见 Mode)。
     Q_PROPERTY(QString mode READ modeString NOTIFY modeChanged)
 public:
-    /// 窗口的两种形态。合并翻译页之后,同一个窗口要同时服务"呼出即用的历史列表"
-    /// 与"需要停留的翻译工作区",两者的尺寸/下限/失焦策略都不同。
-    enum class Mode { List, Translate };
+    /// 窗口的三种形态。合并翻译页之后,同一个窗口要同时服务"呼出即用的历史列表"、
+    /// "需要停留的翻译工作区"与"需要停留的设置工作区",三者的尺寸/下限/失焦策略不同。
+    /// 设置页沿用翻译页的模式(同窗口同引擎整窗切换,docs/22-settings-page.md):
+    /// 抽屉(Popup)时代一次实例化全量 40+ 字段约 6.6MB 私有且常驻不释放。
+    enum class Mode { List, Translate, Settings };
     Q_ENUM(Mode)
 
     /// 呼出时的摆放方式:
@@ -59,9 +61,20 @@ public:
     /// orientation 决定首次显示时的摆放:热键链路传 AtCursor,托盘等传 ScreenCenter。
     void showTranslate(const QString& text, Orientation orientation = Orientation::AtCursor);
 
+    /// 切到设置页并显示窗口(设置页的唯一入口,面板「设置」按钮与验收共用)。
+    /// 与 showTranslate 同一模式:setMode 切形态(尺寸/停留策略),再让 QML 根
+    /// 的 openSettingsPage() 构建页面壳并拉取设置回填。
+    Q_INVOKABLE void showSettings();
+
+    /// 设置页标题栏「← 返回」:切回列表形态(同窗口原位,尺寸恢复列表尺寸)。
+    /// 与 showSettings 相对;窗口本就可见,只换形态,不动摆位。
+    Q_INVOKABLE void showList();
+
     Mode mode() const { return m_mode; }
     QString modeString() const {
-        return m_mode == Mode::Translate ? QStringLiteral("translate") : QStringLiteral("list");
+        return m_mode == Mode::Translate  ? QStringLiteral("translate")
+             : m_mode == Mode::Settings   ? QStringLiteral("settings")
+                                         : QStringLiteral("list");
     }
 
     /// 自动化验收:注入搜索词(等价用户输入,走同一防抖链路)。
@@ -170,8 +183,13 @@ signals:
 
 private:
     void setupUi();
-    /// 切换形态(含尺寸/下限调整、翻译页的"停留"抑制)。
+    /// 切换形态(含尺寸/下限调整、翻译/设置页的"停留"抑制)。
     void setMode(Mode mode);
+    /// 按当前状态应用/取消置顶:**固定中**或**停在设置页**期间置顶。
+    /// 本窗口是 Qt::Tool(不占任务栏),一旦被其它窗口盖住就没有入口找回;
+    /// 设置页还要求"不主动关闭就不消失"—— 失焦不隐藏 + 置顶,点别处也看得见、
+    /// 回得来(离开设置页时按固定状态还原)。
+    void applyTopmost();
     /// 按形态设置最小尺寸与窗口尺寸;已显示时保持窗口中心不动并夹回屏幕可用区。
     /// 列表形态会优先用设置里记住的 panelSize(见 restorePanelSize)。
     void applyModeSize(Mode mode);
@@ -205,8 +223,8 @@ private:
     bool m_everFocused = false;
     /// 是否固定(失焦不隐藏 + 置顶)。
     bool m_pinned = false;
-    /// 翻译页期间为真:只**抑制失焦隐藏**(输入长文时切走焦点不该消失),
-    /// 但不动用户的固定状态、也不置顶 —— 与 `m_pinned` 是两件事。
+    /// 翻译/设置页期间为真:只**抑制失焦隐藏**(输入长文或填 API Key 时切走
+    /// 焦点不该消失),但不动用户的固定状态、也不置顶 —— 与 `m_pinned` 是两件事。
     bool m_holdOpen = false;
     /// 当前形态。
     Mode m_mode = Mode::List;

@@ -223,8 +223,9 @@ void runClearAllFlow(PanelWindow& panel) {
         qInfo() << "CLEAR-ALL STEP2 clickedOpen:" << opened;
         QTimer::singleShot(800, &panel, [&panel] {
             const QVariantMap st = panel.rootProperty("acceptanceState").toMap();
-            qInfo() << "CLEAR-ALL STEP2 drawerOpen:" << st.value("settingsOpen").toBool();
-            // 危险区在表单尾部:不先滚进可视区,按钮点击会落空
+            qInfo() << "CLEAR-ALL STEP2 settingsOpen:" << st.value("settingsOpen").toBool();
+            // 危险区在「数据」分类表单尾部(acceptanceRevealClearAll 会先切分类
+            // 再滚入视区):不先滚,按钮点击会落空
             panel.invokeAcceptance("acceptanceRevealClearAll");
             QTimer::singleShot(700, &panel, [&panel] {
                 const bool clickedClear = panel.clickByObjectName(QStringLiteral("clearAllBtn"));
@@ -263,11 +264,12 @@ void runUpdateFlow(PanelWindow& panel) {
         qInfo() << "UPDATE STEP1 clickedOpen:" << opened;
         QTimer::singleShot(800, &panel, [&panel] {
             const QVariantMap st = panel.rootProperty("acceptanceState").toMap();
-            qInfo() << "UPDATE STEP2 drawerOpen:" << st.value("settingsOpen").toBool()
+            qInfo() << "UPDATE STEP2 settingsOpen:" << st.value("settingsOpen").toBool()
                     << "checkBtnEnabled:" << st.value("updateEnabled").toBool()
                     << "未配置说明可见:" << st.value("updateNoteVisible").toBool()
                     << "(判据:空置态应 enabled=false 且说明=true;配好地址应相反)";
-            // 关于区在表单最末:不先滚进可视区,按钮点击会落空
+            // 关于分类(acceptanceRevealUpdate 会先切分类再滚入视区):不先滚,
+            // 按钮点击会落空
             panel.invokeAcceptance("acceptanceRevealUpdate");
             QTimer::singleShot(700, &panel, [&panel] {
                 const bool clickedCheck =
@@ -354,8 +356,9 @@ void reportTodoGroups(PanelWindow& panel) {
 }
 
 void runSettingsFlow(PanelWindow& panel) {
-    // 设置抽屉交互验收,回归三组用户实测缺陷。全部走"真实点击/按键",不直调
-    // QML 函数 —— 直调会把"事件没送到"这类缺陷(命中路径/焦点/遮挡)全部掩盖。
+    // 设置页交互验收(抽屉时代的回归集 + 整窗页面形态的新断言)。全部走"真实
+    // 点击/按键",不直调 QML 函数 —— 直调会把"事件没送到"这类缺陷(命中路径/
+    // 焦点/遮挡)全部掩盖。
     //
     // ⚠️ 键盘注入(手输 999 + 回车、Esc)依赖 QML 场景的活动焦点项,而
     //    QQuickWidget 的 QML activeFocus 要求面板窗口是**系统前台窗口**
@@ -380,7 +383,7 @@ void runSettingsFlow(PanelWindow& panel) {
             qInfo() << "SETTINGS STEP2 clickedOpen:" << opened;
             QTimer::singleShot(800, &panel, [&panel] {
                 const QVariantMap st = panel.rootProperty("acceptanceState").toMap();
-                qInfo() << "SETTINGS STEP2 drawerOpen:" << st.value("settingsOpen").toBool();
+                qInfo() << "SETTINGS STEP2 settingsOpen:" << st.value("settingsOpen").toBool();
                 const bool focused = panel.clickByObjectName(QStringLiteral("historyLimitSpin"));
                 qInfo() << "SETTINGS STEP3 clickedSpin:" << focused;
                 QTimer::singleShot(600, &panel, [&panel] {
@@ -412,50 +415,53 @@ void runSettingsFlow(PanelWindow& panel) {
                             QTimer::singleShot(800, &panel, [&panel] {
                                 const QVariantMap st3 =
                                     panel.rootProperty("acceptanceState").toMap();
-                                qInfo() << "SETTINGS STEP6 closeBtn drawerOpen:"
+                                qInfo() << "SETTINGS STEP6 closeBtn settingsOpen:"
                                         << st3.value("settingsOpen").toBool() << "(期望 false)";
 
-                                // ---- B2. 点抽屉外(列表卡片):应被 modal 吞掉,不穿透 ----
+                                // ---- B2. 误触不退出:设置页内的普通点击既不关页也不穿透 ----
+                                // (抽屉时代验证的是"modal 拦截列表穿透";整窗页面没有
+                                //  overlay,等价回归点变为:点击页内元素不会把设置页关掉。)
                                 panel.clickByObjectName(QStringLiteral("settingsButton"));
                                 QTimer::singleShot(800, &panel, [&panel] {
                                     const QVariantMap st4 =
                                         panel.rootProperty("acceptanceState").toMap();
                                     const QString clipBefore =
                                         QApplication::clipboard()->text();
-                                    // xFrac=0.25:卡片宽到面板右半区,正中点会落在打开的
-                                    // 抽屉底下 —— 必须把点击点挪进左半区才是"抽屉外"。
-                                    const bool clickedCard = panel.clickByObjectName(
-                                        QStringLiteral("entryCard0"), 0.25);
-                                    qInfo() << "SETTINGS STEP7 drawerOpen:"
+                                    // 点侧栏「通用」(当前已选中,点击是安全的无操作);
+                                    // 若点击误关设置页,settingsOpen 会翻成 false。
+                                    const bool clickedNav = panel.clickByObjectName(
+                                        QStringLiteral("settingsNavGeneral"));
+                                    qInfo() << "SETTINGS STEP7 settingsOpen:"
                                             << st4.value("settingsOpen").toBool()
-                                            << "clickedCard(抽屉外):" << clickedCard;
+                                            << "clickedNav(页内):" << clickedNav;
                                     QTimer::singleShot(1000, &panel,
                                                        [&panel, clipBefore] {
                                         const QVariantMap st5 =
                                             panel.rootProperty("acceptanceState").toMap();
                                         const QString clipAfter =
                                             QApplication::clipboard()->text();
-                                        qInfo() << "SETTINGS STEP8 outsideClick drawerOpen:"
+                                        qInfo() << "SETTINGS STEP8 inPageClick settingsOpen:"
                                                 << st5.value("settingsOpen").toBool()
-                                                << "(期望 false)"
+                                                << "(期望 true)"
                                                 << "panelStillVisible:" << panel.isVisible()
                                                 << "(期望 true)"
                                                 << "clipboardUnchanged:" << (clipAfter == clipBefore);
 
-                                        // ---- B3. Esc 关闭(interactive:false 时被 Qt 吞掉) ----
+                                        // ---- B3. Esc 返回列表页(设置页 Esc 语义:退一层,
+                                        //      不直接收起;再按一次才收起面板) ----
                                         panel.clickByObjectName(
                                             QStringLiteral("settingsButton"));
                                         QTimer::singleShot(800, &panel, [&panel] {
                                             const QVariantMap st6 =
                                                 panel.rootProperty("acceptanceState").toMap();
                                             panel.sendKey(Qt::Key_Escape);
-                                            qInfo() << "SETTINGS STEP9 drawerOpen:"
+                                            qInfo() << "SETTINGS STEP9 settingsOpen:"
                                                     << st6.value("settingsOpen").toBool()
                                                     << "sent Esc";
                                             QTimer::singleShot(900, &panel, [&panel] {
                                                 const QVariantMap st7 =
                                                     panel.rootProperty("acceptanceState").toMap();
-                                                qInfo() << "SETTINGS STEP10 escClosed drawerOpen:"
+                                                qInfo() << "SETTINGS STEP10 escClosed settingsOpen:"
                                                         << st7.value("settingsOpen").toBool()
                                                         << "(期望 false)";
 
@@ -477,23 +483,27 @@ void runSettingsFlow(PanelWindow& panel) {
                                                     // 判据两条:① 下拉**真实点击**能改后端并落盘;
                                                     //           ② 可用性提示反映 core 的 ocr_probe 结果。
                                                     // 走真实点击而非直调 QML 函数 —— 后者会掩盖
-                                                    // "控件不可见/被遮挡"这类缺陷(抽屉里 OCR 段在下方,
-                                                    // 若滚动或布局有问题,点击会落空)。
+                                                    // "控件不可见/被遮挡"这类缺陷(分类页内容
+                                                    // 只实例化当前分类,若导航/滚动有问题,点击会落空)。
                                                     //
-                                                    // ⚠️ 必须先**重新打开抽屉**:STEP10 已按 Esc 关闭,而
-                                                    //    AppDrawer 是 Drawer(Popup)—— 关闭的 Popup 内容
-                                                    //    不在窗口场景树里,findAccaptanceItem 从 contentItem
-                                                    //    递归**找不到**其中的 objectName(实测:
-                                                    //    "验收:找不到 objectName ocrBackendCombo")。
+                                                    // ⚠️ 先重新打开设置页(STEP10 的 Esc 已退回列表),
+                                                    //    再真实点击侧栏「文字识别」切到 OCR 分类 ——
+                                                    //    这一步同时是侧栏导航链路的验收点。
                                                     panel.clickByObjectName(
                                                         QStringLiteral("settingsButton"));
                                                     QTimer::singleShot(900, &panel, [&panel] {
                                                     const QVariantMap stOpen =
                                                         panel.rootProperty("acceptanceState")
                                                             .toMap();
-                                                    qInfo() << "SETTINGS STEP13 drawerReopened:"
+                                                    qInfo() << "SETTINGS STEP13 settingsReopened:"
                                                             << stOpen.value("settingsOpen")
                                                                    .toBool();
+                                                    const bool clickedNavOcr =
+                                                        panel.clickByObjectName(
+                                                            QStringLiteral("settingsNavOcr"));
+                                                    qInfo() << "SETTINGS STEP13 clickedNavOcr:"
+                                                            << clickedNavOcr;
+                                                    QTimer::singleShot(700, &panel, [&panel] {
                                                     // 不能用 acceptanceSettingsToBottom:它滚到**内容底部**,
                                                     // 会把靠上的 OCR 段滚出视口顶部(实测点击坐标 y=-207,
                                                     // 落在窗口外)。改为把目标控件本身滚入视口。
@@ -583,6 +593,7 @@ void runSettingsFlow(PanelWindow& panel) {
                                                             });
                                                         });
                                                     });
+                                                    });   // 闭合「切到 OCR 分类后的 700ms 层」
                                                     });   // ← 新增:闭合 STEP13 的 drawerReopened 层
                                                 });
                                             });

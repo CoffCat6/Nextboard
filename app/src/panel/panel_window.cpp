@@ -32,7 +32,9 @@ namespace {
 constexpr int BLUR_HIDE_DELAY_MS = 200; // 第一代结论:防拖动标题栏的虚假失焦
 // 两种形态的尺寸与下限(见 PanelWindow::Mode):
 //  - 列表:呼出即用的历史面板,宽一点好扫读;
-//  - 翻译:520×660 是原独立翻译窗口的实测尺寸,输入输出双栏需要更高。
+//  - 翻译:520×660 是原独立翻译窗口的实测尺寸,输入输出双栏需要更高;
+//  - 设置:860×640 是"侧栏 180 + 内容表单"的舒适尺寸;下限 700×520 保证
+//    内容区仍有 ~500px 宽,字段行不折行(设置页含 URL/JSON 等技术字段)。
 constexpr int PANEL_W = 800;
 constexpr int PANEL_H = 600;
 constexpr int PANEL_MIN_W = 620;   // 低于此尺寸头部(标题+搜索框+动作按钮)会挤变形
@@ -41,6 +43,10 @@ constexpr int TRANSLATE_W = 520;
 constexpr int TRANSLATE_H = 660;
 constexpr int TRANSLATE_MIN_W = 420;   // 低于此宽度翻译双栏信息会挤成一团
 constexpr int TRANSLATE_MIN_H = 500;
+constexpr int SETTINGS_W = 860;
+constexpr int SETTINGS_H = 640;
+constexpr int SETTINGS_MIN_W = 700;
+constexpr int SETTINGS_MIN_H = 520;
 /// 用户改完尺寸后多久写回设置(毫秒)。拖动缩放期间每帧都有 resizeEvent,
 /// 立即写就是每秒几十次 sqlite 事务。
 constexpr int PANEL_SIZE_SAVE_DELAY_MS = 500;
@@ -74,12 +80,28 @@ PanelWindow::PanelWindow(CoreBridge& core, QWidget* parent)
 void PanelWindow::setMode(Mode mode) {
     if (m_mode == mode) return;
     m_mode = mode;
-    // 翻译页要能停留,但**不动**用户的固定状态、也不置顶 —— 只临时抑制失焦隐藏。
-    m_holdOpen = (mode == Mode::Translate);
+    // 翻译/设置页要能停留,但**不动**用户的固定状态 —— 只临时抑制失焦隐藏。
+    // 设置页额外配合 applyTopmost() 置顶:失焦不隐藏只保证"不消失",
+    // 置顶才保证"看得见"(被别的窗口盖住的 Qt::Tool 窗口没有任何找回入口)。
+    m_holdOpen = (mode == Mode::Translate || mode == Mode::Settings);
     applyModeSize(mode);
+    applyTopmost();
     emit modeChanged();
     // 形态切换的内存读数:列表页释放/翻译页构建的净效果都体现在这两条上
-    logMemory(mode == Mode::Translate ? "mode-translate" : "mode-list");
+    logMemory(mode == Mode::Translate ? "mode-translate"
+              : mode == Mode::Settings ? "mode-settings"
+                                       : "mode-list");
+}
+
+void PanelWindow::applyTopmost() {
+    // 置顶与否:固定中或停在设置页 → HWND_TOPMOST,否则 HWND_NOTOPMOST。
+    // 与 setPinned 同一机制;翻译页**刻意不置顶**(见其注释)。
+    const bool topmost = m_pinned || m_mode == Mode::Settings;
+    const HWND hwnd = m_cachedHwnd ? m_cachedHwnd : reinterpret_cast<HWND>(winId());
+    if (hwnd) {
+        ::SetWindowPos(hwnd, topmost ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+                       SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
 }
 
 /// 读回用户上次调过的列表尺寸。
@@ -110,11 +132,14 @@ QSize PanelWindow::preferredPanelSize() const {
 
 void PanelWindow::applyModeSize(Mode mode) {
     const bool translate = (mode == Mode::Translate);
+    const bool settings = (mode == Mode::Settings);
+    // 翻译/设置形态的尺寸是内容驱动的最优值,固定;列表形态优先用记住的尺寸
     const QSize minSize = translate ? QSize(TRANSLATE_MIN_W, TRANSLATE_MIN_H)
-                                    : QSize(PANEL_MIN_W, PANEL_MIN_H);
-    // 列表形态优先用记住的尺寸;翻译形态固定(内容驱动的最优尺寸,不该被记住)
+                         : settings  ? QSize(SETTINGS_MIN_W, SETTINGS_MIN_H)
+                                     : QSize(PANEL_MIN_W, PANEL_MIN_H);
     const QSize target = translate ? QSize(TRANSLATE_W, TRANSLATE_H)
-                                   : preferredPanelSize();
+                        : settings  ? QSize(SETTINGS_W, SETTINGS_H)
+                                    : preferredPanelSize();
     // ⚠️ 顺序:必须先设新下限再 resize —— 翻译尺寸宽 520 小于列表下限 620,
     // 若先 resize,窗口会被旧下限顶成 620 宽(高度同理)。
     // 闸门:本次 resize 是程序设定的,不算用户操作(否则会写回设置形成回环)
@@ -197,6 +222,30 @@ void PanelWindow::showTranslate(const QString& text, Orientation orientation) {
     if (m_quick && m_quick->rootObject())
         QMetaObject::invokeMethod(qobject_cast<QObject*>(m_quick->rootObject()), "openTranslate",
                                   Q_ARG(QVariant, text));
+}
+
+void PanelWindow::showSettings() {
+    // 与 showTranslate 同构:隐藏时按光标摆位,已显示时原位只换形态;
+    // 构建与回填交给 QML 根(Main.qml 的 openSettingsPage)。
+    const bool wasHidden = !isVisible();
+    setMode(Mode::Settings);   // 尺寸/停留策略随形态切换
+    if (wasHidden) placeAtCursor();
+    if (wasHidden || !isActiveWindow()) {
+        show();
+        raise();
+        activateWindow();
+    }
+    if (m_quick && m_quick->rootObject())
+        QMetaObject::invokeMethod(qobject_cast<QObject*>(m_quick->rootObject()), "openSettingsPage");
+}
+
+void PanelWindow::showList() {
+    setMode(Mode::List);
+    if (!isVisible() || !isActiveWindow()) {
+        show();
+        raise();
+        activateWindow();
+    }
 }
 
 PanelWindow::~PanelWindow() {
@@ -315,11 +364,7 @@ void PanelWindow::setPinned(bool pinned) {
     if (pinned) m_blurTimer->stop();   // 正在计时的隐藏请求作废
     // 置顶与否:固定后面板不再自动隐藏,而本窗口是 Qt::Tool(不占任务栏),
     // 一旦被其它窗口盖住就没有入口找回,所以固定期间同步置顶。
-    const HWND hwnd = m_cachedHwnd ? m_cachedHwnd : reinterpret_cast<HWND>(winId());
-    if (hwnd) {
-        ::SetWindowPos(hwnd, pinned ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
-                       SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    }
+    applyTopmost();
     emit pinnedChanged();
 }
 
@@ -331,8 +376,8 @@ void PanelWindow::applySearchText(const QString& text) {
 }
 
 void PanelWindow::openSettingsPanel() {
-    // 自动化验收入口:QML 侧 openSettings() 由 C++ 直调(Main.qml root 实现):
-    // 第一次调用会经 Loader 构建 SettingsDrawer,并验证其尺寸取自面板根。
+    // 自动化验收入口:QML 侧 openSettings() 由 C++ 直调(Main.qml root 实现),
+    // 与「设置」按钮同一条链路(→ panelWindow.showSettings() → 切设置页形态)。
     if (m_quick && m_quick->rootObject())
         QMetaObject::invokeMethod(qobject_cast<QObject*>(m_quick->rootObject()), "openSettings");
 }

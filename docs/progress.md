@@ -5648,3 +5648,78 @@ prepare 数百毫秒,而大图上的码模块通常已够大;小选区(用户框
 
 若用户换新构建后宽选区仍失败:所有可合成场景已穷尽,需要真实样本
 (失败的截图原图)才能继续 —— 到时优先怀疑真实渲染的未知形态。
+
+## 2026-10-25(日)设置页重构:抽屉 → 整窗页面(左侧分类导航)
+
+**动机**:设置项渐多,单一 52% 宽滚动长表单里跳转不便;打开设置抽屉内存突增
+~6.6MB 私有且常驻不释放;Popup 挂 overlay 层与整窗页面形态(翻译页)互相干扰。
+设计全文见 **docs/22-settings-page.md**(本轮新增)。
+
+**形态**:与翻译页同一模式 —— `PanelWindow::Mode::Settings`,同窗口同引擎互斥
+显示;进入切 860×640(下限 700×520),`m_holdOpen` 抑制失焦隐藏。**不是**独立
+窗口(第二个 QML 引擎与渲染栈约 +50MB,与 docs/06 内存收口方向相反)。
+
+**内存策略(核心)**:壳(标题栏+侧栏)懒构建后常驻;内容区 Loader **只装当前
+分类**(九类:通用/截图/贴图/快捷键/文字识别/翻译服务/网络与代理/数据/关于),
+切分类=销毁重建,离开设置页先落盘再卸载。实测(acceptance-data):
+反复进出**零累积**(175.1 → 175.4 → 175.5MB 工作集,噪声级);首开增量
++4~10MB(含窗口尺寸切换缓冲),与旧抽屉同量级但离开即释放对象树;
+从不进设置的用户零成本。
+
+**交互语义**:设置页 Esc/←/✕ 均为**退出设置回列表**(✕ 不是翻译页的 hidePanel
+—— 改动即时自动保存,没有"到此为止"语义;实测 ✕ 若 hidePanel,"调完继续用
+列表"的动线断掉,--settings-flow 级联抓出)。切分类/离开前 `flushPendingSave()`,
+修掉抽屉时代「去抖窗口内关闭丢最后一笔编辑」的隐患。
+
+| 变更 | 位置 |
+| --- | --- |
+| 壳+九分类页 | panel/qml/SettingsView.qml、SettingsPage*.qml(9 个) |
+| 共享控件文件化 | Readable{CheckBox,SpinBox,TextField}.qml、HotkeyField.qml、ColorSwatchGrid.qml、Section{Divider,Title}.qml、FieldLabel.qml、HintLabel.qml |
+| 删除 | SettingsDrawer.qml、AppDrawer.qml(2012+44 行) |
+| C++ | panel_window.{hpp,cpp}:Mode::Settings、860×640、showSettings()/showList()、mode-settings 探针;PanelListLifecycle 无需改(mode≠List 自动 freeze) |
+| 图标 | HeaderIcon.qml 新增 capture/keyboard/network/info 四 kind |
+| 验收 | runSettingsFlow:B2 改"页内误触不关页"、D 段真实点击 settingsNavOcr 切分类;clear-all/update/restore 流程零改动(reveal/openConfirm 转发函数内部切分类);日志标签 drawerOpen→settingsOpen |
+
+**验证**:`--settings-flow / --clear-all-flow / --restore-flow / --update-flow`
+四流程全绿;`--screenshot --settings` 自截确认(9 分类图标齐全、选中态正确、
+无渲染异常)。
+
+**两个实抓缺陷(都有日志/截图为证)**:
+1. **SectionTitle.qml 缺 `import QtQuick.Controls.Basic`** —— 内联组件靠宿主
+   import 解析 Label,独立成文件后必须自带;症状是「Type SectionTitle
+   unavailable → 设置页加载失败 → 主面板白屏」。**qmlcachegen 不做跨文件类型
+   解析,构建零警告、运行时才炸** —— 新增 QML 文件必须跑 `--screenshot` 自截。
+2. **✕ 首版误用翻译页的 hidePanel 语义** —— 面板隐藏后验收后续步骤全部在
+   隐藏窗口上点击而失效(级联 6 条断言翻红),根因单点。
+
+**教训:qmllint 内存事故**:循环里反复**无参**调用 qmllint(未给 `-I` 导入路径),
+部分实例挂起不退出,多实例并存把系统内存耗尽(系统卡死,用户中断)。本轮起 QML
+校验以构建(qmlcachengen 全量编译)+ 自截为准;如需 lint,单文件 + 显式路径。
+
+## 2026-10-25(日)设置页补强:不主动关闭就不消失 + 托盘「设置」入口
+
+**需求**:①设置页点击其它地方后会隐藏/消失,要求不主动关闭就不消失;
+②托盘右键菜单加「设置」快捷入口。
+
+**根因与对策**(docs/22-settings-page.md §6 已同步):
+- 失焦隐藏:`m_holdOpen` 已随 Mode::Settings 抑制(重构时已做);
+- 真正的缺口是**被其它窗口盖住**:本窗口是 Qt::Tool(不占任务栏),盖住后没有任何
+  入口找回,用户视角即"消失"。对策:`applyTopmost()`(固定/设置页共用同一机制,
+  `SetWindowPos HWND_TOPMOST/NOTOPMOST`)—— 停在设置页期间置顶,离开时按固定
+  状态还原。翻译页**刻意不置顶**的既有决策不变。
+- 托盘 `m_menu->addAction("设置", → m_panel.showSettings())`(「打开翻译」之后),
+  兼作"热键已把面板切回列表后找回设置上下文"的常驻直达入口。
+
+**实测**(EnumWindows 轮询 + 激活桌面偷焦点,--settings --screenshot 驱动):
+```
+t=0.66s vis=True top=False   ← 列表态:不置顶
+t=5.69s vis=True top=True    ← 进设置页:置顶置位
+t=5.96s desktop-activated    ← 偷焦点(等价"点击其他地方")
+t=6.63s process exited       ← vis 全程保持 True(失焦未隐藏;若旧逻辑 ~200ms 后即隐藏)
+```
+回归:`--settings-flow` 23 步全绿(置顶不影响按 objectName 的真实点击链路)。
+
+| 变更 | 位置 |
+| --- | --- |
+| 置顶 | panel_window.{hpp,cpp}:applyTopmost();setMode/setPinned 共用 |
+| 托盘 | tray.cpp:「设置」入口 |

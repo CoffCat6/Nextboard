@@ -37,7 +37,7 @@
 | 默认软件渲染 | `settings.rs:477` `software_render: true` |
 | 热键冲突 toast | `hotkeys.cpp:170-175`(提交 `5ec3a19`):失败项汇总成一条 toast |
 | 贴图软上限与字节预算淘汰 | `core_facade.cpp:494-606` + `logMemory` |
-| OCR 后端 / 偏好 / 驻留选择器 | `SettingsDrawer.qml` 的 `ocrBackendCombo` / `ocrProfileCombo` / `ocrSessionCombo` |
+| OCR 后端 / 偏好 / 驻留选择器 | `SettingsPageOcr.qml` 的 `ocrBackendCombo` / `ocrProfileCombo` / `ocrSessionCombo`(设置页拆分前在 SettingsDrawer.qml) |
 | OCR 语言 / 放大倍数控件 | 本轮新增:`ocrLanguageCombo` / `ocrScaleSpin`,仅「系统内置」后端可见 |
 | 单条文本上限控件 | 本轮新增:`maxTextKbSpin`(此前只有字段、没有入口) |
 | 导出 JSON / CSV | 本轮新增:`export_json` / `export_csv` + 3 条单测 |
@@ -72,7 +72,7 @@
 | # | 功能 | 为什么值得做 | 现状证据 | 量级 |
 | --- | --- | --- | --- | --- |
 | **3.1** | **文本条目内联编辑** | 复制来的文本有笔误或多条空行时只能删掉重抄;S5「素材库」语义下这是明显缺口 | `core_facade.cpp:723` 直接 `emit toastMessage("只有图片条目可以编辑")`;core 只有 `save_text_entry`(新增)无 update;FTS 触发器已覆盖 `AFTER UPDATE OF text_content`(v8.sql) | **中** |
-| **3.2** | **删除可撤销** | 误删即永久丢失;确认文案自己写着「此操作不可恢复」 | `delete_entry` / `delete_entries_bulk` 真删;`SettingsDrawer.qml` 与 `Main.qml` 的确认弹窗文案 | **中** |
+| **3.2** | **删除可撤销** | 误删即永久丢失;确认文案自己写着「此操作不可恢复」 | `delete_entry` / `delete_entries_bulk` 真删;`SettingsPageData.qml` 与 `Main.qml` 的确认弹窗文案(设置页拆分前在 SettingsDrawer.qml) | **中** |
 | **3.3** | **搜索增强(正则 / 仅标题 / 大小写)** | 现在只有 FTS + 中文 LIKE 兜底;命中高亮已做,匹配能力没做 | `store/entry.rs` 的 `list(conn, query, kind, pinned, tag, source, limit, offset)` 是唯一入口 | **中** |
 | **3.4** | **翻译历史持久化** | 历史是进程内内存队列,上限 50,退出即清零 | `translate/mod.rs:109` `static HISTORY: Mutex<Vec<HistoryItem>>` | **小**(可复用 `clip_entries` + source=translate) |
 | **3.5** | **截图自动 OCR 入库(默认关)** | 路线图 S5.4 的原意:截图即可搜到图里的字 | `ocr_text` 列 + FTS 触发器已备,app 侧无开关 | **小** |

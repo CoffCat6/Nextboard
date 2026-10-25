@@ -130,6 +130,9 @@ void Tray::buildMenu() {
     });
 
     m_menu->addAction("打开翻译", [] { CoreFacade::instance().openTranslateCentered(); });
+    // 设置页入口:点其它地方后设置页**不隐藏也不被盖住**(形态内失焦抑制 + 置顶),
+    // 但若用户已用热键把面板切回列表,设置上下文就断了 —— 这里给一条常驻直达入口。
+    m_menu->addAction("设置", [this] { m_panel.showSettings(); });
     m_menu->addSeparator();
     // 截图 / 贴图入口(对齐第一代托盘):截图前先收起面板,否则面板会被拍进画面;
     // 延时 150ms 等窗口真正消失(与热键链路 hidePanelThenCapture 同一取舍)。

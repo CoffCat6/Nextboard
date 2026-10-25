@@ -25,7 +25,11 @@ Item {
     ///  其中 "chevron" 只画一个方向,反向由使用处 rotation: 180 翻转;
     ///  "filter"                          —— 筛选入口(漏斗),头部「筛选」按钮用;
     ///  "multiselect"                     —— 条目多选(三行勾选列表),
-    ///    与 "todo" 单复选框刻意区分:todo = 一条任务,multiselect = 多条并列勾选。
+    ///    与 "todo" 单复选框刻意区分:todo = 一条任务,multiselect = 多条并列勾选;
+    ///  "capture" | "keyboard" | "network" | "info" —— 设置页侧栏分类导航(docs/22),
+    ///    与近邻图标的区分:"capture" 四角取景框(vs "pin" 图钉),"keyboard" 键位阵列
+    ///    (vs "multiselect" 勾选列表),"network" 三节点网状(translate 的地球是圆 +
+    ///    经线,不混淆),"info" 圆 + i(单字母立形,无近邻)。
     property string kind: ""
     /// 描边与填充色(由调用方按所在处的文字色注入)
     property color color: Theme.colors.textPrimary
@@ -455,6 +459,172 @@ Item {
                     color: root.color
                 }
             }
+        }
+    }
+
+    // ---- 截图:四角取景框 + 对焦十字(设置页「截图」分类) ----
+    // 与 "pin"(图钉)的区分:本图标是**中空**的四角括号 + 中心十字,
+    // 无任何实心主体;pin 有连续实心形(帽/身/针)。
+    // 四个角各自两笔(横 + 竖),角长 4.5 / 笔宽 1.8,16px 视口下留 1 边距。
+    Item {
+        id: capture
+        anchors.fill: parent
+        visible: root.kind === "capture"
+
+        // 四角锚点(角括号的外角),顺序:TL / TR / BL / BR
+        readonly property var corners: [
+            { x: 1,    y: 1 }, { x: 10.5, y: 1 },
+            { x: 1,    y: 14.2 }, { x: 10.5, y: 14.2 },
+        ]
+        Repeater {
+            model: capture.corners
+            delegate: Item {
+                anchors.fill: parent
+                required property var modelData
+                // 横笔(沿角向外角方向伸展 4.5)
+                Rectangle {
+                    x: modelData.x * root.unit
+                    y: modelData.y * root.unit
+                    width: 4.5 * root.unit; height: 1.8 * root.unit
+                    radius: 0.6 * root.unit
+                    color: root.color
+                }
+                // 竖笔(BR 角的 y 要向上反伸,用锚点 y - 笔高)
+                Rectangle {
+                    x: modelData.x * root.unit
+                    y: (modelData.y > 8 ? modelData.y - 2.7 : modelData.y) * root.unit
+                    width: 1.8 * root.unit; height: 4.5 * root.unit
+                    radius: 0.6 * root.unit
+                    color: root.color
+                }
+            }
+        }
+        // 对焦十字(中心,4.4 臂长)
+        Rectangle {
+            anchors.centerIn: parent
+            width: 4.4 * root.unit; height: 1.4 * root.unit; radius: height / 2
+            color: root.color
+        }
+        Rectangle {
+            anchors.centerIn: parent
+            width: 1.4 * root.unit; height: 4.4 * root.unit; radius: width / 2
+            color: root.color
+        }
+    }
+
+    // ---- 键盘:键位阵列(设置页「快捷键」分类) ----
+    // 1.5px 描边的外壳 + 实心键帽:3.6px 键帽配 1.5 描边在小尺寸发糊(同 multiselect),
+    // 键帽一律实心。与 "multiselect"(三行方块+横线)的区分:本图标有**封闭边框**,
+    // 键帽 3 颗 + 空格条,排布在框内。
+    Item {
+        anchors.fill: parent
+        visible: root.kind === "keyboard"
+
+        // 键盘外壳(圆角描边)
+        Rectangle {
+            x: 1 * root.unit; y: 3.2 * root.unit
+            width: 14 * root.unit; height: 9.6 * root.unit
+            radius: 1.6 * root.unit
+            color: "transparent"
+            border.width: root.stroke * root.unit
+            border.color: root.color
+        }
+        // 三颗键帽(首行)
+        Repeater {
+            model: [3.2, 7.0, 10.8]
+            delegate: Item {
+                anchors.fill: parent
+                required property real modelData
+                Rectangle {
+                    x: modelData * root.unit; y: 5.6 * root.unit
+                    width: 2.2 * root.unit; height: 2.2 * root.unit
+                    radius: 0.6 * root.unit
+                    color: root.color
+                }
+            }
+        }
+        // 空格条
+        Rectangle {
+            x: 4.6 * root.unit; y: 9.4 * root.unit
+            width: 6.8 * root.unit; height: 1.8 * root.unit
+            radius: 0.6 * root.unit
+            color: root.color
+        }
+    }
+
+    // ---- 网络:三节点网状(设置页「网络与代理」分类) ----
+    // 实心节点 + 细连线(TL—TR 横线 / TR—BR 竖线 / TL—BR 斜线)。
+    // 与 "translate"(地球 = 圆 + 经线)的区分:本图标是**离散节点**,无封闭圆。
+    // ⚠️ 斜线用旋转矩形画(同齿轮齿的 rotation 手法);旋转项里不引用自身几何。
+    Item {
+        anchors.fill: parent
+        visible: root.kind === "network"
+
+        // TL→BR 斜线(旋转 45°,两端让出节点半径)
+        Item {
+            anchors.centerIn: parent
+            width: 9.6 * root.unit; height: 1.4 * root.unit
+            rotation: 45
+            Rectangle { anchors.fill: parent; radius: height / 2; color: root.color }
+        }
+        // TL→TR 横线
+        Rectangle {
+            x: 4.6 * root.unit; y: 2.9 * root.unit
+            width: 6.8 * root.unit; height: 1.4 * root.unit; radius: height / 2
+            color: root.color
+        }
+        // TR→BR 竖线
+        Rectangle {
+            x: 11.7 * root.unit; y: 4.6 * root.unit
+            width: 1.4 * root.unit; height: 6.8 * root.unit; radius: width / 2
+            color: root.color
+        }
+        // 三个节点(TL / TR / BR,实心圆)
+        Repeater {
+            model: [{ x: 2.2, y: 2.2 }, { x: 11.2, y: 2.2 }, { x: 11.2, y: 11.2 }]
+            delegate: Item {
+                anchors.fill: parent
+                required property var modelData
+                Rectangle {
+                    x: modelData.x * root.unit; y: modelData.y * root.unit
+                    width: 2.6 * root.unit; height: 2.6 * root.unit
+                    radius: width / 2
+                    color: root.color
+                }
+            }
+        }
+    }
+
+    // ---- 关于:圆 + i(设置页「关于」分类) ----
+    // 圆环描边 + 上点下竖的 i;与 "settings"(八齿齿轮)同用圆形母题,
+    // 但齿轮有外齿、本图标是光圆环 + 内部字母形,一眼可分。
+    Item {
+        anchors.fill: parent
+        visible: root.kind === "info"
+
+        Rectangle {
+            anchors.centerIn: parent
+            width: 13.4 * root.unit; height: 13.4 * root.unit
+            radius: width / 2
+            color: "transparent"
+            border.width: root.stroke * root.unit
+            border.color: root.color
+        }
+        // i 的点
+        Rectangle {
+            anchors.horizontalCenter: parent.horizontalCenter
+            y: 3.4 * root.unit
+            width: 1.8 * root.unit; height: 1.8 * root.unit
+            radius: width / 2
+            color: root.color
+        }
+        // i 的竖笔
+        Rectangle {
+            anchors.horizontalCenter: parent.horizontalCenter
+            y: 6.6 * root.unit
+            width: 1.8 * root.unit; height: 5.2 * root.unit
+            radius: 0.6 * root.unit
+            color: root.color
         }
     }
 }
