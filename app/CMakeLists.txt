@@ -175,7 +175,7 @@ add_custom_command(TARGET nextboard POST_BUILD
 # 三样必须与 nextboard.exe / nbcore.dll **同目录**,缺一不可:
 #   1) onnxruntime.dll —— nbcore 内 ocr/rapid.rs 以 exe 同级路径显式加载,
 #      **不走 PATH**(用户机 system32 可能有不兼容的旧版本,实测见过 1.17.1);
-#   2) models/ocr/*    —— PP-OCRv4 mobile 四件(det/cls/rec/keys);
+#   2) models/ocr/*    —— det/cls: PP-OCRv4 mobile;rec: PP-OCRv6 small;加 keys 兜底;
 #   3) 二者版本配对:ORT 需 1.28+(ort 2.0.0-rc.13 的要求)。
 # 资产入仓在 thirdparty/(见 docs/10-plan-b-implementation.md §15)。
 set(NB_THIRDPARTY "${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty")

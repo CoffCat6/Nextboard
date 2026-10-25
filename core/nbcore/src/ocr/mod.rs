@@ -4,7 +4,8 @@
 //!   - `mod.rs`       公开契约:[Backend] / [OcrOptions] / [recognize_configured] / [probe] / [languages]
 //!   - `preprocess.rs` 图像预处理:放大 + 可选 Otsu 二值化
 //!   - `system.rs`     Windows 内置 OCR 引擎(`Windows.Media.Ocr`)
-//!   - `rapid.rs`      RapidOCR(PP-OCRv4 mobile)纯 Rust 引擎,经 ONNX Runtime
+//!   - `rapid.rs`      RapidOCR(det/cls: PP-OCRv4 mobile,rec: PP-OCRv6 small)
+//! 纯 Rust 引擎,经 ONNX Runtime
 //! 对外契约([recognize_configured] 等)保持不变 —— 宿主 `nb_call` 侧零改动。
 
 use log::warn;
@@ -80,7 +81,8 @@ impl Preprocess {
 pub enum Backend {
     /// Windows 内置 OCR(离线、零依赖)。
     System,
-    /// RapidOCR(PP-OCRv4 mobile):自带模型的纯 Rust 引擎,不依赖系统语言包。
+    /// RapidOCR(det/cls: PP-OCRv4 mobile,rec: PP-OCRv6 small):
+    /// 自带模型的纯 Rust 引擎,不依赖系统语言包。
     RapidOcr,
 }
 
@@ -234,7 +236,7 @@ pub fn probe(backend: Backend) -> OcrProbe {
 pub fn languages(backend: Backend) -> Vec<String> {
     match backend {
         Backend::System => system::available_languages(),
-        // RapidOCR PP-OCRv4 mobile 中英混排一体,不按语言标签区分。
+        // RapidOCR(det/cls v4 mobile + rec v6 small)中英混排一体,不按语言标签区分。
         Backend::RapidOcr => Vec::new(),
     }
 }

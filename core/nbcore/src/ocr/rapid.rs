@@ -1,4 +1,4 @@
-//! RapidOCR(PP-OCRv4 mobile)引擎:纯 Rust 推理,经 ONNX Runtime。
+//! RapidOCR(PP-OCRv6 small rec + PP-OCRv4 mobile det/cls)引擎:纯 Rust 推理,经 ONNX Runtime。
 //!
 //! 本文件**同时是引擎模块的根**(原为 `rapid.rs` 封装层 + `rapid/` 引擎子树):
 //!   - 上半部分:本项目门面(安装目录定位、可用性探测、session 生命周期);
@@ -9,7 +9,7 @@
 //!   - **D1**:引擎嵌入 `nbcore`,不经独立 DLL / 子进程;
 //!   - **D7**:session **空闲时销毁**(不在每次识别后销毁,也不常驻);
 //!   - **B1.3**:ONNX Runtime 走**显式项目路径**动态加载,**不依赖 PATH / 环境变量**;
-//!   - **模型**:PP-OCRv4 mobile,四件(det/cls/rec/keys)由宿主目录提供。
+//!   - **模型**:det/cls 用 PP-OCRv4 mobile,rec 用 **PP-OCRv6 small**,由宿主目录提供。
 //!
 //! ⚠️ 与 `system.rs`(Windows 内置 OCR)的关键差异:
 //!   - RapidOCR **不产生中文字间空格**,故**不能**接 `normalize_cjk_spaces`(见 08a §2.3);
@@ -35,10 +35,18 @@ pub const ORT_DYLIB: &str = "onnxruntime.dll";
 #[cfg(not(windows))]
 pub const ORT_DYLIB: &str = "libonnxruntime.so";
 
-/// 四件模型的文件名(与发布包一致;换档位时集中改这里)。
+/// 模型文件名(与发布包一致;换档位时集中改这里)。
+///
+/// rec 用 **PP-OCRv6 small**(替换 PP-OCRv4 mobile)的依据(真机实测,2026-10):
+/// v4 mobile 对"矮裁片 + 混批宽张量"会系统性丢失英文词间空格(空格类 CTC
+/// 置信度 ~1.0 → ~0.3,小字号截图必现;上游 Python rapidocr 同样中招),
+/// 且任何预处理调优(抗混叠重采样/垂直留白/预放大)都只能顾此失彼;
+/// v6 small 在**完全相同的预处理**下全部场景恢复满分,推理还更快
+/// (60 行全屏 1569ms vs 2075ms),代价仅模型文件 +10MB。
+/// 来源与校验见 docs/13-ocr-enhancement-plan.md。
 pub const DET_FILE: &str = "ch_PP-OCRv4_det_infer.onnx";
 pub const CLS_FILE: &str = "ch_ppocr_mobile_v2.0_cls_infer.onnx";
-pub const REC_FILE: &str = "ch_PP-OCRv4_rec_infer.onnx";
+pub const REC_FILE: &str = "PP-OCRv6_rec_small.onnx";
 pub const KEYS_FILE: &str = "ppocr_keys_v1.txt";
 
 /// 空闲多久后销毁 session(D7 决策 B)。
@@ -415,7 +423,7 @@ pub fn probe_available() -> (bool, Option<String>) {
 // ⚠️ 为什么允许 dead_code:
 // 上游是**通用 OCR 库**,暴露了远超本项目所需的 API 面(多后端 provider 解析、
 // 单字坐标、JSON/Markdown 输出、YAML 配置、模型下载、批量运行选项…)。
-// 本项目只用其中一条路径(CPU + PP-OCRv4 mobile + 整行文本),
+// 本项目只用其中一条路径(CPU + v4 mobile det/cls + v6 small rec + 整行文本),
 // 其余代码虽不经过,但**与核心算法交织**(如 det/postprocess 里的两套偏移实现、
 // config 的各枚举 as_str),删起来容易伤到活跃路径。
 // 故此处显式允许 dead_code,并把"裁剪了什么"记录在模块文档与
@@ -446,3 +454,104 @@ pub use pipeline::{
 
 pub type Quad = [[f32; 2]; 4];
 
+// ---- 真机冒烟(默认忽略) ----
+// 用 app/build 下的 onnxruntime.dll 与四件模型跑完整 det+rec,
+// 回归识别质量(英文词间空格、中文/混排)。运行方式:
+//   cargo test -p nbcore --lib -- --ignored --nocapture rapidocr_local
+#[cfg(test)]
+mod local_pipeline_smoke {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn app_build_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../app/build")
+    }
+
+    fn test_img(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/tmp")
+            .join(name)
+    }
+
+    fn run_pipeline(img: &Path, use_det: bool) -> Vec<String> {
+        ensure_runtime(&app_build_dir()).expect("onnxruntime.dll 应可加载");
+        let models = app_build_dir().join(MODELS_SUBDIR);
+        let sources = PipelineSources {
+            det: Some(ModelSource::File(&models.join(DET_FILE))),
+            cls: Some(ModelSource::File(&models.join(CLS_FILE))),
+            rec: Some(ModelSource::File(&models.join(REC_FILE))),
+            rec_dictionary: Some(DictionarySource::File(&models.join(KEYS_FILE))),
+        };
+        let mut cfg = EngineConfig::default();
+        cfg.global.use_det = use_det;
+        cfg.global.use_cls = false;
+        cfg.global.use_rec = true;
+        cfg.global.max_side_len = 960;
+        let mut engine = RapidOcr::new_with_sources(cfg, sources).expect("引擎应可构建");
+
+        let rgba = image::open(img).expect("测试图应可读").to_rgba8();
+        let (w, h) = rgba.dimensions();
+        let input = OcrInput::RgbaU8 {
+            width: w as usize,
+            height: h as usize,
+            data: rgba.into_raw(),
+        };
+        let out = engine.run(input, OcrCallOptions::default()).expect("识别应成功");
+        out.txts.unwrap_or_default()
+    }
+
+    #[test]
+    #[ignore = "真机冒烟:依赖本机 onnxruntime.dll 与 app/build 下的模型"]
+    fn rapidocr_local_english_keeps_word_spaces() {
+        // 小字号英文截图曾是本缺陷的主场景:v4 mobile rec 对"矮裁片 + 混批宽张量"
+        // 会把空格类的 CTC 置信度压到 blank 之下,识别结果丢掉全部词间空格
+        // (换用 v6 small rec 修复,见 REC_FILE 的依据说明)。断言识别文本保住词间空格。
+        let cases = [
+            // det 会把长行拆成若干碎片(与上游一致),故按片段断言词间空格。
+            ("en_long.png", vec!["The published package", "Mihomo would", "between the two."]),
+            ("en_user14.png", vec!["The published p", "package carries one snapshot of everything Mihomo would", "otherwise, so users can"]),
+            ("en_user16.png", vec!["The published p", "package carries one snapshot", "otherwise, so users can"]),
+            // 仿 2K 全屏文档页:混批张量最宽、裁片最多的场景。
+            (
+                "fullscreen_like.png",
+                vec![
+                    "Mihomo 使用手册 User Guide",
+                    "The published package carries one snapshot of everything users need",
+                    "You can configure proxy groups with url-test, fallback and load-balance",
+                ],
+            ),
+        ];
+        for (name, expects) in cases {
+            let joined = run_pipeline(&test_img(name), true).join("\n");
+            println!("=== det+rec({name}) ===\n{joined}");
+            for expect in expects {
+                assert!(
+                    joined.contains(expect),
+                    "{name}: 期望包含 {expect:?},实际:{joined:?}"
+                );
+            }
+        }
+        let short = run_pipeline(&test_img("en_short.png"), true).join("\n");
+        assert_eq!(short, "Hello World");
+    }
+
+    #[test]
+    #[ignore = "真机冒烟:依赖本机 onnxruntime.dll 与 app/build 下的模型"]
+    fn rapidocr_local_cjk_and_mixed_no_regression() {
+        // 换 rec 模型不得影响中文识别;混排场景(数字/英文夹汉字)应保住词间空格。
+        let cases = [
+            ("zh_mixed.png", vec!["中文识别测试:剪贴板历史管理", "Mixed Text 2026", "v1.2.3-beta build 4567"]),
+            ("zh_mixed_small.png", vec!["中文识别测试", "Mixed Text 2026", "v1.2.3-beta build 4567"]),
+        ];
+        for (name, expects) in cases {
+            let joined = run_pipeline(&test_img(name), true).join("\n");
+            println!("=== det+rec({name}) ===\n{joined}");
+            for expect in expects {
+                assert!(
+                    joined.contains(expect),
+                    "{name}: 期望包含 {expect:?},实际:{joined:?}"
+                );
+            }
+        }
+    }
+}
