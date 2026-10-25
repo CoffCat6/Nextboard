@@ -32,6 +32,10 @@ using NbCaptureCrop = int(__cdecl*)(const unsigned char*, unsigned long long,
 /// OCR(RGBA 直入):出参为 JSON 字符串,宿主以 nb_free_string 释放。
 using NbOcrRgba = int(__cdecl*)(const unsigned char*, unsigned long long,
                                 unsigned, unsigned, char**);
+/// 二维码解码(RGBA 直入):出参为 JSON 字符串({"found":…,"text":…}),
+/// 宿主以 nb_free_string 释放 —— 与 NbOcrRgba 同一口径。
+using NbQrDecodeRgba = int(__cdecl*)(const unsigned char*, unsigned long long,
+                                     unsigned, unsigned, char**);
 /// 长截图开始会话(固化显示器/选区/上限):失败时 out_err 带**可读错误文案**
 /// (宿主以 nb_free_string 释放;成功时不写出参)。
 using NbStitchBegin = int(__cdecl*)(const char*, const char*, int, int, unsigned, unsigned,
@@ -73,6 +77,12 @@ struct OcrLineBox {
 struct OcrTextWithLines {
     QString text;
     QVector<OcrLineBox> lines;
+};
+
+/// nb_qr_decode_rgba 的返回:found=false 表示图中没有二维码(不是错误)。
+struct QrDecodeResult {
+    bool found = false;
+    QString text;
 };
 
 // nbcore 通知消息(与 core/nbcore/src/core.rs 对应)
@@ -204,6 +214,11 @@ public:
     /// 阻塞口径与 ocrImage 相同;失败时 text 为空且 lines 为空。
     OcrTextWithLines ocrImageDetailed(const QImage& image);
 
+    /// 对任意 QImage 解码二维码(浮条「二维码」按钮 / 编辑器同款)。
+    /// 毫秒级但仍按惯例留给非 UI 线程调用。found=false = 图中没有码;
+    /// 旧 nbcore.dll 没有此导出时同样返回 found=false(不崩,见 m_qrDecodeRgba)。
+    QrDecodeResult qrDecodeRgba(const QImage& image);
+
     /// 把文本写进系统剪贴板(经核心,与其它复制路径同一通道 —— 核心的
     /// clipboard_win 带打开重试,宿主直接用 Qt 剪贴板在别的进程占用时会静默失败)。
     /// 返回是否写入成功。**「OCR 取字」的落点就是这里**:识别结果必须落到剪贴板,
@@ -245,6 +260,8 @@ private:
     NbCaptureMonitorMatched m_captureMonitorMatched = nullptr;
     NbCaptureCrop m_captureCrop = nullptr;
     NbCaptureMonitorRegionMatched m_captureMonitorRegion = nullptr;
+    /// 二维码解码(RGBA 直入):可选导出,旧核心没有时 qrDecodeRgba 返回未识别。
+    NbQrDecodeRgba m_qrDecodeRgba = nullptr;
     NbOcrRgba m_ocrRgba = nullptr;
     NbStitchBegin m_stitchBegin = nullptr;
     NbStitchAppend m_stitchAppend = nullptr;

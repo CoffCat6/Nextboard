@@ -357,6 +357,7 @@ void EditorWindow::buildToolBar() {
     addAction(BarIcon::SaveAs, QStringLiteral("另存为… (Ctrl+S)"), &EditorWindow::saveToFile);
     addAction(BarIcon::Pin, QStringLiteral("贴图"), &EditorWindow::pinToScreen);
     addAction(BarIcon::Ocr, QStringLiteral("OCR 取字"), &EditorWindow::ocrTakeText);
+    addAction(BarIcon::Qr, QStringLiteral("识别二维码"), &EditorWindow::qrTakeText);
     addAction(BarIcon::RotateLeft, QStringLiteral("向左旋转 90° (Shift+R)"),
               [this] { rotateBase(false); });
     addAction(BarIcon::RotateRight, QStringLiteral("向右旋转 90° (R)"),
@@ -597,6 +598,31 @@ void EditorWindow::ocrTakeText() {
     }));
     // 弹层先以"识别中"占位,完成后由 showOcrResult 填充(全屏 4~5s 不能没反馈)
     showOcrResult(QString(), QStringLiteral("识别中…"));
+}
+
+void EditorWindow::qrTakeText() {
+    bakeTextItem();
+    const QImage composed = compose();
+    if (composed.isNull()) return;
+    // 解码毫秒级,但保持与 OCR 同一异步形态(结果面板共用、UI 不卡顿的口径一致)
+    auto* watcher = new QFutureWatcher<QrDecodeResult>(this);
+    connect(watcher, &QFutureWatcher<QrDecodeResult>::finished, this, [this, watcher] {
+        watcher->deleteLater();
+        const QrDecodeResult qr = watcher->result();
+        QString reason;
+        if (!qr.found || qr.text.isEmpty()) {
+            reason = QStringLiteral("未识别到二维码(画面可能不含完整码面)");
+        } else if (CoreBridge::instance().copyTextToClipboard(qr.text)) {
+            reason = QStringLiteral("已识别二维码并复制到剪贴板");
+        } else {
+            reason = QStringLiteral("识别成功,但写入剪贴板失败");
+        }
+        showOcrResult(qr.found ? qr.text : QString(), reason);
+    });
+    connect(watcher, &QFutureWatcher<QrDecodeResult>::canceled, watcher, &QObject::deleteLater);
+    watcher->setFuture(QtConcurrent::run([image = composed]() -> QrDecodeResult {
+        return CoreBridge::instance().qrDecodeRgba(image);
+    }));
 }
 
 void EditorWindow::showOcrResult(const QString& text, const QString& reason) {

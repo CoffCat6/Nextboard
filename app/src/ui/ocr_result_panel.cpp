@@ -1,6 +1,7 @@
 #include "ui/ocr_result_panel.hpp"
 
 #include "host/core_bridge.hpp"
+#include "panel/core_facade.hpp"
 #include "ui_theme.hpp"
 
 #include <QApplication>
@@ -12,6 +13,7 @@
 #include <QLabel>
 #include <QPainter>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QScrollBar>
 #include <QAbstractTextDocumentLayout>
 #include <QTextDocument>
@@ -161,6 +163,26 @@ OcrResultPanel::OcrResultPanel(const QString& text, const QString& reason,
     auto* buttons = new QHBoxLayout();
     buttons->setSpacing(8);
     buttons->addStretch(1);
+
+    // 「打开链接」:整个结果就是一个 URL 时给直达入口 —— 二维码场景的主诉求
+    // (识别 → 复制 → 再开浏览器是三步,这里省到一步);OCR 识别出的纯链接
+    // 同样受益。判定取"整段不含空白的 http(s) 地址":混在长文本里的链接不判,
+    // 避免"打开的是半截 URL"。打开走 CoreFacade::openExternalUrl —— http(s)
+    // 白名单与验收模式禁浏览器都在那一层,这里不重复做。
+    const QString trimmed = text.trimmed();
+    const bool isPureUrl =
+        !trimmed.isEmpty() && !trimmed.contains(QRegularExpression(QStringLiteral("\\s")))
+        && (trimmed.startsWith(QStringLiteral("http://"), Qt::CaseInsensitive)
+            || trimmed.startsWith(QStringLiteral("https://"), Qt::CaseInsensitive));
+    if (isPureUrl) {
+        auto* openBtn = new QPushButton(QStringLiteral("打开链接"), this);
+        openBtn->setObjectName(QStringLiteral("ocrOpenUrl"));
+        openBtn->setCursor(Qt::PointingHandCursor);
+        connect(openBtn, &QPushButton::clicked, this, [trimmed] {
+            CoreFacade::instance().openExternalUrl(trimmed);
+        });
+        buttons->addWidget(openBtn);
+    }
 
     // 「再次复制」:识别成功时文本已在剪贴板,但用户可能中途复制了别的东西
     // (面板是驻留的,期间去别处 Ctrl+C 很常见),给一个不用重跑的补拷入口。

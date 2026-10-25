@@ -30,9 +30,9 @@ QColor iconInkFor(const QPalette& palette);
 /// 工具图标(与 toolbarTools() 的每个枚举一一对应)。
 QIcon toolIcon(EditorTool tool, int size, const QColor& ink);
 
-/// 动作图标:撤销 / 重做 / 另存为 / 贴图 / OCR / 完成 / 取消 / 透明度 / 缩放 / 旋转。
+/// 动作图标:撤销 / 重做 / 另存为 / 贴图 / OCR / 完成 / 取消 / 透明度 / 缩放 / 旋转 / 二维码。
 enum class BarIcon { Undo, Redo, SaveAs, Pin, Ocr, Done, Cancel, Opacity, ZoomFit,
-                     ZoomOriginal, Pan, RotateLeft, RotateRight };
+                     ZoomOriginal, Pan, RotateLeft, RotateRight, Qr };
 /// 手型(Pan)与绘图工具同属"画布模式",故不放进 EditorTool 枚举。
 QIcon barIcon(BarIcon icon, int size, const QColor& ink);
 

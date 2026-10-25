@@ -22,11 +22,12 @@ namespace nb::overlay {
 // 放在头文件是为了让**验收脚本能按同一份数字**算出按钮位置去真点,不会出现
 // "测试点到了别处"这种假通过。
 // 按钮数含「透明」档位(docs/17 §17.5)。
-// 8 个按钮:标注/OCR取字/长截图/贴图/保存/透明/完成/取消
-// 长截图插在 OCR 之后、贴图之前(docs/19 §3.1):截图类动作相邻,存取类动作相邻。
-constexpr int kToolbarButtons = 8;
-// 按钮均分宽度:8 个按钮仍要落在 1366 宽屏可容纳的范围内(8×71 = 568,
-// 与原 7×79 = 553 基本同宽)。再窄(68 以下)中文两字 + 内边距就挤了。
+// 10 个按钮:标注/OCR取字/二维码/翻译/长截图/贴图/保存/透明/完成/取消
+// 排序按语义分组:内容提取类(OCR/二维码/翻译)相邻,截图类与存取类相邻,
+// 视图档位(透明)与终态(完成/取消)收尾 —— 二维码/翻译紧挨 OCR 取字。
+constexpr int kToolbarButtons = 10;
+// 按钮均分宽度:10 个按钮仍要落在 1366 宽屏可容纳的范围内(10×71 = 710)。
+// 再窄(68 以下)中文两字 + 内边距就挤了,故宁可靠 710 总宽也不减单钮宽。
 constexpr int kToolbarButtonWidth = 71;
 constexpr int kToolbarWidth = kToolbarButtons * kToolbarButtonWidth;
 constexpr int kButtonHeight = 44;                             // 单行按钮高

@@ -91,6 +91,8 @@ private:
     void cancel();
     void pinToScreen();
     void ocrTakeText();
+    /// 识别画布合成图中的二维码(与浮条「二维码」按钮同一能力;毫秒级但仍异步)。
+    void qrTakeText();
     void showOcrResult(const QString& text, const QString& reason);
     /// 画布的光标形状与"穿透态"和当前状态对齐(当前工具 / 是否文字编辑中)。
     /// **单一入口**:任何会改变这两者的地方都调它 —— 否则两处状态各走各的

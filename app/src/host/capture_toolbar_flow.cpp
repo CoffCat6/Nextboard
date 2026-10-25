@@ -39,6 +39,7 @@
 #include <QLabel>
 #include <QPointer>
 #include <QPalette>
+#include <QThread>
 
 #include <algorithm>
 
@@ -549,6 +550,41 @@ void runCaptureToolbarFlow() {
         QImage frozen(geo.size() * 2, QImage::Format_ARGB32_Premultiplied);
         frozen.fill(QColor(0x20, 0x20, 0x20));
 
+        // 画一张**真**二维码到冻结底图(B12 正例):version-1、ECC-L、
+        // payload "https://nb.dev/qr"。模块矩阵由 qrcode crate 一次性生成
+        // (core/nbcore/examples/gen_qr_matrix.rs,改 payload 就重跑它);
+        // ×8 物理 px/模块 + 4 模块白静区,与屏幕渲染等价 —— 端到端验证
+        // 「框选 → frozen.copy → FFI → rqrr 解码 → 结果面板」整条链。
+        {
+            static const char* kQrRows[21] = {
+                "111111100011001111111", "100000101010001000001", "101110101110001011101",
+                "101110100010101011101", "101110101000001011101", "100000101110001000001",
+                "111111101010101111111", "000000001111100000000", "110100110010101110110",
+                "100001010100101110001", "001100111111100000101", "011011001101001011011",
+                "010010111001100101000", "000000001001111100001", "111111101000101011110",
+                "100000100001000110000", "101110100001110011011", "101110101010111010001",
+                "101110100011100010101", "100000101111100000000", "111111101010001010010",
+            };
+            const int qrModulePx = 8, qrQuiet = 4;
+            const int plate = (21 + qrQuiet * 2) * qrModulePx;   // 232 物理 px
+            const QPoint plateAtPhys(800, 80);                   // 逻辑 (400,40),避开 sel
+            QPainter fp(&frozen);
+            fp.fillRect(QRect(plateAtPhys, QSize(plate, plate)), Qt::white);
+            fp.setPen(Qt::NoPen);
+            fp.setBrush(Qt::black);
+            for (int y = 0; y < 21; ++y) {
+                for (int x = 0; x < 21; ++x) {
+                    if (kQrRows[y][x] == '1') {
+                        fp.drawRect(QRect(plateAtPhys
+                                              + QPoint((x + qrQuiet) * qrModulePx,
+                                                       (y + qrQuiet) * qrModulePx),
+                                          QSize(qrModulePx, qrModulePx)));
+                    }
+                }
+            }
+            fp.end();
+        }
+
         auto* overlay = new OverlayWidget(frozen, 0, screen, /*autoConfirm=*/false,
                                           /*rightClickCancel=*/true,
                                           /*autoStartStitching=*/false);
@@ -557,6 +593,11 @@ void runCaptureToolbarFlow() {
         // 用信号收「完成」交出的图:验的是**真实确认链路**,不是内部状态
         QObject::connect(overlay, &OverlayWidget::annotatedConfirmed, overlay,
                          [](const QImage& img) { g_composed = img; });
+        // 「取消/结束会话」计数:flow 没有 SessionHost 去关遮罩,二维码/翻译这类
+        // "完成后 emit cancelled"的按钮,其结束语义只能靠这个计数断言。
+        static int g_cancels = 0;
+        QObject::connect(overlay, &OverlayWidget::cancelled, overlay,
+                         [] { ++g_cancels; });
 
         QTimer::singleShot(200, qApp, [overlay, geo] {
             const QRect sel(300, 220, 600, 400);   // 选在屏中部,给浮条留出下方空间
@@ -730,11 +771,12 @@ void runCaptureToolbarFlow() {
             }
 
             // ---- B2. 「完成」交出的合成图 ----
-            // ⚠️ 索引跟着按钮集合走。当前 8 个按钮:
-            //    0 标注 / 1 OCR取字 / 2 长截图 / 3 贴图 / 4 保存 / 5 透明 / 6 完成 / 7 取消
+            // ⚠️ 索引跟着按钮集合走。当前 10 个按钮:
+            //    0 标注 / 1 OCR取字 / 2 二维码 / 3 翻译 / 4 长截图 / 5 贴图 /
+            //    6 保存 / 7 透明 / 8 完成 / 9 取消
             //    写死旧索引会点到隔壁按钮,测试静默跑到另一条路径上还以为通过 ——
             //    这就是本节历史上两次"假通过"的来源(docs/14 §16 与 docs/19 §3.1)。
-            const int doneIndex = 6;
+            const int doneIndex = 8;
             click(QPoint(tb.x() + bw * doneIndex + bw / 2, tb.y() + tb.height() / 2));
             const QSize wantSize(qRound(sel.width() * 2.0), qRound(sel.height() * 2.0));
             qInfo() << "CAPTURE-TOOLBAR  confirm -> image" << g_composed.size()
@@ -812,10 +854,17 @@ void runCaptureToolbarFlow() {
             // 已由 --stitch-flow 用构造帧覆盖。
             {
                 const QString snapPath = qEnvironmentVariable("NB_STITCH_SNAP");
-                // 重新框选出一个干净选区(上一轮的标注已随「完成」结束)
-                dragMouse(overlay, sel.topLeft(), QPoint(sel.right(), sel.bottom()));
-                // 点浮条「长截图」(下标 2)
-                click(QPoint(tb.x() + bw * 2 + bw / 2, tb.y() + tb.height() / 2));
+                // ⚠️ 先退出标注态再进长截图:B1 进入的标注态在「完成」后**并不清理引擎**
+                //    (confirmSelection 只发图),而标注态下"选区内的按下"会交给引擎画笔
+                //    (见 mousePressEvent 分支)——带着标注点「长截图」会弹"丢弃标注?"
+                //    **模态框**,把无人值守的验收挂死。点「标注」是真实退出路径
+                //    (toolbar case 0 的 toggle)。
+                //    原先这里还有一次"重拖选区",删掉:选区自 B1 起从未变过,重拖
+                //    多余;且退出标注态后按下点会命中左上手柄、拖到右下角把选区
+                //    拉成空矩形(实测,长截图随之进不去)。
+                click(QPoint(tb.x() + bw / 2, tb.y() + tb.height() / 2));   // 下标 0:退出标注态
+                // 点浮条「长截图」(下标 4)
+                click(QPoint(tb.x() + bw * 4 + bw / 2, tb.y() + tb.height() / 2));
 
                 check(overlay->stitching(), QStringLiteral("点「长截图」后进入长截图态"));
                 check(!overlay->stitchCapturing(),
@@ -953,6 +1002,81 @@ void runCaptureToolbarFlow() {
                 // 遮罩仍在(没被取消)
                 check(overlay->isVisible(),
                       QStringLiteral("Esc 只退长截图态,遮罩与选区仍在"));
+            }
+
+            // ---- B12. 二维码按钮(下标 2):正例(真码端到端)+ 反例(无码) ----
+            // 解码本体的极性/极限已由 core 单测钉住;这里钉**浮条链路**:
+            // 框选含码区域 → 点击 → 异步 → 结果面板显示解码文本 → cancelled;
+            // 再框选无码区域 → 未识别文案。面板定位随选区走,几何各自重算。
+            const auto findQrPanel = []() -> QWidget* {
+                for (QWidget* w : QApplication::topLevelWidgets()) {
+                    if (w->objectName() == QLatin1String("ocrResultPanel")) return w;
+                }
+                return nullptr;
+            };
+            const auto clickQrButton = [&geo, &click](const QRect& onSel) {
+                const QRect tb = overlay::toolbarRectFor(
+                    onSel, geo.size(),
+                    QSize(overlay::kToolbarWidth, overlay::kButtonHeight), overlay::kBarMargin);
+                const int bwidth = tb.width() / overlay::kToolbarButtons;
+                click(QPoint(tb.x() + bwidth * 2 + bwidth / 2, tb.y() + tb.height() / 2));
+            };
+            const auto pumpUntilCancelled = [](int before) {
+                // g_cancels 是 static 存储,无需捕获(捕获 static 是 ill-formed)
+                for (int i = 0; i < 100 && g_cancels == before; ++i) {
+                    QApplication::processEvents();
+                    QThread::msleep(10);
+                }
+                return g_cancels > before;
+            };
+            {   // 正例:宽选区包小码(码仅占选区约 1/3,四周是冻结底图深色背景)
+                // —— 复现真机反馈「区域必须大范围只含二维码才识别成功」,
+                //    任何"周围内容/小占比导致失败"的回归在此现形。
+                const QRect qrSel(280, 0, 360, 240);
+                dragMouse(overlay, qrSel.topLeft(), qrSel.bottomRight());
+                const int before = g_cancels;
+                clickQrButton(qrSel);
+                check(pumpUntilCancelled(before),
+                      QStringLiteral("正例(宽选区):点「二维码」后结束会话"));
+                QWidget* panel = findQrPanel();
+                check(panel != nullptr, QStringLiteral("正例(宽选区):结果面板已弹出"));
+                if (panel) {
+                    auto* body = panel->findChild<QTextEdit*>(QStringLiteral("ocrText"));
+                    const QString got = body ? body->toPlainText() : QString();
+                    check(got == QStringLiteral("https://nb.dev/qr"),
+                          QStringLiteral("正例(宽选区,码占 1/3):端到端解出内容(实际 %1)")
+                              .arg(got));
+                    panel->close();   // 收面板,别挡后续人工核对
+                }
+            }
+            {   // 反例:无码区域(原选区)
+                // ⚠️ 从右下角往左上拖(方向反着):此刻选区还是宽选区 qrSel,
+                //    sel.topLeft() 落在它**内部** —— 正向按下会被当成"移动选区",
+                //    松手后选区不在 sel、浮条不在预期位置,点击落空(实测级联挂)。
+                dragMouse(overlay, QPoint(sel.right(), sel.bottom()), sel.topLeft());
+                const int before = g_cancels;
+                clickQrButton(sel);
+                check(pumpUntilCancelled(before), QStringLiteral("反例:点「二维码」后结束会话"));
+                QWidget* panel = findQrPanel();
+                check(panel != nullptr, QStringLiteral("反例:结果面板已弹出"));
+                if (panel) {
+                    auto* body = panel->findChild<QTextEdit*>(QStringLiteral("ocrText"));
+                    const QString got = body ? body->toPlainText() : QString();
+                    check(got.contains(QStringLiteral("未识别到二维码")),
+                          QStringLiteral("反例:无码底图给出未识别提示"));
+                    panel->close();
+                }
+            }
+
+            // ---- B13. 翻译按钮(下标 3):入库 + 结束会话 ----
+            // 真正的 OCR→翻译页链路要主面板(flow 里没有),这里只钉住"入库并让位"
+            // 的结束语义(ingest 同步完成,cancelled 计数 +1,无崩溃)。
+            {
+                const int before = g_cancels;
+                click(QPoint(tb.x() + bw * 3 + bw / 2, tb.y() + tb.height() / 2));
+                QApplication::processEvents();
+                check(g_cancels > before,
+                      QStringLiteral("点「翻译」后结束会话(finishCapture 已同步入库)"));
             }
 
             overlay->close();

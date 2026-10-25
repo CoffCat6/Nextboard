@@ -18,6 +18,7 @@ pub mod core;
 pub mod error;
 pub mod ffi;
 pub mod ocr;
+pub mod qr;
 pub mod settings;
 pub mod stitch;
 pub mod store;

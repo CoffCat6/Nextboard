@@ -1213,11 +1213,13 @@ QString toolbarButtonText(int index) {
     switch (index) {
         case 0: return QStringLiteral("标注");
         case 1: return QStringLiteral("OCR取字");
-        case 2: return QStringLiteral("长截图");
-        case 3: return QStringLiteral("贴图");
-        case 4: return QStringLiteral("保存");
-        case 5: return QStringLiteral("透明");   // 底板不透明度三档循环(docs/17 §17.5)
-        case 6: return QStringLiteral("完成");
+        case 2: return QStringLiteral("二维码");
+        case 3: return QStringLiteral("翻译");
+        case 4: return QStringLiteral("长截图");
+        case 5: return QStringLiteral("贴图");
+        case 6: return QStringLiteral("保存");
+        case 7: return QStringLiteral("透明");   // 底板不透明度三档循环(docs/17 §17.5)
+        case 8: return QStringLiteral("完成");
         default: return QStringLiteral("取消");
     }
 }
@@ -1231,11 +1233,13 @@ QString toolbarButtonTipText(int index) {
     switch (index) {
         case 0: return QStringLiteral("标注:在选区内就地画笔/箭头/文字");
         case 1: return QStringLiteral("OCR 取字:识别选区文字并复制到剪贴板");
-        case 2: return QStringLiteral("长截图:滚动采集(选区转为采集窗口)");
-        case 3: return QStringLiteral("贴图:把选区钉在屏幕上");
-        case 4: return QStringLiteral("保存:选区另存为图片文件");
-        case 5: return QStringLiteral("底板不透明度:不透明 / 半透 / 极简 循环");
-        case 6: return QStringLiteral("完成:入库并写剪贴板 (Enter)");
+        case 2: return QStringLiteral("二维码:识别选区内的二维码并复制其内容");
+        case 3: return QStringLiteral("翻译:识别选区文字并打开翻译页(截图入库)");
+        case 4: return QStringLiteral("长截图:滚动采集(选区转为采集窗口)");
+        case 5: return QStringLiteral("贴图:把选区钉在屏幕上");
+        case 6: return QStringLiteral("保存:选区另存为图片文件");
+        case 7: return QStringLiteral("底板不透明度:不透明 / 半透 / 极简 循环");
+        case 8: return QStringLiteral("完成:入库并写剪贴板 (Enter)");
         default: return QStringLiteral("取消本次截图 (Esc)");
     }
 }
@@ -1313,7 +1317,7 @@ QString OverlayWidget::toolbarButtonTip(int index) const {
     if (index < 0 || index >= overlay::kToolbarButtons) return QString();
     // 「透明」档位的说明跟着当前档位走(barAlphaTip 终于有了调用点):
     // 用户点一下想知道"现在是哪一档",光说"循环切换"没用。
-    if (index == 5) return barAlphaTip();
+    if (index == 7) return barAlphaTip();
     // 「OCR取字」进行中:说明还要告诉用户"为什么点不动"
     if (index == 1 && m_ocrPending) return QStringLiteral("正在识别中…(完成前不能重复触发)");
     return toolbarButtonTipText(index);
@@ -1390,8 +1394,9 @@ void OverlayWidget::drawToolbar(QPainter& painter) const {
         const QRect btn = toolbarButtonRect(i);
         const QRect fill = btn.adjusted(2, 3, -2, -3);   // 高亮/激活底衬内缩,不顶到描边
         // 索引顺序(与 toolbarButtonText 一一对应):
-        // 0 标注 / 1 OCR取字 / 2 长截图 / 3 贴图 / 4 保存 / 5 透明 / 6 完成 / 7 取消
-        const bool active = (i == 0 && annotating()) || (i == 2 && stitchActive());
+        // 0 标注 / 1 OCR取字 / 2 二维码 / 3 翻译 / 4 长截图 / 5 贴图 /
+        // 6 保存 / 7 透明 / 8 完成 / 9 取消
+        const bool active = (i == 0 && annotating()) || (i == 4 && stitchActive());
 
         if (active) {
             // 激活态 = theme.md §15 的 Selected:AccentSoft 底 + Accent 字。
@@ -1409,9 +1414,9 @@ void OverlayWidget::drawToolbar(QPainter& painter) const {
 
         QColor fg = baseFg;
         if (active) fg = t.accent;
-        if (i == 6) fg = t.success;   // 完成:绿(语义色,主题内两套都保证对比度)
-        if (i == 7) fg = t.error;     // 取消:红
-        if (i == 5) fg = t.textSecondary;   // 透明档位:次要动作,弱化
+        if (i == 8) fg = t.success;   // 完成:绿(语义色,主题内两套都保证对比度)
+        if (i == 9) fg = t.error;     // 取消:红
+        if (i == 7) fg = t.textSecondary;   // 透明档位:次要动作,弱化
         // 识别进行中:「OCR取字」置灰(它自己也会拒绝重入,这里是**看得见**的那一半)。
         // 只靠"点了没反应"用户会以为按钮坏了 —— 状态必须同时可见。
         if (i == 1 && m_ocrPending) fg = t.textDisabled;
@@ -1433,13 +1438,13 @@ void OverlayWidget::handleToolbarClick(const QPoint& pos) {
     if (index < 0) return;
     hideHoverTip();   // 已经点下去了,说明用户看懂了;提示别继续压在上面
     switch (index) {
-        case 5:   // 透明:底板不透明度三档循环(即时生效,不结束会话)
+        case 7:   // 透明:底板不透明度三档循环(即时生效,不结束会话)
             cycleBarAlpha();
             return;
-        case 6:   // 完成
+        case 8:   // 完成
             confirmSelection();
             return;
-        case 7:   // 取消
+        case 9:   // 取消
             emit cancelled();
             return;
         case 0:   // 标注:进入/退出标注态(S3)
@@ -1448,7 +1453,7 @@ void OverlayWidget::handleToolbarClick(const QPoint& pos) {
             m_toolbarRect = toolbarRect();   // 布局可能因二级条显隐变化
             update();
             return;
-        case 2:   // 长截图:进入长截图态(不结束会话 —— 选区转为采集窗口)
+        case 4:   // 长截图:进入长截图态(不结束会话 —— 选区转为采集窗口)
             enterStitching();
             return;
         default:
@@ -1461,8 +1466,8 @@ void OverlayWidget::handleToolbarClick(const QPoint& pos) {
     const QImage cropped = m_engine ? m_engine->compose(annotationSceneRect())
                                     : m_frozen.copy(selectionPhysical());
     if (cropped.isNull()) return;
-    // 决策:三者在弹层/贴图/另存完成后**结束会话** —— 与形态 B 一致。
-    // 索引:1 OCR取字 / 3 贴图 / 4 保存(长截图插在 2,见上)
+    // 决策:内容提取类(OCR/二维码/翻译)与存取类(贴图/保存)在完成后**结束会话**
+    // —— 与形态 B 一致。索引:1 OCR取字 / 2 二维码 / 3 翻译 / 5 贴图 / 6 保存
     switch (index) {
         case 1: {  // OCR取字:异步(0.4~5s)
             // ---- 防重入 ----
@@ -1518,11 +1523,56 @@ void OverlayWidget::handleToolbarClick(const QPoint& pos) {
                                QStringLiteral("识别中…"), this, QRect(), 2500);
             return;
         }
-        case 3:    // 贴图
+        case 2: {  // 二维码:解码毫秒级,但保持与 OCR 同一异步形态(结果面板共用)
+            // 防重入复用 m_ocrPending:OCR 与二维码都是"异步 → 完成后结束会话",
+            // 一条 pending 闸同时挡住两条链的并发双结束。
+            if (m_ocrPending) return;
+            m_ocrPending = true;
+            const QRect qrAnchor = QRect(mapToGlobal(m_selection.normalized().topLeft()),
+                                         m_selection.normalized().size());
+            emit activity();
+            auto* watcher = new QFutureWatcher<QrDecodeResult>(this);
+            connect(watcher, &QFutureWatcher<QrDecodeResult>::finished, this,
+                    [this, watcher, cropped, qrAnchor] {
+                watcher->deleteLater();
+                const QrDecodeResult qr = watcher->result();
+                QString notice;
+                if (!qr.found || qr.text.isEmpty()) {
+                    notice = QStringLiteral("未识别到二维码(框选需包含完整码面)");
+                } else if (CoreBridge::instance().copyTextToClipboard(qr.text)) {
+                    notice = QStringLiteral("已识别二维码并复制到剪贴板");
+                } else {
+                    notice = QStringLiteral("识别成功,但写入剪贴板失败");
+                }
+                m_ocrPending = false;
+                // 面板与 OCR 共用:文本 + 源图;识别到 URL 时面板会给出「打开链接」
+                showOcrResultPanel(qr.found ? qr.text : QString(), notice, cropped, qrAnchor);
+                update();
+                emit cancelled();
+            });
+            connect(watcher, &QFutureWatcher<QrDecodeResult>::canceled, watcher,
+                    &QObject::deleteLater);
+            watcher->setFuture(QtConcurrent::run([cropped]() -> QrDecodeResult {
+                return CoreBridge::instance().qrDecodeRgba(cropped);
+            }));
+            return;
+        }
+        case 3: {  // 翻译:与热键「截图翻译」(Ctrl+Shift+E)同一语义
+            // 截图入库 + 写剪贴板,再按条目 OCR → translatePrefill → 面板翻译页
+            // 自动出译文。显式带回调而非读 g_onCaptured(那是热键链路的会话级状态,
+            // 浮条按钮不该耦合);翻译面板由 main.cpp 的 translatePrefill 接线唤起。
+            emit activity();
+            finishCapture(cropped, [](const QString& entryId) {
+                CoreFacade::instance().processCapture(entryId, QStringLiteral("translate"));
+            });
+            emit cancelled();   // 立即让位(ingest 同步毫秒级,与确认链同先例)
+            return;
+        }
+        case 5:    // 贴图
             pinComposedImage(cropped);
             emit cancelled();
             return;
-        case 4: {  // 保存
+        case 6: {  // 保存
             bakeSaveDialog(cropped);
             emit cancelled();
             return;

@@ -330,6 +330,36 @@ pub unsafe extern "C" fn nb_ocr_rgba(
     .unwrap_or_else(|_| Err(AppError::Panicked("nb_ocr_rgba panic".into())));
     report_out_text(result, out_text)
 }
+
+/// 对**任意 RGBA** 直接做二维码解码(浮条「二维码」按钮 / 编辑器同款)。
+///
+/// 出参契约**与 nb_ocr_rgba 同一口径**:裸 `{"found": …, "text": …}`,
+/// 没有 nb_call 的 {ok,data} 信封;`found=false` 表示图中没有码(不是错误)。
+/// 码在哪一侧宿主决定(复制/打开链接),核心只交原始文本 —— 与 nb_ocr_rgba
+/// "不做后处理"的分工一致。
+///
+/// # Safety
+/// `rgba` 由宿主持有,本函数只读;`out_text` 由本 crate 分配,
+/// 宿主成功后须以 `nb_free_string` 释放(与 `nb_call` 的出参同约定)。
+#[no_mangle]
+pub unsafe extern "C" fn nb_qr_decode_rgba(
+    rgba: *const u8,
+    len: usize,
+    width: u32,
+    height: u32,
+    out_text: *mut *mut i8,
+) -> i32 {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if rgba.is_null() || len == 0 {
+            return Err(AppError::InvalidInput("二维码输入为空".into()));
+        }
+        let bytes = std::slice::from_raw_parts(rgba, len);
+        let out = crate::qr::decode_rgba(bytes.to_vec(), width, height)?;
+        Ok(serde_json::json!({ "found": out.found, "text": out.text }).to_string())
+    }))
+    .unwrap_or_else(|_| Err(AppError::Panicked("nb_qr_decode_rgba panic".into())));
+    report_out_text(result, out_text)
+}
 /// 裁剪整屏 RGBA 的子区域(框选确认)。
 ///
 /// # Safety
@@ -1713,6 +1743,36 @@ mod contract_tests {
         assert!(
             v.get("data").is_none() && v.get("ok").is_none(),
             "RGBA 入库返回体不应带 ok/data 信封;实际: {raw}"
+        );
+    }
+
+    /// nb_qr_decode_rgba:形状(裸 {found,text} 无信封)+ **真实跨 FFI 调用**的
+    /// round-trip。二维码不像 OCR 依赖 Core 状态,这里可以直接走导出函数本体,
+    /// 把「样本 → C ABI → JSON → 释放」整条链钉住。
+    #[test]
+    fn qr_decode_rgba_contract_and_round_trip() {
+        let shape = serde_json::json!({ "found": false, "text": "" }).to_string();
+        let v: serde_json::Value = serde_json::from_str(&shape).expect("必须是合法 JSON");
+        assert!(v.get("found").and_then(|f| f.as_bool()).is_some(), "found 必须是布尔");
+        assert!(v.get("text").and_then(|t| t.as_str()).is_some(), "text 必须是字符串");
+        assert!(
+            v.get("data").is_none() && v.get("ok").is_none(),
+            "二维码返回体不应带 ok/data 信封;实际: {shape}"
+        );
+
+        let (rgba, w, h) = crate::qr::__test_only_make_qr_rgba("https://example.com/nextboard", 4, 4);
+        let mut out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let rc = unsafe {
+            super::nb_qr_decode_rgba(rgba.as_ptr(), rgba.len(), w, h, &mut out)
+        };
+        assert_eq!(rc, super::NB_OK, "FFI 调用应成功");
+        let body = unsafe { std::ffi::CStr::from_ptr(out) }.to_string_lossy().into_owned();
+        unsafe { super::nb_free_string(out) };
+        let v: serde_json::Value = serde_json::from_str(&body).expect("FFI 返回体必须是合法 JSON");
+        assert_eq!(v.get("found").and_then(|f| f.as_bool()), Some(true));
+        assert_eq!(
+            v.get("text").and_then(|t| t.as_str()),
+            Some("https://example.com/nextboard")
         );
     }
 

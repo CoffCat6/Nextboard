@@ -71,6 +71,9 @@ bool CoreBridge::init(bool /*startHidden*/, QString* error) {
         reinterpret_cast<NbCaptureMonitorRegionMatched>(
             resolve("nb_capture_monitor_region_matched"));
     m_ocrRgba = reinterpret_cast<NbOcrRgba>(resolve("nb_ocr_rgba"));
+    // 二维码解码:可选导出(旧核心没有)→ qrDecodeRgba 返回 found=false,不崩。
+    m_qrDecodeRgba =
+        reinterpret_cast<NbQrDecodeRgba>(resolve("nb_qr_decode_rgba"));
     // 长截图导出:同样是**可选**导出(旧核心没有)→ 不进"致命缺失"检查。
     // 功能侧用 hasStitch() 判断是否可用,不可用时热键给出可读提示而非静默无反应。
     m_stitchBegin = reinterpret_cast<NbStitchBegin>(resolve("nb_stitch_begin"));
@@ -498,6 +501,35 @@ OcrTextWithLines CoreBridge::ocrImageDetailed(const QImage& image) {
     }
     if (!lines.isEmpty() && out.lines.isEmpty()) {
         qWarning() << "OCR lines 数组存在但全部无效,行框已丢弃:" << owned.left(200);
+    }
+    return out;
+}
+
+QrDecodeResult CoreBridge::qrDecodeRgba(const QImage& image) {
+    QrDecodeResult out;
+    // 旧 nbcore.dll 没有此导出:与"图中没有码"同一形态返回(功能缺失≠崩溃)
+    if (!m_qrDecodeRgba || !m_freeString || image.isNull()) return out;
+    const QImage src = image.convertToFormat(QImage::Format_RGBA8888);
+    char* body = nullptr;
+    const int rc = m_qrDecodeRgba(
+        src.constBits(),
+        static_cast<unsigned long long>(src.sizeInBytes()),
+        static_cast<unsigned>(src.width()), static_cast<unsigned>(src.height()),
+        &body);
+    if (rc != 0 || !body) {
+        if (body) m_freeString(body);
+        return out;
+    }
+    // nb_call 同款生命周期:接管即拷,随即归还核心缓冲
+    const QByteArray owned(body);
+    m_freeString(body);
+    // ⚠️ 返回体是**裸** {"found":…,"text":…}(与 nb_ocr_rgba 同口径,无信封;
+    //    那条"照抄信封解析取 data"的历史教训在这里同样适用)。
+    const QJsonObject resp = QJsonDocument::fromJson(owned).object();
+    out.found = resp.value("found").toBool();
+    out.text = resp.value("text").toString();
+    if (!resp.contains("found")) {
+        qWarning() << "二维码返回体没有 found 字段,契约可能已变:" << owned.left(200);
     }
     return out;
 }

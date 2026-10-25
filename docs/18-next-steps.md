@@ -50,6 +50,7 @@
 | 贴屏交接处不自动收起 | 2026-10-19 用户拍板(docs/20 §11 Q7):交界处收起几何不成立(推出去=推到邻屏上 → enter/expand 弹回 → 闪烁死循环)。`edgeOutsideIsAnotherScreen()` 拦截 + `leaveEvent` 加 `isCursorOverWindow()` 守卫。见 docs/20 §13.12 |
 | OCR 行级包围盒 + 图中取字 | 2026-10-24:两个引擎统一输出行框,面板悬停预览/双击行复制;`--capture-toolbar-flow` +9 项。见 docs/progress.md 10-24 |
 | 编辑器裁剪/旋转 | 2026-10-25:90° 旋转(R/Shift+R)+ 交互式裁剪(C/Enter/Esc + 覆盖层上的确认/取消按钮),标注图元与撤销栈全程跟随;浮条不暴露(重新框选即裁剪)。验收 `--editor-flow` 38 项。见 docs/17 §18.14 |
+| 二维码识别 + 浮条翻译按钮 | 2026-10-25:核心 rqrr 解码(FFI `nb_qr_decode_rgba`,6 项单测含 FFI round-trip);浮条 8→10 按钮(0 标注/1 OCR/2 二维码/3 翻译/4 长截图/5 贴图/6 保存/7 透明/8 完成/9 取消);结果面板纯 URL 给「打开链接」;编辑器动作条同步加「识别二维码」。`--capture-toolbar-flow` 索引已迁移 + 新增 B12/B13 |
 
 ---
 ## 2. P0 · 发布收尾(挡住「能发」,不挡「能用」)
@@ -75,7 +76,7 @@
 | **3.3** | **搜索增强(正则 / 仅标题 / 大小写)** | 现在只有 FTS + 中文 LIKE 兜底;命中高亮已做,匹配能力没做 | `store/entry.rs` 的 `list(conn, query, kind, pinned, tag, source, limit, offset)` 是唯一入口 | **中** |
 | **3.4** | **翻译历史持久化** | 历史是进程内内存队列,上限 50,退出即清零 | `translate/mod.rs:109` `static HISTORY: Mutex<Vec<HistoryItem>>` | **小**(可复用 `clip_entries` + source=translate) |
 | **3.5** | **截图自动 OCR 入库(默认关)** | 路线图 S5.4 的原意:截图即可搜到图里的字 | `ocr_text` 列 + FTS 触发器已备,app 侧无开关 | **小** |
-| **3.6** | **二维码识别** | 截图 → 直接出链接或文本;可复用现成 RGBA 管线 | 全域零实现;方案评估已完成,需新增解码依赖(首次构建要联网) | **小–中** |
+| **3.6** | ~~二维码识别~~ → ✅ **已完成**(2026-10-25):核心 rqrr 解码(纯 Rust)+ 浮条/编辑器双入口 + 结果面板「打开链接」;浮条同时新增「翻译」按钮(与热键截图翻译同语义)。见 docs/progress.md 10-25 | — | — | — |
 | **3.7** | **敏感内容保护:应用黑名单 + 疑似密钥不落库** | 隐私是剪贴板工具的天然软肋(密码管理器、网银) | 路线图 backlog 已列;app 与 core 两侧 grep 零命中 | **中** |
 | **3.8** | **剪贴板来源应用追踪** | 有了 owner 才能做黑名单,也才能在卡片上标「来自 Chrome」 | `clip.rs` 无 `GetClipboardOwner`;有 `CF_HDROP`,无 `CF_HTML` | **中** |
 | **3.9** | **日志轮转** | 日志只 append + flush,长期运行无限增长 | `app/src/main.cpp:29` 的 `QFile log(...)`;S2 注释写着「发布期移除」 | **小** |

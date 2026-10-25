@@ -21,6 +21,9 @@ log.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }
+# 二维码解码(纯 Rust,quirc 检测算法的移植):无模型、无 native 依赖;
+# image feature 只为 GrayImage 互转(与上面 image 0.25 同源)。
+rqrr = { version = "0.7", features = ["image"] }
 # error-code 需 std feature 才实现 std::error::Error(clipboard-plus 原由 tauri 传递启用)
 clipboard-win = { version = "5.4", features = ["std"] }
 xcap = "0.9"
@@ -77,3 +80,7 @@ image-io = []            # 不在此层做图片文件解码(由调用方给 RGB
 cuda-provider = []
 directml-provider = []
 cann-provider = []
+
+[dev-dependencies]
+# 仅测试用:生成二维码样本做解码 round-trip(生产依赖零增加)
+qrcode = "0.14"

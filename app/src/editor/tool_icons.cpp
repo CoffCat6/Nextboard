@@ -287,6 +287,21 @@ QIcon barIcon(BarIcon icon, int size, const QColor& ink) {
             }
             break;
         }
+        case BarIcon::Qr: {
+            // 二维码:外框 + 三个定位角方块(左上/右上/左下)。
+            // 16px 下只画定位角不画数据点 —— 数据点在这个尺寸是噪点,
+            // 三个实心角 + 空外框已是二维码的无歧义符号。
+            p.drawRect(QRectF(2.5, 2.5, 11.0, 11.0));
+            const qreal s = 2.8;   // 定位角方块边长
+            p.setPen(Qt::NoPen);
+            p.setBrush(ink);
+            p.drawRect(QRectF(4.2, 4.2, s, s));                       // 左上
+            p.drawRect(QRectF(11.0, 4.2, s, s));                      // 右上
+            p.drawRect(QRectF(4.2, 11.0, s, s));                      // 左下
+            p.drawRect(QRectF(11.0, 11.0, s * 0.75, s * 0.75));       // 右下小点(残点意象)
+            p.setBrush(Qt::NoBrush);
+            break;
+        }
     }
     p.end();
     return QIcon(pm);
