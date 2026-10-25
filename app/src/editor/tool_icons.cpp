@@ -167,6 +167,15 @@ QIcon toolIcon(EditorTool tool, int size, const QColor& ink) {
             p.drawRect(QRectF(9.4, 3.2, 3.4, 3.4));
             break;
         }
+        case EditorTool::Crop: {
+            // 裁剪:对角双括线(缺两角的方形)。与 OCR 图标的四角括号区分:
+            // 只画左上/右下两个角,且无中间横线 —— 裁剪的意象就是"框住要留的部分"
+            line(p, 6.5, 2.5, 2.5, 2.5);
+            line(p, 2.5, 2.5, 2.5, 9.5);
+            line(p, 9.5, 13.5, 13.5, 13.5);
+            line(p, 13.5, 13.5, 13.5, 6.5);
+            break;
+        }
     }
     p.end();
     return QIcon(pm);
@@ -256,6 +265,26 @@ QIcon barIcon(BarIcon icon, int size, const QColor& ink) {
                 line(p, x, 7.6, x, 4.4 - (i == 1 ? 0.9 : 0.0));
             }
             line(p, 4.4, 9.2, 2.8, 10.6);                               // 拇指
+            break;
+        }
+        case BarIcon::RotateLeft:
+        case BarIcon::RotateRight: {
+            // 旋转:近整圆(顶部留缺口)+ 箭头。与撤销/重做的半弧区分:
+            // 这里是 280° 大弧,且箭头贴着弧的端点沿切线方向。
+            // drawArc 角度以 1/16° 计、逆时针为正;顺时针用负 span。
+            const QRectF circle(3.0, 3.0, 10.0, 10.0);
+            if (icon == BarIcon::RotateRight) {
+                p.drawArc(circle, 60 * 16, -280 * 16);
+                // 端点在 60°(右上),顺时针切向 = (sinθ, cosθ) → 30°
+                arrowHead(p, 8.0 + 5.0 * std::cos(kPi / 3.0),
+                          8.0 - 5.0 * std::sin(kPi / 3.0), kPi / 6.0, ink, 3.6);
+            } else {
+                p.drawArc(circle, 120 * 16, 280 * 16);
+                // 端点在 120°(左上),逆时针切向 = (−sinθ, −cosθ) → 150°
+                arrowHead(p, 8.0 + 5.0 * std::cos(2.0 * kPi / 3.0),
+                          8.0 - 5.0 * std::sin(2.0 * kPi / 3.0),
+                          5.0 * kPi / 6.0, ink, 3.6);
+            }
             break;
         }
     }

@@ -71,6 +71,12 @@ void reportTodoGroups(PanelWindow& panel);
 /// 纯本机几何与渲染断言,不写库、不联网,无需 --data-dir。
 void runCaptureToolbarFlow();
 
+/// 编辑器裁剪/旋转验收(--editor-flow):A 段引擎级直测(标注图元跟随变换、
+/// 撤销重做绝对还原、马赛克纹理随底图重建、compose 不含裁剪覆盖层),
+/// B 段真窗口端到端(真点画笔按钮 + R/C/Enter/Esc 键位 + committed 收图)。
+/// 不写库、不联网,无需 --data-dir。
+void runEditorFlow();
+
 /// 自启注册表自检(--autostart-flow):**真实读写** HKCU 的 Run 键,验证
 /// "应用内开自启写的命令行与安装器同一形态(带 --hidden)"。
 /// 步骤:保存原值 → 写启(读回断言含 --hidden 且以 exe 路径开头)→

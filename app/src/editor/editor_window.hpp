@@ -45,6 +45,10 @@ public:
     /// 合成底图 + 全部标注,按物理像素输出(导出与入库共用)。
     QImage compose() const;
 
+    /// 标注引擎(场景/撤销栈/构图操作)。宿主自身状态一律经信号同步、不绕过;
+    /// 暴露出来主要供验收 flow 直查引擎态(裁剪框/按钮几何/撤销栈)。
+    AnnotationEngine* engine() const { return m_engine; }
+
 signals:
     /// 「完成」:合成图交调用方入库 + 写剪贴板。
     void committed(const QImage& composed);
@@ -79,6 +83,9 @@ private:
     void saveGeometryToSettings() const;
     void restoreGeometryFromSettings();
     void bakeTextItem();
+    /// 旋转底图 90°(顺/逆)。构图动作,与当前绘图工具无关 —— 用户画着画着按 R
+    /// 顺手转图,不应被打断工具状态。
+    void rotateBase(bool clockwise);
     void saveToFile();
     void finish();
     void cancel();

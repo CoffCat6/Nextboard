@@ -239,6 +239,8 @@ EditorWindow::EditorWindow(QImage base, QWidget* parent) : QWidget(parent), m_ba
     QGraphicsScene* m_scene_local = m_engine->scene();
 
     auto* canvas = new EditorCanvas(m_engine->scene(), this);
+    // 验收 flow 按名定位画布(投递鼠标/键盘事件的目标)
+    canvas->setObjectName(QStringLiteral("editorCanvas"));
     canvas->setRenderHint(QPainter::Antialiasing);
     canvas->setRenderHint(QPainter::SmoothPixmapTransform);
     canvas->setDragMode(QGraphicsView::NoDrag);
@@ -268,6 +270,10 @@ EditorWindow::EditorWindow(QImage base, QWidget* parent) : QWidget(parent), m_ba
     // 关键:按**视图**尺寸变化来适配,而不是按窗口 resizeEvent —— 后者可能在布局
     // 把视图撑开之前就触发,那时视口只有几十像素,算出来的缩放会让底图缩成一小点。
     connect(canvas, &EditorCanvas::canvasResized, this, &EditorWindow::fitCanvas);
+    // 构图操作(旋转/裁剪,含其撤销/重做)改了底图尺寸:重新适配视图。
+    // 一律走 zoomToFit 语义(清掉手动缩放标记再适配):旋转后宽高互换、裁剪后
+    // 内容骤变,保留旧缩放只会把画面顶到角落里。
+    connect(m_engine, &AnnotationEngine::baseChanged, this, &EditorWindow::zoomToFit);
 
     buildToolBar();
 
@@ -351,6 +357,10 @@ void EditorWindow::buildToolBar() {
     addAction(BarIcon::SaveAs, QStringLiteral("另存为… (Ctrl+S)"), &EditorWindow::saveToFile);
     addAction(BarIcon::Pin, QStringLiteral("贴图"), &EditorWindow::pinToScreen);
     addAction(BarIcon::Ocr, QStringLiteral("OCR 取字"), &EditorWindow::ocrTakeText);
+    addAction(BarIcon::RotateLeft, QStringLiteral("向左旋转 90° (Shift+R)"),
+              [this] { rotateBase(false); });
+    addAction(BarIcon::RotateRight, QStringLiteral("向右旋转 90° (R)"),
+              [this] { rotateBase(true); });
     addAction(BarIcon::ZoomFit, QStringLiteral("适应窗口 (Ctrl+0)"), &EditorWindow::zoomToFit);
     addAction(BarIcon::ZoomOriginal, QStringLiteral("实际大小 (Ctrl+1)"), &EditorWindow::zoomToOriginal);
     actions->addSeparator();
@@ -360,6 +370,14 @@ void EditorWindow::buildToolBar() {
     // 交给共享工具条放到参数行右侧(不再自己占一整行)。
     // 所有权随 addWidget 转给参数行 → 随窗口析构,这里不留指针。
     m_annotationBar->setTrailingWidget(actions);
+}
+
+void EditorWindow::rotateBase(bool clockwise) {
+    if (!m_engine) return;
+    m_engine->rotate90(clockwise);
+    // 旋转可能顺带退出裁剪工具(引擎内回退),工具条选中态要回正
+    if (m_annotationBar) m_annotationBar->refresh();
+    syncCanvasState();
 }
 
 void EditorWindow::zoomToFit() {
@@ -632,14 +650,45 @@ void EditorWindow::keyPressEvent(QKeyEvent* e) {
     }
     switch (e->key()) {
         case Qt::Key_Escape:
-            // ⚠️ 文字编辑态下 Esc 只**确认当前文字**,不关整个编辑器 ——
-            //    原先无条件 cancel(),用户写一半按 Esc 会把字和编辑器一起丢掉。
+            // ⚠️ 退出顺序分层:文字编辑态只确认这段文字,裁剪工具态只退出裁剪,
+            //    最后才是关窗 —— 每层 Esc 只退一层,不会"一按全没"。
             if (m_engine->editingText()) {
                 bakeTextItem();
                 return;
             }
+            if (m_engine->tool() == EditorTool::Crop) {
+                m_engine->cancelCrop();
+                if (m_annotationBar) m_annotationBar->refresh();
+                syncCanvasState();
+                return;
+            }
             cancel();
             return;
+        case Qt::Key_R:
+            // 旋转快捷键:无修饰 = 顺时针,Shift = 逆时针。
+            // 文字编辑态到不了这里(文字图元持有焦点,吃掉按键)。
+            if (!ctrl) {
+                rotateBase(!(e->modifiers() & Qt::ShiftModifier));
+                return;
+            }
+            break;
+        case Qt::Key_C:
+            // 裁剪工具开关:再按一次回上一个绘图工具(引擎的 setTool 负责清框)。
+            // ⚠️ 直连引擎不经过工具条 → drawingModeChanged 不会发,这里必须自己
+            //    置 m_drawingTool,否则"开了面板直接按 C"时画布还在抓手态,
+            //    拖动变成平移画面而不是拖裁剪框(回退同理:回到的是绘图工具)。
+            if (!ctrl) {
+                if (m_engine->tool() == EditorTool::Crop) {
+                    m_engine->cancelCrop();
+                } else {
+                    m_engine->setTool(EditorTool::Crop);
+                }
+                m_drawingTool = true;
+                if (m_annotationBar) m_annotationBar->refresh();
+                syncCanvasState();
+                return;
+            }
+            break;
         case Qt::Key_S:
             if (ctrl) {
                 saveToFile();
@@ -677,6 +726,14 @@ void EditorWindow::keyPressEvent(QKeyEvent* e) {
             // 文字工具编辑态(m_textItem 非空)时 Enter 留给**换行** ——
             // 此刻图元持有焦点,事件仍会先经过本窗口,不拦截否则标注无法换行。
             if (m_engine->editingText()) break;
+            // 裁剪工具且有有效框:Enter = 应用裁剪(不结束编辑);
+            // 没画框则按普通 Enter 走「完成」—— 两段式手感,和 Esc 的分层退出对称
+            if (m_engine->cropReady()) {
+                m_engine->applyCrop();
+                if (m_annotationBar) m_annotationBar->refresh();
+                syncCanvasState();
+                return;
+            }
             finish();   // Enter 直接完成(Ctrl+Enter 保留为等价别名)
             return;
         default:

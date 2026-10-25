@@ -57,7 +57,8 @@ docs/design.md、phase5–11、memory-optimization 中的真机踩坑结论全�
       toast / 译文信号接通、分类计数随数据刷新)
 - [x] S4:编辑器(QGraphicsScene)+ 截图 / 贴图闭环
       (4.1 编辑器、4.2 两种框选确认模式与直通路径、4.3 全屏与一键贴图、
-       4.4 截图翻译 / 取字)
+       4.4 截图翻译 / 取字;2026-10-25 补构图操作:90° 旋转 + 交互式裁剪,
+       标注与撤销栈全程跟随 —— docs/17 §18.14)
 - [x] 主面板 UI 换代:v0.2 起 **Sciter → Qt Quick / QML**(QQuickWidget 嵌入无边框窗口),
       单一 QML 引擎同时承载历史列表、设置抽屉与翻译页 —— 内存收口的主要来源
 - [x] S5 一体化素材库:翻译原文 / 译文「存为条目」(source=translate)参与搜索、
@@ -110,6 +111,7 @@ powershell -ExecutionPolicy Bypass -File tools\package.ps1    # dist\Nextboard-S
 | `--todo-flow` / `--todo-groups` / `--todo-layout-flow` | 待办新建卡片、分组分界、字段顺序 |
 | `--note-flow` | 桌面便签贴边吸附 / 半隐藏 / 几何复原 |
 | `--capture-toolbar-flow` | 截图浮条按几何真点、标注笔画落点、长截图面板 |
+| `--editor-flow` | 编辑器裁剪/旋转:引擎级变换对位 + 真窗口键鼠端到端 |
 | `--stitch-flow` / `--stitch-settings-flow` / `--stitch-live-flow` | 长截图会话、设置读写比、真机滚动拼接 |
 | `--settings-flow` / `--restore-flow` / `--clear-done-flow` / `--clear-all-flow` | 设置抽屉、备份恢复/导入、批量删除确认 |
 | `--update-flow` / `--autostart-flow` | 更新检查(配 `--update-url`)、开机自启注册表 |

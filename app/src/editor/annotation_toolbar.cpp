@@ -141,6 +141,9 @@ void AnnotationToolbar::rebuildActions() {
     }
 
     for (EditorTool tool : toolbarTools()) {
+        // 裁剪只在编辑窗暴露(与手型同一手法):浮条的"裁剪"就是重新框选,
+        // 且裁剪的 Enter/Esc 确认键位会撞上浮条会话自身的完成/取消键位。
+        if (m_overlayMode && tool == EditorTool::Crop) continue;
         QAction* action = m_toolsBar->addAction(toolIcon(tool, kIconPx, ink), toolLabel(tool));
         action->setCheckable(true);
         action->setActionGroup(m_toolGroup);
@@ -242,8 +245,9 @@ void AnnotationToolbar::refresh() {
             }
         }
     }
-    // 手型模式下颜色/粗细/字号无意义 → 禁用(不隐藏,避免工具条宽度跳动)
-    const bool drawing = !m_panActive;
+    // 手型模式下颜色/粗细/字号无意义 → 禁用(不隐藏,避免工具条宽度跳动)。
+    // 裁剪同理:它不消费这些参数。字号另有"仅文字工具"的启用条件。
+    const bool drawing = !m_panActive && m_engine->tool() != EditorTool::Crop;
     if (m_sizeGroup) for (QAction* a : m_sizeGroup->actions()) a->setEnabled(drawing);
     if (m_colorGroup) for (QAction* a : m_colorGroup->actions()) a->setEnabled(drawing);
     if (m_fontGroup) for (QAction* a : m_fontGroup->actions())

@@ -29,7 +29,12 @@ class QUndoStack;
 namespace nb {
 
 /// 标注工具(定义随本引擎走,编辑窗/遮罩共用)。
-enum class EditorTool { Pen, Arrow, Line, Rect, Ellipse, Mosaic, Blur, Number, Text, Picker };
+/// Crop(裁剪)是构图类操作:不产生标注图元,而是改变底图本身 —— 引擎层与标注
+/// 同源,但 v1 只在编辑窗暴露(浮条的"裁剪"= 重新框选,键位也与会话键冲突)。
+enum class EditorTool
+{
+    Pen, Arrow, Line, Rect, Ellipse, Mosaic, Blur, Number, Text, Picker, Crop
+};
 
 /// 工具的中文显示名(编辑窗与遮罩浮条共用)。
 QString toolLabel(EditorTool tool);
@@ -62,6 +67,10 @@ public:
     /// base:底图(物理像素)。场景与底图同尺寸,compose 输出亦然。
     explicit AnnotationEngine(QImage base, QObject* parent = nullptr);
     ~AnnotationEngine() override;
+
+    /// 构图类操作(裁剪/旋转)的撤销命令:需要动引擎私有态(换底图/换背景项/
+    /// 重建纹理),声明为嵌套类以获得私有访问权(嵌套类是外围类的成员)。
+    class TransformCommand;
 
     QGraphicsScene* scene() const { return m_scene; }
     QUndoStack* undoStack() const { return m_undo; }
@@ -101,6 +110,36 @@ public:
     /// 烘焙进行中的文字图元(切换工具/完成前必须调)。
     void bakeTextItem();
 
+    // ---- 构图类操作(裁剪/旋转)----
+    //
+    // 两者共用一套模型:「换底图 + 仿射变换全部标注图元」的一次原子操作,
+    // 经 TransformCommand 进撤销栈,与逐笔标注的 AddItemCommand 严格 LIFO 兼容。
+    //
+    // 变换规则(QGraphicsItem 的场景映射 = translate(pos) ∘ transform):
+    //   item->setPos(A·pos); item->setTransform(M * T);   // A = T 的线性部分
+    // (平移分量不能进 pos —— 会与 transform 里的平移重复计入,推导见 .cpp)
+
+    /// 整图旋转 90°(顺/逆时针)。像素置换、无损(不做插值,反复旋转不糊化;
+    /// 手法与 PinWindow::rotate90cw 同源)。完成后切回上一个绘图工具。
+    void rotate90(bool clockwise);
+
+    /// 应用当前裁剪框(Crop 工具交互产物)。框无效(<2px 或未画)则不动。
+    /// 标注图元保持为可撤销图元(不烘焙进底图):被裁掉一半的标注剩余部分
+    /// 仍可见、仍可 Ctrl+Z 撤销。完成后切回上一个绘图工具。
+    void applyCrop();
+
+    /// 取消裁剪:丢弃裁剪框并回到上一个绘图工具(取消按钮 / Esc / 再按 C 共用)。
+    void cancelCrop();
+
+    /// 当前裁剪框(场景坐标 = 图像物理像素;无效时为空矩形)。
+    QRectF cropRect() const { return m_cropRect; }
+    /// 裁剪工具激活且已有有效矩形(宿主据此把 Enter 从「完成」改派给「应用裁剪」)。
+    bool cropReady() const;
+    /// 裁剪确认/取消按钮的场景矩形(index 0 = 确认 ✓,1 = 取消 ✕;
+    /// 尺寸按视图缩放取反保持屏幕常量,随裁剪框右下角走,贴底图下缘时翻进框内)。
+    /// 供验收 flow 计算点击坐标;无有效框时返回空矩形。
+    QRectF cropButtonRect(int index) const;
+
     /// 落一条**已烘焙**的文字标注。遮罩浮条没有 QGraphicsView,而 QGraphicsTextItem
     /// 的内联编辑要靠视图转发键盘事件(遮罩是把场景 render 进画布的),所以在浮条上
     /// 文字由宿主控件输入、确认后交到这里入场景,不进编辑态。
@@ -117,6 +156,8 @@ signals:
     void textEditingStarted(QGraphicsTextItem* item);
     /// 取色完成(宿主同步色块选中态)。
     void colorPicked(const QColor& color);
+    /// 底图被构图操作改变(旋转/裁剪应用,含撤销/重做恢复)。宿主据此重新适配视图。
+    void baseChanged();
 
 private:
     void pushItem(QGraphicsItem* item, const QString& label);
@@ -126,6 +167,31 @@ private:
     QGraphicsItem* buildPreviewItem() const;
     QGraphicsItem* buildFinalItem() const;
     void clearPreview();
+
+    // ---- 构图类操作的内部支撑(实现见 .cpp)----
+    class CropOverlayItem;                       // 裁剪框覆盖层(遮罩/手柄/三分线)
+    /// 把两张底图之间共享的换底图动作一次做完(背景项、sceneRect、纹理失效)。
+    void swapBase(const QImage& next);
+    /// 惰性生成马赛克/模糊纹理;换底图后当前工具若正用它们须立即重建,
+    /// 否则空纹理画笔会静默画出无效内容。
+    void ensureFilterTextures();
+    /// 裁剪覆盖层的建/拆/更新(Crop 工具专用,不入撤销栈)。
+    void rebuildCropOverlay();
+    void clearCropOverlay();
+    /// 手柄命中(返回 0-7 之一;框内命中 = 8;框外/无框 = -1)。场景坐标。
+    int cropHandleAt(const QPointF& scenePos) const;
+    /// 确认/取消按钮命中(0 = 确认,1 = 取消,-1 = 不在按钮上)。按钮画在
+    /// 最上层,命中判定也排在手柄之前(见 onCanvasPressed)。
+    int cropButtonAt(const QPointF& scenePos) const;
+    /// 视图当前缩放(无视图时 1.0):屏幕常量元素(手柄/按钮)的尺寸基准。
+    qreal viewScale() const;
+    /// 裁剪按钮悬停高亮(实现在覆盖层类定义之后 —— 那里才是完整类型)。
+    void updateCropHover(const QPointF& scenePos);
+    /// 裁剪框夹回底图范围内并保持最小尺寸。
+    void clampCropRect();
+    /// 原子地完成一次构图变换:采集前后状态 → 对全部标注图元施加仿射 T →
+    /// 换底图 → TransformCommand 入栈(redo 幂等,undo/redo 都做绝对还原)。
+    void applyTransform(const QTransform& T, const QImage& newBase, const QString& label);
 
     QImage m_base;
     QGraphicsItem* m_background = nullptr;   // 场景首项(底图),见 backgroundItem()
@@ -143,6 +209,15 @@ private:
     QList<QPointF> m_stroke;
     QGraphicsItem* m_preview = nullptr;
     QGraphicsTextItem* m_textItem = nullptr;
+
+    // ---- 裁剪交互态 ----
+    QRectF m_cropRect;                    // 当前裁剪框(空 = 未画)
+    QPointF m_cropAnchor;                 // 本次调整起算参照(按下点或原框角)
+    QRectF m_cropAnchorRect;              // 按下时的原框(整体移动/缩放都要参照)
+    int m_cropDragHandle = -1;            // -1 = 非手柄拖拽;8 = 框内移动;9 = 拖新框
+    int m_cropPressButton = -1;           // 按下命中的确认/取消按钮(-1 = 无)
+    int m_cropHoverButton = -1;           // 悬停命中的按钮(高亮反馈)
+    CropOverlayItem* m_cropOverlay = nullptr;
 
     QPixmap m_mosaicSource;
     QPixmap m_blurSource;

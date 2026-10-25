@@ -125,6 +125,7 @@ int main(int argc, char* argv[]) {
                 || arg == QLatin1String("--update-flow")
                 || arg == QLatin1String("--dump-monitors")
                 || arg == QLatin1String("--capture-toolbar-flow")
+                || arg == QLatin1String("--editor-flow")
                 || arg == QLatin1String("--autostart-flow")
                 || arg == QLatin1String("--stitch-flow")
                 || arg == QLatin1String("--stitch-settings-flow")
@@ -259,6 +260,7 @@ int main(int argc, char* argv[]) {
     bool todoGroups = false;
     bool dumpMonitors = false;
     bool captureToolbarFlow = false;
+    bool editorFlow = false;
     bool autoStartFlow = false;
     bool stitchFlow = false;
     bool stitchSettingsFlow = false;
@@ -307,6 +309,10 @@ int main(int argc, char* argv[]) {
         // (见 host/capture_toolbar_flow.cpp)。不写库,故不进 --data-dir 门禁。
         else if (arg == QLatin1String("--capture-toolbar-flow"))
             captureToolbarFlow = true;
+        // 编辑器裁剪/旋转验收:引擎级 + 真窗口端到端(见 host/editor_flow.cpp)。
+        // 不写库,故不进 --data-dir 门禁。
+        else if (arg == QLatin1String("--editor-flow"))
+            editorFlow = true;
         // 自启形态验收:真实读写 Run 键,断言应用内开关写的命令行带 --hidden
         // (与安装器同形态)。会临时改写用户的 Run 键,结束前必定还原。
         else if (arg == QLatin1String("--autostart-flow"))
@@ -343,6 +349,7 @@ int main(int argc, char* argv[]) {
     if (todoGroups) nb::reportTodoGroups(panel);
     if (dumpMonitors) nb::reportMonitors();
     if (captureToolbarFlow) nb::runCaptureToolbarFlow();
+    if (editorFlow) nb::runEditorFlow();
     if (autoStartFlow) nb::runAutoStartFlow();
     if (stitchFlow) nb::runStitchFlow();
     if (stitchSettingsFlow) nb::runStitchSettingsFlow();
