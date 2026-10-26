@@ -938,16 +938,33 @@ fn import_snapshot(
     let mut blob_count = 0usize;
     let mut blob_missing = 0usize;
 
+    // 去重索引一次性预载(此前每行 2 次点查,万条导入多几百 ms);循环内每成功
+    // 导入一条都同步入集 —— 与逐行查询语义完全一致(含"同批内重复 hash 也跳过")。
+    let mut known_hashes: std::collections::HashSet<String> = {
+        let mut st = conn.prepare("SELECT hash FROM clip_entries")?;
+        let set = st
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<std::collections::HashSet<_>, _>>()?;
+        set
+    };
+    let mut known_ids: std::collections::HashSet<String> = {
+        let mut st = conn.prepare("SELECT id FROM clip_entries")?;
+        let set = st
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<std::collections::HashSet<_>, _>>()?;
+        set
+    };
+
     let tx = conn.transaction()?;
     for row in &rows {
         // 去重口径 = 内容 hash(文本=正文 blake3,图片=png blake3,待办="todo:<id>")。
         // 重复的**跳过且不动现有条目**:用户当前的固定/使用时间等状态优先。
-        if hash_exists(&tx, &row.hash)? {
+        if known_hashes.contains(&row.hash) {
             skipped += 1;
             continue;
         }
         // id 冲突(两台机器各自演进后合并,极小概率):重铸新 id,blob 随之改名。
-        let remap = id_exists(&tx, &row.id)?;
+        let remap = known_ids.contains(&row.id);
         let new_id = if remap { uuid::Uuid::now_v7().to_string() } else { row.id.clone() };
 
         // blob 目标位置:
@@ -1065,6 +1082,8 @@ fn import_snapshot(
                 )?;
             }
         }
+        known_hashes.insert(row.hash.clone());
+        known_ids.insert(new_id.clone());
         imported += 1;
     }
     tx.commit()?;
@@ -1237,24 +1256,6 @@ fn read_todo_meta(
         )));
     }
     Ok(None)
-}
-
-fn hash_exists(conn: &Connection, hash: &str) -> AppResult<bool> {
-    let n: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM clip_entries WHERE hash = ?1",
-        params![hash],
-        |r| r.get(0),
-    )?;
-    Ok(n > 0)
-}
-
-fn id_exists(conn: &Connection, id: &str) -> AppResult<bool> {
-    let n: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM clip_entries WHERE id = ?1",
-        params![id],
-        |r| r.get(0),
-    )?;
-    Ok(n > 0)
 }
 
 /// 把 staged blobs 目录下的文件按"文件名第一个点前的段"聚类(即条目 id 前缀)。

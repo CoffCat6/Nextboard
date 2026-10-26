@@ -309,29 +309,22 @@ fn decode_dib(dib: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     for row in 0..height {
         let (start, end) = row_range(row);
         let src = &dib[start..end];
-        for x in 0..width as usize {
-            match bpp {
-                32 => {
-                    let px = &src[x * 4..x * 4 + 4];
-                    rgba.push(extract(px[0], px[1], px[2], px[3], b_mask, r_mask, g_mask).0);
-                    rgba.push(extract(px[0], px[1], px[2], px[3], b_mask, r_mask, g_mask).1);
-                    rgba.push(extract(px[0], px[1], px[2], px[3], b_mask, r_mask, g_mask).2);
-                    rgba.push(if a_mask != 0 {
-                        extract(px[0], px[1], px[2], px[3], b_mask, r_mask, g_mask).3
-                    } else {
-                        255
-                    });
+        match bpp {
+            32 => {
+                // 按行块化:每像素一次 extract(此前每像素连调 4 次逐字节 push)
+                for px in src[..width as usize * 4].chunks_exact(4) {
+                    let (r, g, b, a) =
+                        extract(px[0], px[1], px[2], px[3], b_mask, r_mask, g_mask);
+                    rgba.extend_from_slice(&[r, g, b, if a_mask != 0 { a } else { 255 }]);
                 }
-                24 => {
-                    let px = &src[x * 3..x * 3 + 3];
+            }
+            24 => {
+                for px in src[..width as usize * 3].chunks_exact(3) {
                     rgba.extend_from_slice(&[px[2], px[1], px[0], 255]);
                 }
-                8 => {
-                    // 8 位带调色板:调色板解析成本高且剪贴板场景罕见(截图链路不产生)
-                    return None;
-                }
-                _ => return None,
             }
+            // 8 位带调色板:调色板解析成本高且剪贴板场景罕见(截图链路不产生)
+            _ => return None,
         }
     }
     Some((rgba, width, height))

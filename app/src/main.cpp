@@ -372,27 +372,35 @@ int main(int argc, char* argv[]) {
             todoLayoutFlow = true;
     }
     // 待办交互验收(--todo-flow):真实点击驱动整条链路,逻辑见 host/acceptance.cpp
-    if (todoFlow) nb::runTodoAcceptanceFlow(panel);
-    if (clearDoneFlow) nb::runClearDoneFlow(panel);
-    if (settingsFlow) nb::runSettingsFlow(panel);
-    if (restoreFlow) nb::runRestoreFlow(panel);
-    if (clearAllFlow) nb::runClearAllFlow(panel);
+    //
+    // ⚠️ 全部经 singleShot(0) 进事件循环后再跑:同步型流程(stitch-flow 等)末尾的
+    //    QApplication::quit() 若在 exec() **之前**调用会被丢弃(经典 Qt 陷阱),
+    //    表现为"断言全过但进程永远不退出"(实测 stitch-flow 卡死于此)。
+    //    panel 等栈对象活得比 singleShot 回调久(exec 在 main 末尾),捕获安全。
+    const auto runFlow = [](std::function<void()> flow) {
+        QTimer::singleShot(0, qApp, [flow = std::move(flow)] { flow(); });
+    };
+    if (todoFlow) runFlow([&panel] { nb::runTodoAcceptanceFlow(panel); });
+    if (clearDoneFlow) runFlow([&panel] { nb::runClearDoneFlow(panel); });
+    if (settingsFlow) runFlow([&panel] { nb::runSettingsFlow(panel); });
+    if (restoreFlow) runFlow([&panel] { nb::runRestoreFlow(panel); });
+    if (clearAllFlow) runFlow([&panel] { nb::runClearAllFlow(panel); });
     if (updateFlow) {
         // 「打开下载页」在验收里降级为日志:真起浏览器会抢焦点、干扰断言,也没法反复跑
         // (docs/07-auto-update.md §11.2)。真实打开由发布前人工冒烟覆盖。
         nb::CoreFacade::setBrowserLaunchDisabledForAcceptance(true);
-        nb::runUpdateFlow(panel);
+        runFlow([&panel] { nb::runUpdateFlow(panel); });
     }
-    if (todoGroups) nb::reportTodoGroups(panel);
-    if (dumpMonitors) nb::reportMonitors();
-    if (captureToolbarFlow) nb::runCaptureToolbarFlow();
-    if (editorFlow) nb::runEditorFlow();
-    if (autoStartFlow) nb::runAutoStartFlow();
-    if (stitchFlow) nb::runStitchFlow();
-    if (stitchSettingsFlow) nb::runStitchSettingsFlow();
-    if (stitchLiveFlow) nb::runStitchLiveFlow();
-    if (noteFlow) nb::runNoteAcceptanceFlow();
-    if (todoLayoutFlow) nb::runTodoLayoutFlow(panel);
+    if (todoGroups) runFlow([&panel] { nb::reportTodoGroups(panel); });
+    if (dumpMonitors) runFlow([] { nb::reportMonitors(); });
+    if (captureToolbarFlow) runFlow([] { nb::runCaptureToolbarFlow(); });
+    if (editorFlow) runFlow([] { nb::runEditorFlow(); });
+    if (autoStartFlow) runFlow([] { nb::runAutoStartFlow(); });
+    if (stitchFlow) runFlow([] { nb::runStitchFlow(); });
+    if (stitchSettingsFlow) runFlow([] { nb::runStitchSettingsFlow(); });
+    if (stitchLiveFlow) runFlow([] { nb::runStitchLiveFlow(); });
+    if (noteFlow) runFlow([] { nb::runNoteAcceptanceFlow(); });
+    if (todoLayoutFlow) runFlow([&panel] { nb::runTodoLayoutFlow(panel); });
     // 贴图 DPI 探针(--pin-probe <path>):以四角色块的测试图建一枚贴图,渲染
     // 稳定后 grab() 存档再退出。回归件:2026-10-26 缩放缓存误用 DPR 画布,
     // 高分屏上贴图内容放大 1/d² 且裁边 —— 本探针在任何缩放比下都可断言
