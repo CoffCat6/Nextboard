@@ -646,23 +646,40 @@ void showPinWindow(const PinContent& content) {
                             .arg(kPinByteBudget / (1024 * 1024)));
 }
 
-/// 贴图内容的重活(磁盘解码整图 / 文本渲染位图)放线程池,完成回 UI 建窗。
-/// 这两步不碰 FFI(QImage::load / QPainter),可安全离开 UI 线程;
-/// 4K PNG 解码几十 ms,同步做会让"点贴图→面板收起"的瞬间整窗顿一拍。
+/// 贴图内容的重活放后台,完成回 UI 建窗。
+///
+/// ⚠️ 只有**图片条目**的磁盘解码(QImage::load,4K PNG 几十 ms)可以入池 ——
+/// 文字条目的 renderText 走 uiFont()/QFontMetrics:**字体引擎不是线程安全的**
+/// (QFont 解析/字体查找绑定 GUI 线程),工作线程里构造 QFont 必现闪退
+/// (2026-10-26 用户实测)。文本排版本身毫秒级,留在 GUI 线程同步做。
 void pinEntryAsync(const QVariantMap& entry, const PinTextStyle& style) {
-    auto* watcher = new QFutureWatcher<PinContent>(&CoreFacade::instance());
-    QObject::connect(watcher, &QFutureWatcher<PinContent>::finished,
-                     &CoreFacade::instance(), [watcher] {
-        watcher->deleteLater();
-        const PinContent content = watcher->result();
+    const QString kind = entry.value("kind").toString();
+    if (kind != QLatin1String("image")) {
+        const PinContent content = contentForEntry(entry, style);
         if (content.image.isNull()) {
             CoreFacade::instance().toastMessage(QStringLiteral("该条目无可贴内容"));
             return;
         }
         showPinWindow(content);
+        return;
+    }
+    auto* watcher = new QFutureWatcher<QImage>(&CoreFacade::instance());
+    QObject::connect(watcher, &QFutureWatcher<QImage>::finished,
+                     &CoreFacade::instance(), [watcher, entry] {
+        watcher->deleteLater();
+        QImage image = watcher->result();
+        if (image.isNull()) {
+            CoreFacade::instance().toastMessage(QStringLiteral("该条目无可贴内容"));
+            return;
+        }
+        PinContent content;
+        content.idPrefix = entry.value("id").toString().left(8);
+        content.image = std::move(image);
+        showPinWindow(content);
     });
-    watcher->setFuture(QtConcurrent::run([entry, style]() -> PinContent {
-        return contentForEntry(entry, style);
+    const QString blobPath = entry.value("blobPath").toString();
+    watcher->setFuture(QtConcurrent::run([blobPath]() -> QImage {
+        return CoreBridge::loadEntryImage(blobPath);
     }));
 }
 
