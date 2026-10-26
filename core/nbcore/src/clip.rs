@@ -354,26 +354,44 @@ fn extract(b: u8, g: u8, r: u8, a: u8, b_mask: u32, r_mask: u32, g_mask: u32) ->
 
 /// 入库流程:大小过滤 → 查重(命中则 touch)→ 落盘入库 → 超限淘汰。
 /// 返回最终生效的条目;`None` 表示超大小上限被忽略。
+///
+/// ⚠️ `build_entry`(PNG 默认档编码+落盘+缩略图,4K 图可达秒级)**必须在 DB 锁外**:
+/// 这把锁是进程唯一的,面板翻页/计数/待办调度全排在它后面 —— 锁内做重活等于
+/// 每复制一张大图全应用停摆一次。代价是两段锁之间可能出现同 hash 并发插入,
+/// 故第二段锁里再查一次,输了就清掉刚写的文件、复用已生效条目。
 fn process(core: &Core, item: ClipItem, hash: &str, settings: &Settings) -> AppResult<Option<ClipEntry>> {
     if is_oversized(&item, settings) {
         debug!("剪贴板内容超过大小上限,已忽略");
         return Ok(None);
     }
-
-    let db = core.db.lock()?;
     let now = crate::now_ms();
 
-    if let Some(id) = entry::find_id_by_hash(&db, hash)? {
-        entry::touch(&db, &id, now)?;
-        let updated = entry::get(&db, &id)?;
-        return Ok(updated);
+    // ---- 第一段锁:只做查重与 touch(都是索引点查)----
+    {
+        let db = core.db.lock()?;
+        if let Some(id) = entry::find_id_by_hash(&db, hash)? {
+            entry::touch(&db, &id, now)?;
+            return entry::get(&db, &id);
+        }
     }
 
+    // ---- 锁外重活:PNG 编码 + 落盘 + 缩略图 ----
     let new_entry = build_entry(&core.blobs_dir, item, hash, now, settings.max_image_mb)?;
     let Some(new_entry) = new_entry else {
         debug!("图片超过大小上限({}MB),未入库", settings.max_image_mb);
         return Ok(None);
     };
+
+    // ---- 第二段锁:防竞态复查 → 写入 → 淘汰 ----
+    let db = core.db.lock()?;
+    if let Some(id) = entry::find_id_by_hash(&db, hash)? {
+        // 输给并发插入(极小窗口):清掉刚写的产物,复用已生效条目。
+        if let Some(rel) = &new_entry.blob_path {
+            remove_blob(&resolve_blob_path(&core.blobs_dir, rel));
+        }
+        entry::touch(&db, &id, now)?;
+        return entry::get(&db, &id);
+    }
     entry::insert(&db, &new_entry)?;
     for blob in entry::evict(&db, settings.history_limit)? {
         remove_blob(&resolve_blob_path(&core.blobs_dir, &blob));

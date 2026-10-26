@@ -28,6 +28,8 @@
 #include <QStyleHints>
 #include <QThreadPool>
 #include <QRunnable>
+#include <QFutureWatcher>
+#include <QtConcurrent/QtConcurrentRun>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QPointer>
@@ -644,6 +646,26 @@ void showPinWindow(const PinContent& content) {
                             .arg(kPinByteBudget / (1024 * 1024)));
 }
 
+/// 贴图内容的重活(磁盘解码整图 / 文本渲染位图)放线程池,完成回 UI 建窗。
+/// 这两步不碰 FFI(QImage::load / QPainter),可安全离开 UI 线程;
+/// 4K PNG 解码几十 ms,同步做会让"点贴图→面板收起"的瞬间整窗顿一拍。
+void pinEntryAsync(const QVariantMap& entry, const PinTextStyle& style) {
+    auto* watcher = new QFutureWatcher<PinContent>(&CoreFacade::instance());
+    QObject::connect(watcher, &QFutureWatcher<PinContent>::finished,
+                     &CoreFacade::instance(), [watcher] {
+        watcher->deleteLater();
+        const PinContent content = watcher->result();
+        if (content.image.isNull()) {
+            CoreFacade::instance().toastMessage(QStringLiteral("该条目无可贴内容"));
+            return;
+        }
+        showPinWindow(content);
+    });
+    watcher->setFuture(QtConcurrent::run([entry, style]() -> PinContent {
+        return contentForEntry(entry, style);
+    }));
+}
+
 } // namespace
 
 void CoreFacade::pinLatest() {
@@ -658,12 +680,8 @@ void CoreFacade::pinLatest() {
         emit toastMessage(QStringLiteral("没有可贴的条目"));
         return;
     }
-    const PinContent content = contentForEntry(entry, pinTextStyleFromSettings());
-    if (content.image.isNull()) {
-        emit toastMessage(QStringLiteral("该条目无可贴内容"));
-        return;
-    }
-    showPinWindow(content);
+    // 设置读取(毫秒级 FFI)留在 UI 线程;重活(解码/渲染)由 pinEntryAsync 入池。
+    pinEntryAsync(entry, pinTextStyleFromSettings());
 }
 
 void CoreFacade::pinEntry(const QString& id) {
@@ -672,13 +690,7 @@ void CoreFacade::pinEntry(const QString& id) {
         emit toastMessage(QStringLiteral("读取条目失败"));
         return;
     }
-    const PinContent content =
-        contentForEntry(resp.value("data").toMap(), pinTextStyleFromSettings());
-    if (content.image.isNull()) {
-        emit toastMessage(QStringLiteral("该条目无可贴内容"));
-        return;
-    }
-    showPinWindow(content);
+    pinEntryAsync(resp.value("data").toMap(), pinTextStyleFromSettings());
 }
 
 void CoreFacade::editEntry(const QString& id) {

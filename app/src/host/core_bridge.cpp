@@ -233,16 +233,20 @@ QImage CoreBridge::captureMonitor(unsigned index) {
 }
 
 QImage CoreBridge::captureMonitorMatched(QScreen* screen) {
-    if (!m_captureMonitorMatched || !m_freeBuffer || !screen) return {};
-    const QRect geo = screen->geometry();
-    const QByteArray nameUtf8 = screen->name().toUtf8();
+    if (!screen) return {};
+    return captureMonitorMatched(screen->geometry(), screen->name(), screen->devicePixelRatio());
+}
+
+QImage CoreBridge::captureMonitorMatched(const QRect& geo, const QString& name, qreal dpr) {
+    if (!m_captureMonitorMatched || !m_freeBuffer) return {};
+    const QByteArray nameUtf8 = name.toUtf8();
     unsigned char* rgba = nullptr;
     unsigned w = 0, h = 0;
     const int rc = m_captureMonitorMatched(
         nameUtf8.constData(),
         geo.x(), geo.y(),
         static_cast<unsigned>(geo.width()), static_cast<unsigned>(geo.height()),
-        static_cast<float>(screen->devicePixelRatio()),
+        static_cast<float>(dpr),
         &rgba, &w, &h);
     if (rc != 0 || !rgba || w == 0 || h == 0) {
         if (rgba) m_freeBuffer(rgba, 0);
@@ -291,17 +295,23 @@ QImage CoreBridge::captureCrop(const QImage& screen, const QRect& rect) {
 // ---- 滚动长截图(docs/19) ----
 
 QImage CoreBridge::captureMonitorRegion(QScreen* screen, const QRect& regionDevice) {
-    if (!m_captureMonitorRegion || !m_freeBuffer || !screen) return {};
+    if (!screen) return {};
+    return captureMonitorRegion(screen->geometry(), screen->name(),
+                                screen->devicePixelRatio(), regionDevice);
+}
+
+QImage CoreBridge::captureMonitorRegion(const QRect& geo, const QString& name, qreal dpr,
+                                        const QRect& regionDevice) {
+    if (!m_captureMonitorRegion || !m_freeBuffer) return {};
     if (regionDevice.width() <= 0 || regionDevice.height() <= 0) return {};
-    const QRect geo = screen->geometry();
-    const QByteArray nameUtf8 = screen->name().toUtf8();
+    const QByteArray nameUtf8 = name.toUtf8();
     unsigned char* rgba = nullptr;
     unsigned w = 0, h = 0;
     const int rc = m_captureMonitorRegion(
         nameUtf8.constData(),
         geo.x(), geo.y(),
         static_cast<unsigned>(geo.width()), static_cast<unsigned>(geo.height()),
-        static_cast<float>(screen->devicePixelRatio()),
+        static_cast<float>(dpr),
         static_cast<unsigned>(regionDevice.x()), static_cast<unsigned>(regionDevice.y()),
         static_cast<unsigned>(regionDevice.width()), static_cast<unsigned>(regionDevice.height()),
         &rgba, &w, &h);

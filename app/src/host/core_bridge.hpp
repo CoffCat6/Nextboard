@@ -122,6 +122,9 @@ public:
     /// 传 QScreen 的 name/几何/DPR,由核心按"设备名 → 物理原点 → 物理尺寸"
     /// 逐级配对(见 core capture.rs 的 match_monitor)。配对失败返回空图。
     QImage captureMonitorMatched(QScreen* screen);
+    /// 纯值参数版:**供工作线程**使用 —— QScreen 是 QObject,其读取必须留在
+    /// GUI 线程,长截图采集线程只能拿预先取好的三件套。
+    QImage captureMonitorMatched(const QRect& geo, const QString& name, qreal dpr);
 
     /// 显示器列表(JSON:name/x/y/width/height/scaleFactor/isPrimary)。
     /// 几何为**物理像素**;仅供诊断与日志,配对由核心内部完成。
@@ -174,6 +177,9 @@ public:
     /// 按屏幕描述**直抓选区**(设备像素,相对屏左上角)。
     /// 配对失败/越界返回空图(原因见 lastError()),**不回退按索引取图**。
     QImage captureMonitorRegion(QScreen* screen, const QRect& regionDevice);
+    /// 纯值参数版:**供工作线程**使用(QScreen 读取必须留在 GUI 线程,同上)。
+    QImage captureMonitorRegion(const QRect& geo, const QString& name, qreal dpr,
+                                const QRect& regionDevice);
 
     /// 结束并取回拼接结果。`ok` 为 false 时 outMeta 亦为空。
     /// 成功时 *outPng 为独立 QImage(核心缓冲已在内部转为 PNG 解码后的自有数据,

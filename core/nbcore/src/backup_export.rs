@@ -59,6 +59,12 @@ struct SnapshotResult {
 }
 
 /// 核心备份路径:checkpoint → 读 db 文件 → 打包。连接与锁由调用方保证。
+///
+/// ⚠️ 锁保持全程(快照原子性:blob 阶段若解锁,evict 可能删掉已入快照的文件),
+/// 但持锁成本已从「Deflate 全部文件的数十秒 CPU」降为「磁盘拷贝速度」:
+///   - blobs 是已压缩的 PNG,Deflate 再压几乎零收益纯烧 CPU → 改 `Stored`;
+///   - 全部条目 `io::copy` 流式写入,不再整文件读进内存(库里/单图越大,
+///     那份驻留峰值越是白给)。
 fn backup_snapshot(
     conn: &Connection,
     data_dir: &Path,
@@ -75,12 +81,13 @@ fn backup_snapshot(
         conn.query_row("SELECT COUNT(*) FROM clip_entries", [], |row| row.get(0))?;
 
     let db_path = data_dir.join("clipboard.db");
-    let db_bytes = std::fs::read(&db_path)?;
-
     let out_file = std::fs::File::create(out_path)?;
     let mut zip = zip::ZipWriter::new(out_file);
-    let options =
+    // db/manifest 以文本为主,Deflate 有实打实的体积收益;blobs 见下。
+    let deflated =
         zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let stored =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
 
     // manifest:自描述快照;恢复(未来)用它校验 schema 版本与 blob 清单完整性。
     let manifest = serde_json::json!({
@@ -89,14 +96,16 @@ fn backup_snapshot(
         "created_at": crate::now_ms() / 1000,
         "entry_count": entry_count,
     });
-    zip.start_file("manifest.json", options)
+    zip.start_file("manifest.json", deflated)
         .map_err(zip_err)?;
     zip.write_all(manifest.to_string().as_bytes())?;
 
-    zip.start_file("clipboard.db", options).map_err(zip_err)?;
-    zip.write_all(&db_bytes)?;
+    zip.start_file("clipboard.db", deflated).map_err(zip_err)?;
+    let mut db_file = std::fs::File::open(&db_path)?;
+    std::io::copy(&mut db_file, &mut zip)?;
 
     // blobs/:递归收录全部图片文件(数据目录迁移兼容:历史条目可能有子目录)。
+    // PNG 本身已压缩,再 Deflate 纯烧 CPU → `Stored`;流式拷贝不进内存。
     let blobs_dir = data_dir.join("blobs");
     let mut blob_count = 0usize;
     if blobs_dir.is_dir() {
@@ -104,11 +113,11 @@ fn backup_snapshot(
         collect_files(&blobs_dir, Path::new(""), &mut names)?;
         for rel in &names {
             let full = blobs_dir.join(rel);
-            let bytes = std::fs::read(&full)?;
+            let mut blob_file = std::fs::File::open(&full)?;
             // zip 内路径用正斜杠(zip 规范;Windows 下也如此)
             let zip_name = format!("blobs/{}", rel.to_string_lossy().replace('\\', "/"));
-            zip.start_file(zip_name, options).map_err(zip_err)?;
-            zip.write_all(&bytes)?;
+            zip.start_file(zip_name, stored).map_err(zip_err)?;
+            std::io::copy(&mut blob_file, &mut zip)?;
             blob_count += 1;
         }
     }

@@ -71,6 +71,14 @@ QString g_stitchSession;
 /// 会话级只允许一个采集者:记下当前正在采的遮罩,别的遮罩想采就会被拒。
 QPointer<OverlayWidget> g_stitchOwner;
 
+/// stitchFinish 的跨线程结果包(工作线程 → GUI 线程)。
+/// QImage/QJsonObject 可隐式共享,跨线程传值安全(不再改动即可)。
+struct StitchFinishOutcome {
+    bool ok = false;
+    QImage image;
+    QJsonObject meta;
+};
+
 /// 生成新会话 id(每次进入采集都重新分配,不复用旧 id)。
 QString newStitchSession() {
     return QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -515,13 +523,6 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured) {
             OverlayWidget* stitchOverlay = overlay;
             QObject::connect(overlay, &OverlayWidget::stitchFrameRequested, overlay,
                     [stitchScreen, stitchOverlay] {
-                // ⚠️ 任何提前 return 都必须复位 m_stitchSampling:漏一次节拍器就
-                //    永久停摆(页面还在滚,长图却再也不更新)。用 RAII 守卫统一复位。
-                struct SampleGuard {
-                    OverlayWidget* w;
-                    ~SampleGuard() { if (w) w->markSampleReturned(); }
-                } guard{stitchOverlay};
-
                 if (g_stitchSession.isEmpty()) {
                     qWarning() << "长截图:采帧请求到来但会话 id 为空(状态错乱?)";
                     return;
@@ -531,119 +532,156 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured) {
                     qWarning() << "长截图:选区为空,跳过本帧";
                     return;
                 }
-                CoreBridge& core = CoreBridge::instance();
+                // ---- GUI 线程只做"读纯值":QScreen/QWidget 都不是线程安全的,
+                //      工作线程只能拿这里预先取好的几何/名字/DPR/会话 id ----
+                const QRect screenGeo = stitchScreen ? stitchScreen->geometry() : QRect();
+                const QString screenName = stitchScreen ? stitchScreen->name() : QString();
+                const qreal screenDpr = stitchScreen ? stitchScreen->devicePixelRatio() : 1.0;
+                const QString session = g_stitchSession;
+                const QPointer<OverlayWidget> overlayGuard(stitchOverlay);
+                const bool hasRegionCapture = CoreBridge::instance().hasRegionCapture();
 
-                // ---- 采集:直抓选区(不再整屏 + 裁剪) ----
-                QImage frame;
-                if (core.hasRegionCapture()) {
-                    frame = core.captureMonitorRegion(stitchScreen, region);
-                    if (frame.isNull()) {
-                        // 配对失败/越界:硬失败要**说出来**,不能静默跳过 ——
-                        // 静默跳过的表现是"长图不长了",用户无从判断原因。
-                        qWarning().nospace() << "长截图:直抓选区失败 屏="
-                                             << (stitchScreen ? stitchScreen->name() : "?")
-                                             << " region=" << region
-                                             << "(配对失败或越界,详见 nbcore.log)";
-                        return;
-                    }
-                } else {
-                    // 旧核心没有直抓导出:回退"整屏 + 裁剪"。配对失败**不再回退按索引**
-                    // (索引在 Qt 与 xcap 两端口径不同,回退等于把 A 屏内容拼进 B 屏)。
-                    const QImage full = core.captureMonitorMatched(stitchScreen);
-                    if (full.isNull()) {
-                        qWarning() << "长截图:整屏捕获失败(配对不上该屏),本帧跳过";
-                        return;
-                    }
-                    frame = core.captureCrop(full, region);
-                    if (frame.isNull()) {
-                        qWarning() << "长截图:本帧裁剪失败" << region;
-                        return;
-                    }
-                }
+                // ---- 工作线程:抓屏 + 变化度比对 + 拼接 FFI + 日志 ----
+                // 采帧重活此前整条跑在 UI 线程(150ms 一拍,每拍 10~30ms 同步工作),
+                // UI 一卡采帧就停摆 → no-overlap 缺行。挪到池线程后:
+                //   * 节拍闸语义不变 —— m_stitchSampling 在上一帧**回投之后**才放开,
+                //     处理慢时定时器跳过本拍,不堆请求;
+                //   * markSampleReturned 由 worker 内的 SampleReturn 守卫经队列投递
+                //     回 GUI 线程(守卫必须在 worker 里析构 —— 放外层就成了"任务
+                //     刚投出就放闸")。
+                QtConcurrent::run([overlayGuard, session, region, screenGeo, screenName,
+                                   screenDpr, hasRegionCapture] {
+                    // 任何出口(含提前 return)都要还闸;QPointer 判空防会话已结束。
+                    struct SampleReturn {
+                        QPointer<OverlayWidget> w;
+                        ~SampleReturn() {
+                            // 成员不能被 lambda 直接捕获,经局部变量按值带入。
+                            OverlayWidget* target = w.data();
+                            if (!target) return;
+                            QMetaObject::invokeMethod(target,
+                                    [target] { target->markSampleReturned(); },
+                                    Qt::QueuedConnection);
+                        }
+                    } sampleReturn{overlayGuard};
 
-                // ---- 采集时序(始终记录)----
-                //
-                // 为什么必须记时序:真机日志里只有两种结果 ——
-                //   ① run=955 k=0   (整帧逐行全等 = 两次采样之间画面没变)
-                //   ② run=0 no-overlap(下一帧首行在上一帧里完全找不到 = 跨度超过整屏)
-                // 中间没有任何"部分重叠"的位移。这只有两种成因:
-                //   A 采样停摆 —— 两次采样间隔远大于 150ms,滚动在这一大段里走完了一屏;
-                //   B 逐屏跳滚 —— 间隔正常,但应用一次滚动就跨了整屏。
-                // 两者的处置完全不同(A 要修采集节拍,B 只能改提示语/选区高度),
-                // 而它们靠**帧间隔**就能区分,故这一行必须无条件打印。
-                static qint64 lastFrameNs = 0;
-                static int frameSeq = 0;
-                const qint64 nowNs = QDateTime::currentMSecsSinceEpoch() * 1000 * 1000;
-                const qint64 dtMs = lastFrameNs == 0 ? -1 : (nowNs - lastFrameNs) / 1000000;
-                lastFrameNs = nowNs;
+                    CoreBridge& core = CoreBridge::instance();
 
-                // 轻量变化度:与上一帧相比有多少像素不同(抽样,~1/64 像素)。
-                // 用于区分"画面真的没变"与"变了但指纹判不出来"。
-                static QImage lastThumb;
-                int changedPctX100 = -1;
-                if (!lastThumb.isNull() && lastThumb.size() == frame.size()) {
-                    qint64 changed = 0, total = 0;
-                    for (int y = 0; y < frame.height(); y += 8) {
-                        const uchar* a = frame.constScanLine(y);
-                        const uchar* b = lastThumb.constScanLine(y);
-                        for (int x = 0; x < frame.width(); x += 8) {
-                            ++total;
-                            if (a[x * 4] != b[x * 4] || a[x * 4 + 1] != b[x * 4 + 1]) ++changed;
+                    // ---- 采集:直抓选区(不再整屏 + 裁剪) ----
+                    QImage frame;
+                    if (hasRegionCapture) {
+                        frame = core.captureMonitorRegion(screenGeo, screenName, screenDpr,
+                                                          region);
+                        if (frame.isNull()) {
+                            // 配对失败/越界:硬失败要**说出来**,不能静默跳过 ——
+                            // 静默跳过的表现是"长图不长了",用户无从判断原因。
+                            qWarning().nospace() << "长截图:直抓选区失败 屏=" << screenName
+                                                 << " region=" << region
+                                                 << "(配对失败或越界,详见 nbcore.log)";
+                            return;
+                        }
+                    } else {
+                        // 旧核心没有直抓导出:回退"整屏 + 裁剪"。配对失败**不再回退按索引**
+                        // (索引在 Qt 与 xcap 两端口径不同,回退等于把 A 屏内容拼进 B 屏)。
+                        const QImage full =
+                            core.captureMonitorMatched(screenGeo, screenName, screenDpr);
+                        if (full.isNull()) {
+                            qWarning() << "长截图:整屏捕获失败(配对不上该屏),本帧跳过";
+                            return;
+                        }
+                        frame = core.captureCrop(full, region);
+                        if (frame.isNull()) {
+                            qWarning() << "长截图:本帧裁剪失败" << region;
+                            return;
                         }
                     }
-                    changedPctX100 = total > 0 ? static_cast<int>(changed * 10000 / total) : 0;
-                }
-                lastThumb = frame;
 
-                qInfo().nospace() << "长截图[时序] #" << frameSeq++ << " dt=" << dtMs << "ms"
-                                  << " 变化=" << (changedPctX100 < 0
-                                                      ? QStringLiteral("首帧")
-                                                      : QStringLiteral("%1.%2%")
-                                                            .arg(changedPctX100 / 100)
-                                                            .arg(changedPctX100 % 100, 2, 10,
-                                                                 QLatin1Char('0')));
-                // 交给遮罩:no-overlap 的提示要按"跨度超屏 / 采集卡顿 / 真的滚太快"分流
-                if (stitchOverlay) stitchOverlay->setStitchFrameStats(changedPctX100, dtMs);
+                    // ---- 采集时序(始终记录)----
+                    //
+                    // 为什么必须记时序:真机日志里只有两种结果 ——
+                    //   ① run=955 k=0   (整帧逐行全等 = 两次采样之间画面没变)
+                    //   ② run=0 no-overlap(下一帧首行在上一帧里完全找不到 = 跨度超过整屏)
+                    // 中间没有任何"部分重叠"的位移。这只有两种成因:
+                    //   A 采样停摆 —— 两次采样间隔远大于 150ms,滚动在这一大段里走完了一屏;
+                    //   B 逐屏跳滚 —— 间隔正常,但应用一次滚动就跨了整屏。
+                    // 两者的处置完全不同(A 要修采集节拍,B 只能改提示语/选区高度),
+                    // 而它们靠**帧间隔**就能区分,故这一行必须无条件打印。
+                    static qint64 lastFrameNs = 0;
+                    static int frameSeq = 0;
+                    const qint64 nowNs = QDateTime::currentMSecsSinceEpoch() * 1000 * 1000;
+                    const qint64 dtMs = lastFrameNs == 0 ? -1 : (nowNs - lastFrameNs) / 1000000;
+                    lastFrameNs = nowNs;
 
-                // 可选:像素级体检(NB_STITCH_DIAG=1)。默认关闭 —— 它会额外跑一次整屏捕获,
-                // 本身就会拖慢采样,开着的时候时序数据不具代表性。
-                static int diagFrame = 0;
-                if (qEnvironmentVariableIsSet("NB_STITCH_DIAG") && diagFrame < 12) {
-                    const QString dir = nb::appDataDir() + QStringLiteral("/stitch-diag");
-                    QDir().mkpath(dir);
-                    const QString tag =
-                        QStringLiteral("%1").arg(diagFrame, 2, 10, QLatin1Char('0'));
-                    frame.save(dir + QStringLiteral("/direct-") + tag + QStringLiteral(".png"));
-                    qInfo().nospace() << "长截图[体检] 落盘 direct-" << tag << ".png ->" << dir;
-                    ++diagFrame;
-                }
+                    // 轻量变化度:与上一帧相比有多少像素不同(抽样,~1/64 像素)。
+                    // 用于区分"画面真的没变"与"变了但指纹判不出来"。
+                    // (单帧在飞:节拍闸保证同一时刻只有一个 worker,静态量无并发。)
+                    static QImage lastThumb;
+                    int changedPctX100 = -1;
+                    if (!lastThumb.isNull() && lastThumb.size() == frame.size()) {
+                        qint64 changed = 0, total = 0;
+                        for (int y = 0; y < frame.height(); y += 8) {
+                            const uchar* a = frame.constScanLine(y);
+                            const uchar* b = lastThumb.constScanLine(y);
+                            for (int x = 0; x < frame.width(); x += 8) {
+                                ++total;
+                                if (a[x * 4] != b[x * 4] || a[x * 4 + 1] != b[x * 4 + 1]) ++changed;
+                            }
+                        }
+                        changedPctX100 = total > 0 ? static_cast<int>(changed * 10000 / total) : 0;
+                    }
+                    lastThumb = frame;
 
-                // ---- 拼接 ----
-                const QJsonObject r = core.stitchAppend(g_stitchSession, frame);
-                if (r.isEmpty()) {
-                    qWarning().nospace() << "长截图:核心拒绝本帧(会话" << g_stitchSession
-                                         << " 帧=" << frame.width() << "x" << frame.height()
-                                         << ")(原因见 nbcore.log)";
-                    return;
-                }
-                const QString reason = r.value("reason").toString();
-                const QJsonObject dbg = r.value("debug").toObject();
-                qInfo().nospace() << "长截图: shift=" << r.value("shiftPx").toInt()
-                                  << " total=" << r.value("totalHeight").toInt()
-                                  << " gaps=" << r.value("gaps").toInt()
-                                  << " bands=" << r.value("bands").toInt()
-                                  << " reason=" << reason
-                                  << " [k=" << dbg.value("k").toInt()
-                                  << " run=" << dbg.value("run").toInt()
-                                  << " evidence=" << dbg.value("evidence").toInt()
-                                  << " overlap=" << dbg.value("overlap").toInt()
-                                  << " thr=" << dbg.value("threshold").toInt()
-                                  << " age=" << dbg.value("baselineAge").toInt() << "]";
-                if (stitchOverlay) {
-                    stitchOverlay->updateStitchProgress(r.value("totalHeight").toInt(),
-                                                        r.value("gaps").toInt(),
-                                                        r.value("bands").toInt(), reason);
-                }
+                    qInfo().nospace() << "长截图[时序] #" << frameSeq++ << " dt=" << dtMs << "ms"
+                                      << " 变化=" << (changedPctX100 < 0
+                                                          ? QStringLiteral("首帧")
+                                                          : QStringLiteral("%1.%2%")
+                                                                .arg(changedPctX100 / 100)
+                                                                .arg(changedPctX100 % 100, 2, 10,
+                                                                     QLatin1Char('0')));
+
+                    // 可选:像素级体检(NB_STITCH_DIAG=1)。默认关闭 —— 它会额外跑一次整屏捕获,
+                    // 本身就会拖慢采样,开着的时候时序数据不具代表性。
+                    static int diagFrame = 0;
+                    if (qEnvironmentVariableIsSet("NB_STITCH_DIAG") && diagFrame < 12) {
+                        const QString dir = nb::appDataDir() + QStringLiteral("/stitch-diag");
+                        QDir().mkpath(dir);
+                        const QString tag =
+                            QStringLiteral("%1").arg(diagFrame, 2, 10, QLatin1Char('0'));
+                        frame.save(dir + QStringLiteral("/direct-") + tag + QStringLiteral(".png"));
+                        qInfo().nospace() << "长截图[体检] 落盘 direct-" << tag << ".png ->" << dir;
+                        ++diagFrame;
+                    }
+
+                    // ---- 拼接 ----
+                    const QJsonObject r = core.stitchAppend(session, frame);
+                    if (r.isEmpty()) {
+                        qWarning().nospace() << "长截图:核心拒绝本帧(会话" << session
+                                             << " 帧=" << frame.width() << "x" << frame.height()
+                                             << ")(原因见 nbcore.log)";
+                        return;
+                    }
+                    const QString reason = r.value("reason").toString();
+                    const QJsonObject dbg = r.value("debug").toObject();
+                    qInfo().nospace() << "长截图: shift=" << r.value("shiftPx").toInt()
+                                      << " total=" << r.value("totalHeight").toInt()
+                                      << " gaps=" << r.value("gaps").toInt()
+                                      << " bands=" << r.value("bands").toInt()
+                                      << " reason=" << reason
+                                      << " [k=" << dbg.value("k").toInt()
+                                      << " run=" << dbg.value("run").toInt()
+                                      << " evidence=" << dbg.value("evidence").toInt()
+                                      << " overlap=" << dbg.value("overlap").toInt()
+                                      << " thr=" << dbg.value("threshold").toInt()
+                                      << " age=" << dbg.value("baselineAge").toInt() << "]";
+                    // 回投 GUI 线程:帧统计与进度(OverlayWidget/HUD 只能在主线程碰)
+                    QMetaObject::invokeMethod(qApp,
+                            [overlayGuard, changedPctX100, dtMs, r, reason] {
+                        if (!overlayGuard) return;
+                        overlayGuard->setStitchFrameStats(changedPctX100, dtMs);
+                        overlayGuard->updateStitchProgress(r.value("totalHeight").toInt(),
+                                                           r.value("gaps").toInt(),
+                                                           r.value("bands").toInt(), reason);
+                    }, Qt::QueuedConnection);
+                });
             });
 
             // 「结束」:取回长图 → 走与 annotatedConfirmed 相同的入库通道
@@ -661,35 +699,47 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured) {
                         qWarning() << "长截图:没有可结束的会话";
                         return;
                     }
-                    QImage composed;
-                    QJsonObject meta;
-                    const bool ok =
-                        CoreBridge::instance().stitchFinish(session, &composed, &meta);
                     // 无论成败,会话都已在核心侧被取走/销毁 —— 清掉 id 以免二次 finish
                     g_stitchSession.clear();
                     g_stitchOwner = nullptr;
-                    if (!ok || composed.isNull()) {
-                        qWarning() << "长截图:合成失败(会话" << session << ")";
-                        return;
-                    }
-                    const int gaps = meta.value("gaps").toInt();
-                    const int bands = meta.value("bands").toInt();
-                    if (gaps > 0) {
-                        qWarning().nospace() << "长截图:有 " << gaps << " 处缺口(滚动过快漏内容),"
-                                             << " 已插入 " << bands << " 条警示条";
-                    }
-                    qInfo().nospace() << "长截图:完成 " << composed.width() << "x"
-                                      << composed.height() << " gaps=" << gaps
-                                      << " bands=" << bands
-                                      << " monitor=" << meta.value("monitor").toString();
-                    // 把成品转发给遮罩的 stitchFinished:验收据此断言最终尺寸,
-                    // 产品侧暂无订阅者(入库走下面的 finishCapture)。
-                    if (stitchOverlay) stitchOverlay->reportStitchFinished(composed);
-                    const CaptureDone done = g_onCaptured;
-                    g_onCaptured = {};
-                    closeAllOverlays([composed, done] {
-                        finishCapture(composed, done);
+
+                    // ⚠️ PNG 编码(核心)+ 整图解码(QImage::fromData)对满高长图是
+                    //    数百 ms~秒级的 CPU 活,与 OCR/二维码同款放工作线程;
+                    //    「合成中」的 HUD 期间保持可动。UI 收尾(入库/剪贴板/关遮罩)
+                    //    必须回 GUI 线程 —— 由 QFutureWatcher::finished 带回。
+                    auto* watcher = new QFutureWatcher<StitchFinishOutcome>(qApp);
+                    QObject::connect(watcher, &QFutureWatcher<StitchFinishOutcome>::finished,
+                            qApp, [watcher, stitchOverlay, session] {
+                        watcher->deleteLater();
+                        const StitchFinishOutcome out = watcher->result();
+                        if (!out.ok || out.image.isNull()) {
+                            qWarning() << "长截图:合成失败(会话" << session << ")";
+                            return;
+                        }
+                        const int gaps = out.meta.value("gaps").toInt();
+                        const int bands = out.meta.value("bands").toInt();
+                        if (gaps > 0) {
+                            qWarning().nospace() << "长截图:有 " << gaps << " 处缺口(滚动过快漏内容),"
+                                                 << " 已插入 " << bands << " 条警示条";
+                        }
+                        qInfo().nospace() << "长截图:完成 " << out.image.width() << "x"
+                                          << out.image.height() << " gaps=" << gaps
+                                          << " bands=" << bands
+                                          << " monitor=" << out.meta.value("monitor").toString();
+                        // 把成品转发给遮罩的 stitchFinished:验收据此断言最终尺寸,
+                        // 产品侧暂无订阅者(入库走下面的 finishCapture)。
+                        if (stitchOverlay) stitchOverlay->reportStitchFinished(out.image);
+                        const CaptureDone done = g_onCaptured;
+                        g_onCaptured = {};
+                        closeAllOverlays([composed = out.image, done] {
+                            finishCapture(composed, done);
+                        });
                     });
+                    watcher->setFuture(QtConcurrent::run([session]() -> StitchFinishOutcome {
+                        StitchFinishOutcome out;
+                        out.ok = CoreBridge::instance().stitchFinish(session, &out.image, &out.meta);
+                        return out;
+                    }));
                 });
             });
 
