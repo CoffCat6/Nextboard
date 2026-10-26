@@ -247,6 +247,12 @@ private:
     bool selectionUsable() const;
 
     QImage m_frozen;          // 该屏冻结底图(物理像素)
+    /// 「冻结底图 + 半透明黑罩」预合成缓存(物理像素)。拖选/调框时选区一变就是
+    /// 一次全帧重绘,4K 上"整帧缩放绘制 + 罩填充"约 10ms/步,预合成后降为一次
+    /// 同格式 blit。惰性构建(首次拖选/调框时),内存代价一屏一张 QPixmap
+    /// (4K ≈ 33MB),随遮罩析构回收。见 maskedBase()。
+    QPixmap m_maskedBase;
+    qreal m_maskedBaseDpr = 0.0;
     int m_screenIndex;
     QScreen* m_screen = nullptr;
     bool m_autoConfirm = true;
@@ -264,6 +270,11 @@ private:
     // 内嵌于遮罩窗口(不新建窗口),挂在选区底部;按钮走既有信号通道。
     bool toolbarVisible() const;
     QRect toolbarRect() const;              // 局部逻辑坐标(跟随选区/翻转)
+    /// 「冻结底图+黑罩」预合成(惰性;见 m_maskedBase 注释)。
+    const QPixmap& maskedBase();
+    /// 选区变化后的**局部重绘**(拖选/调框的 mouseMove 用):旧∪新选区外扩盖住
+    /// 边框/尺寸提示/手柄,浮条与二级条可见时并入其矩形。
+    void updateForSelectionChange(const QRect& oldSel);
     void showToolbar();
     /// 确认选区:标注态走**含标注**的合成图(annotatedConfirmed),否则走原裁剪通道。
     /// Enter/双击/「完成」三条确认路径共用 —— 否则"Enter 确认"会把标注丢掉。

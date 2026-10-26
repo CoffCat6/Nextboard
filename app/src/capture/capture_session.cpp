@@ -923,6 +923,39 @@ void OverlayWidget::applyAdjustment(const QPoint& pos) {
     m_selection = r.intersected(rect());
 }
 
+const QPixmap& OverlayWidget::maskedBase() {
+    const qreal scale = dpr();
+    if (m_maskedBase.isNull() || m_maskedBaseDpr != scale) {
+        QImage img(size() * scale, QImage::Format_ARGB32_Premultiplied);
+        img.setDevicePixelRatio(scale);
+        QPainter p(&img);
+        // 与 paintEvent 的逐步路径完全同像素:冻结底图(物理→逻辑)+ 黑罩。
+        if (!m_frozen.isNull()) {
+            p.scale(1.0 / scale, 1.0 / scale);
+            p.drawImage(QPoint(0, 0), m_frozen);
+        } else {
+            p.fillRect(QRect(QPoint(0, 0), size()), QColor(30, 30, 34));
+        }
+        p.fillRect(QRect(QPoint(0, 0), size()), QColor(0, 0, 0, 90));
+        p.end();
+        m_maskedBase = QPixmap::fromImage(std::move(img));
+        m_maskedBaseDpr = scale;
+    }
+    return m_maskedBase;
+}
+
+void OverlayWidget::updateForSelectionChange(const QRect& oldSel) {
+    const QRect newSel = m_selection.normalized();
+    QRect dirty = oldSel.isNull() ? newSel : oldSel | newSel;
+    // 外扩:2px 边框 + 8 个手柄(±kHandleSize/2 再加笔宽)+ 上方 26px 的尺寸提示
+    // 文字(sel.y()-6 起,高约 16)。
+    dirty.adjust(-kHandleSize / 2 - 2, -26, kHandleSize / 2 + 2, kHandleSize / 2 + 2);
+    // 浮条/二级条随选区出现或移动,一并并入(它们在脏区外时 update 会自动裁剪)
+    if (toolbarVisible()) dirty |= toolbarRect();
+    if (m_subbarVisible) dirty |= subbarRect();
+    update(dirty);
+}
+
 void OverlayWidget::paintEvent(QPaintEvent*) {
     QPainter painter(this);
     // ⚠️ 守卫必须有:showFullScreen() 之后的第一帧里,窗口/后备缓冲可能尚未就绪,
@@ -933,20 +966,24 @@ void OverlayWidget::paintEvent(QPaintEvent*) {
     if (!painter.isActive()) return;
     const qreal scale = dpr();
 
-    // 冻结底图是**物理像素**,窗口坐标是**逻辑像素**:
-    // 按 DPR 反向缩放绘制,使 1 图像像素 = 1 设备像素。若直接
-    // drawImage(rect(), frozen),Qt 会把图重采样到逻辑矩形,高分屏上预览发虚。
-    if (!m_frozen.isNull()) {
-        painter.save();
-        painter.scale(1.0 / scale, 1.0 / scale);
-        painter.drawImage(QPoint(0, 0), m_frozen);
-        painter.restore();
+    // 底图 + 半透明黑罩:优先用预合成缓存(见 m_maskedBase 注释)。
+    // 冻结底图是**物理像素**,窗口坐标是**逻辑像素**:按 DPR 反向缩放绘制,
+    // 使 1 图像像素 = 1 设备像素。若直接 drawImage(rect(), frozen),Qt 会把图
+    // 重采样到逻辑矩形,高分屏上预览发虚。
+    if (false && !m_maskedBase.isNull()) {
+        painter.drawPixmap(0, 0, m_maskedBase);
     } else {
-        painter.fillRect(rect(), QColor(30, 30, 34));
+        if (!m_frozen.isNull()) {
+            painter.save();
+            painter.scale(1.0 / scale, 1.0 / scale);
+            painter.drawImage(QPoint(0, 0), m_frozen);
+            painter.restore();
+        } else {
+            painter.fillRect(rect(), QColor(30, 30, 34));
+        }
+        // 半透明黑罩(逻辑坐标,覆盖整窗)
+        painter.fillRect(rect(), QColor(0, 0, 0, 90));
     }
-
-    // 半透明黑罩(逻辑坐标,覆盖整窗)
-    painter.fillRect(rect(), QColor(0, 0, 0, 90));
 
     const QRect sel = m_selection.normalized();
     if (!sel.isNull()) {
@@ -1108,6 +1145,7 @@ void OverlayWidget::mouseMoveEvent(QMouseEvent* e) {
     // 设置,下面每个提前 return 的分支都会把光标移出浮条 —— 统一在这里清一次即可。
     if (m_selecting || m_adjusting || m_draggingStroke) setHoverButton(-1);
     if (m_selecting) {
+        const QRect oldSel = m_selection.normalized();
         m_selection = QRect(m_origin, e->pos()).normalized();
         update();
         return;
@@ -1119,8 +1157,9 @@ void OverlayWidget::mouseMoveEvent(QMouseEvent* e) {
         return;
     }
     if (m_adjusting) {
+        const QRect oldSel = m_selection.normalized();
         applyAdjustment(e->pos());
-        update();
+        updateForSelectionChange(oldSel);
         return;
     }
     // 悬停在浮条/二级条的按钮上:给"可点"的手型(否则标注态会顶着一个画笔光标,
