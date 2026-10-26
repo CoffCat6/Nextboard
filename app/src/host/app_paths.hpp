@@ -9,6 +9,12 @@
 // ⚠️ 约束:exe 所在目录必须可写 —— 安装到 `%LOCALAPPDATA%\Programs\Nextboard`
 //    (安装器默认,单用户免 UAC)满足;若用户手工装到 Program Files 等只读位置,
 //    数据目录创建会失败,由启动链路给出可读错误(见 core_bridge init)。
+//
+// 📌 **已评审的取舍(2026-10-26,用户拍板"保持现状")**:开发构建下本目录位于
+//    `app\build\data\` —— 在构建产物目录里,手动清 build 会连数据一起删。
+//    不迁移的理由:便携语义(数据跟着 exe 走)优先,且开发树已有启动自动备份兜底
+//    (CoreFacade::maybeAutoBackup,每日一份保留 3 份,`<data>\backups\`)。
+//    任何人要清 `app\build` 前,先确认 `backups\` 里有新备份或手动挪走 `data\`。
 #pragma once
 
 #include <QString>
