@@ -7,6 +7,13 @@ namespace nb::overlay {
 namespace {
 /// dpr 兜底:底图异常/未就绪时按 1 处理,避免除零与整条几何塌缩。
 qreal safeDpr(qreal dpr) { return dpr > 0.01 ? dpr : 1.0; }
+
+/// 浮条贴整屏底边时留的边距(逻辑像素)。
+///
+/// 为什么留 12 而不是 4:任务栏通常占 40~48px,浮条贴在窗口底边时若只留 4px,
+/// 会与"贴边手势"挨得太近;12 既能让用户看出"这是浮在内容上的条",又不浪费
+/// 垂直空间(浮条本身 44px)。
+constexpr int kEdgeInset = 12;
 } // namespace
 
 QRect annotationSceneRect(const QRect& selectionLogical, qreal dpr) {
@@ -33,6 +40,22 @@ QRect toolbarRectFor(const QRect& selectionLogical, const QSize& widgetSize,
         y = qMax(4, sel.top() - margin - h);   // 翻到选区上方;再夹住(见头文件注释)
     }
     x = qBound(4, x, qMax(4, widgetSize.width() - w - 4));
+
+    // ---- 选区占满整屏(贴住上下边)时:浮条**必然**压在内容上 ----
+    //
+    // 上下都没有空白可站,夹住之后浮条就压进了选区中部。此时:
+    //   * 智能框选场景下这几乎必然发生("框住一个最大化窗口"是主线用法);
+    //   * 美观上不如贴边,但**贴边会盖住窗口标题栏** —— 而标题栏恰好是用户
+    //     最常想确认"框对了没有"的地方。
+    //
+    // 取舍:贴住**底边**。理由:截图内容的主体通常在上方(正文从顶部开始),
+    // 而浮条在底部时用户仍能看到标题栏与首屏内容;反过来则一眼全是浮条。
+    // 只改 y,不动 x(横向仍居中,与平常一致)。
+    const bool noRoomAbove = (sel.top() - margin - h) < 4;
+    const bool noRoomBelow = (sel.bottom() + margin + h) > (widgetSize.height() - 4);
+    if (noRoomAbove && noRoomBelow) {
+        y = qBound(4, widgetSize.height() - h - kEdgeInset, qMax(4, widgetSize.height() - h - 4));
+    }
     return QRect(x, y, w, h);
 }
 

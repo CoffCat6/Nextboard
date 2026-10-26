@@ -152,6 +152,10 @@ int main(int argc, char* argv[]) {
                 || arg == QLatin1String("--update-flow")
                 || arg == QLatin1String("--dump-monitors")
                 || arg == QLatin1String("--capture-toolbar-flow")
+                || arg == QLatin1String("--smart-capture-flow")
+                || arg == QLatin1String("--smart-live-flow")
+                || arg == QLatin1String("--smart-uia-flow")
+                || arg == QLatin1String("--smart-settings-flow")
                 || arg == QLatin1String("--editor-flow")
                 || arg == QLatin1String("--autostart-flow")
                 || arg == QLatin1String("--stitch-flow")
@@ -298,6 +302,10 @@ int main(int argc, char* argv[]) {
     bool todoGroups = false;
     bool dumpMonitors = false;
     bool captureToolbarFlow = false;
+    bool smartCaptureFlow = false;
+    bool smartLiveFlow = false;
+    bool smartUiaFlow = false;
+    bool smartSettingsFlow = false;
     bool editorFlow = false;
     bool autoStartFlow = false;
     bool stitchFlow = false;
@@ -349,6 +357,14 @@ int main(int argc, char* argv[]) {
             captureToolbarFlow = true;
         // 编辑器裁剪/旋转验收:引擎级 + 真窗口端到端(见 host/editor_flow.cpp)。
         // 不写库,故不进 --data-dir 门禁。
+        else if (arg == QLatin1String("--smart-capture-flow"))
+            smartCaptureFlow = true;
+        else if (arg == QLatin1String("--smart-live-flow"))
+            smartLiveFlow = true;
+        else if (arg == QLatin1String("--smart-uia-flow"))
+            smartUiaFlow = true;
+        else if (arg == QLatin1String("--smart-settings-flow"))
+            smartSettingsFlow = true;
         else if (arg == QLatin1String("--editor-flow"))
             editorFlow = true;
         // 自启形态验收:真实读写 Run 键,断言应用内开关写的命令行带 --hidden
@@ -395,6 +411,10 @@ int main(int argc, char* argv[]) {
     if (todoGroups) runFlow([&panel] { nb::reportTodoGroups(panel); });
     if (dumpMonitors) runFlow([] { nb::reportMonitors(); });
     if (captureToolbarFlow) runFlow([] { nb::runCaptureToolbarFlow(); });
+    if (smartCaptureFlow) runFlow([] { nb::runSmartCaptureFlow(); });
+    if (smartLiveFlow) runFlow([] { nb::runSmartLiveFlow(); });
+    if (smartUiaFlow) runFlow([] { nb::runSmartUiaFlow(); });
+    if (smartSettingsFlow) runFlow([&panel] { nb::runSmartSettingsFlow(panel); });
     if (editorFlow) runFlow([] { nb::runEditorFlow(); });
     if (autoStartFlow) runFlow([] { nb::runAutoStartFlow(); });
     if (stitchFlow) runFlow([] { nb::runStitchFlow(); });

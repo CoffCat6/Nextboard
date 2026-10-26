@@ -14,6 +14,7 @@
 
 #include <functional>
 
+#include "capture/smart_capture.hpp"
 #include "capture/stitch_hud.hpp"
 #include "editor/annotation_engine.hpp"
 
@@ -93,8 +94,12 @@ public:
     /// autoStartStitching:框完**直接进长截图就绪态**(CaptureIntent::Scrolling 用)。
     /// 此时 autoConfirm 的语义只剩"点空是否取消",不再决定"松手即入库" ——
     /// 否则设了 regionAutoConfirm=true 的用户一松手就入库了,永远进不了长截图。
+    /// candidates:智能框选的候选表(**虚拟桌面绝对物理像素**,z 序从顶到底),
+    ///             见 smart_capture.hpp。空表 = 退化为纯手动框选(总是允许的状态:
+    ///             智能框选是增益,拿不到候选绝不能让截图不可用)。
     OverlayWidget(QImage frozen, int screenIndex, QScreen* screen, bool autoConfirm,
                   bool rightClickCancel, bool autoStartStitching = false,
+                  const QVector<smart::Candidate>& candidates = {},
                   QWidget* parent = nullptr);
 
     // ---- 浮条底板不透明度三档(docs/17 §17.5)----
@@ -124,6 +129,17 @@ public:
 
     /// 本遮罩所属屏幕(验收与调试用;会话层用不到,它自己持有 QScreen*)。
     QScreen* screen() const { return m_screen; }
+
+    // ---- 智能框选(验收与调试用)----
+    /// 当前预选矩形(**局部逻辑坐标**;空 = 没有预选)。
+    QRect smartCandidate() const { return m_candidate; }
+    /// 候选表条目数(验收断言"枚举到了东西 / 没枚举到自己")。
+    int smartCandidateCount() const { return m_candidates.size(); }
+    /// 已采纳过几次"单击即框选"。直通模式下**单击即确认**,浮条模式下单击只
+    /// 采纳、仍需再点完成 —— 两条路径都由它计数,验收据此区分。
+    int smartAcceptCount() const { return m_smartAccepts; }
+    /// 当前候选的层级(0 = 窗口,1 = UIA 元素;-1 = 无)。
+    int smartCandidateLevel() const { return m_candidateLevel; }
 
     /// 长截图的进度更新(总高/缺口/结论)。**由会话层回调** ——
     /// 采集与拼接在会话层(它才持有屏与核心句柄),遮罩只负责显示。
@@ -214,6 +230,9 @@ protected:
     void mousePressEvent(QMouseEvent* e) override;
     void mouseMoveEvent(QMouseEvent* e) override;
     void mouseReleaseEvent(QMouseEvent* e) override;
+    /// 滚轮:在**重叠候选**之间切换预选(两个窗口叠着时选下面那个)。
+    /// 已有选区/标注/长截图态下不处理(返回 QWidget 默认,什么都不做)。
+    void wheelEvent(QWheelEvent* e) override;
     void mouseDoubleClickEvent(QMouseEvent* e) override;
     void keyPressEvent(QKeyEvent* e) override;
     void resizeEvent(QResizeEvent* e) override;
@@ -265,6 +284,57 @@ private:
     Handle m_activeHandle = Handle::None;
     QRect m_adjustStartRect;  // 微调开始时的选区
     QPoint m_adjustStartPos;  // 微调起始光标位置
+
+    // ---- 智能框选(docs/23;S1 窗口级 / S3 元素级)----
+    //
+    // 候选表在**会话建立之前**由 smart::probeWindows() 枚举好(那时遮罩还没建,
+    // 否则枚举到的全是自己),随构造参数进来。表内容是虚拟桌面绝对物理像素,
+    // 本类每次命中测试都现换算成局部逻辑坐标(几十次矩形判断,微秒级),
+    // **不缓存换算结果** —— 缓存就要处理"窗口在会话中途移动"的失效,得不偿失。
+    QVector<smart::Candidate> m_candidates;
+    QRect m_candidate;              // 当前预选(局部逻辑),空 = 无
+    int m_candidateLevel = -1;      // 当前预选的层级(-1 = 无)
+    int m_smartAccepts = 0;         // 单击采纳次数(验收用)
+    QString m_elementTitle;         // 元素级预选的名称(UIA Name;窗口级为空)
+    /// 上一次候选项的**原始物理矩形**(Win32/UIA 直出,未经过逻辑像素往返)。
+    /// 采纳时把它存进 m_candidatePhysical,见 selectionPhysical() 的注释。
+    QRect m_lastCandidatePhysical;
+    /// 采纳那一刻的选区(逻辑)。与 m_selection 相等 = 用户没动过手柄,
+    /// 可以安全地交回原始物理矩形。
+    QRect m_adoptedSelection;
+    /// 采纳时的精确物理矩形。
+    QRect m_candidatePhysical;
+    /// 元素级预选**所属的窗口** HWND。用途:判断"光标是否还停在该窗口上" ——
+    /// 后台窗口的元素绝不能压过前台窗口(见 smartHoverUpdate 的 keepElement)。
+    quintptr m_elementWindowId = 0;
+    /// 预选定序:鼠标停在同一位置时不要在重叠窗口间乱跳(见 smartHoverTick)。
+    QPoint m_lastHoverPos;
+    /// 重叠候选的切换偏移。滚轮每滚一格 +1,取模到重叠栈长度。
+    int m_hoverStackOffset = 0;
+    /// 按下时刻的状态:"单击采纳"要靠"按下时就在候选上 + 抬起时位移极小"判定,
+    /// 两个条件都缺一不可 —— 只判位移会把"从空白处按下、拖出去一点"误当单击。
+    QPoint m_pressPos;
+    bool m_pressOnCandidate = false;
+    /// UIA 元素探测(S3)。鼠标停稳后投工作线程;**在飞时不再投**,结果回来才合并。
+    bool m_elementProbePending = false;
+    QTimer* m_elementProbeTimer = nullptr;   // 停稳检测(单发)
+    QPointer<QObject> m_elementProbeGuard;   // 遮罩析构后丢弃迟到结果
+
+    /// 按光标位置更新预选矩形(纯数学,不起 Win32 调用)。返回是否发生了变化。
+    bool smartHoverUpdate(const QPoint& pos, bool allowElement);
+    /// 清空预选(进入拖拽/标注/长截图时用)。
+    void smartClearCandidate(bool clearElement = false);
+    /// 本机的"绝对物理"屏幕矩形(会话内不变:底图与屏几何都不变)。
+    QRect smartScreenPhysical() const;
+    /// 画预选高亮(虚线框 + 框内恢复原图 + 尺寸角标)。
+    void drawCandidate(QPainter& painter);
+    /// 投一次 UIA 元素探测(工作线程);cursorLocal 是**遮罩局部逻辑**坐标。
+    void startElementProbe(const QPoint& cursorLocal);
+    /// 合并探测结果(UI 线程;元素矩形为绝对物理像素)。
+    void applyElementCandidate(const QRect& elementPhysical, const QString& title,
+                               quintptr windowId);
+    /// 光标处的重叠候选栈(窗口级)。
+    QVector<int> hoverStack(const QPoint& pos) const;
 
     // ---- 框选后浮出工具栏(docs/14 §16;仅 autoConfirm=false 生效)----
     // 内嵌于遮罩窗口(不新建窗口),挂在选区底部;按钮走既有信号通道。

@@ -42,6 +42,7 @@ add_executable(nextboard WIN32
     src/host/acceptance.cpp
     src/host/note_flow.cpp
     src/host/capture_toolbar_flow.cpp
+    src/host/smart_capture_flow.cpp
     src/host/editor_flow.cpp
     src/host/stitch_flow.cpp
     src/host/stitch_live_flow.cpp
@@ -54,6 +55,7 @@ add_executable(nextboard WIN32
     src/ui/ocr_result_panel.cpp
     src/capture/capture_session.cpp
     src/capture/overlay_geometry.cpp
+    src/capture/smart_capture.cpp
     src/capture/stitch_hud.cpp
     src/editor/annotation_engine.cpp
     src/editor/annotation_toolbar.cpp
@@ -140,6 +142,11 @@ target_link_libraries(nextboard PRIVATE
     Qt6::QuickControls2
     Qt6::QuickWidgets
     dwmapi.lib
+    # 智能框选的元素级探测(UI Automation):窗口级(S1)不依赖它,
+    # 但同一文件里编译,链接期必须解析 COM 符号
+    ole32.lib
+    oleaut32.lib
+    uiautomationcore.lib
     # GetProcessMemoryInfo 的兜底依赖(PSAPI_VERSION>=2 时由 kernel32 提供,写上无副作用)
     psapi.lib
 )

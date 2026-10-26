@@ -120,6 +120,11 @@ v1 不扩。
 > [19-scrolling-capture-plan.md](./19-scrolling-capture-plan.md);验收 `--stitch-flow` /
 > `--stitch-settings-flow` / `--stitch-live-flow`。
 
+> **已交付(2026-10-26)**:「智能截图(自动框选)」—— 悬停即框住光标下的窗口/元素,
+> 单击采纳(直通模式单击即确认)。设计、实测数据与已知限制见
+> [23-smart-capture-plan.md](./23-smart-capture-plan.md);验收 `--smart-capture-flow` /
+> `--smart-live-flow` / `--smart-uia-flow` / `--smart-settings-flow`。
+>
 > **已交付(2026-10-18 · 由 backlog 提前)**:「待办贴屏 / 桌面便签」—— 设计方案见
 > [20-todo-sticky-note.md](./20-todo-sticky-note.md),v7 迁移的 `todo_note` 表落窗口几何/
 > 吸附边/半隐藏态,验收 `--note-flow` 全通过。

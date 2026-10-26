@@ -19,6 +19,8 @@ Item {
         // 兼容旧配置:旧版 "skipEditor=false"(想进编辑器)的用户,其意图是"要编辑能力",
         // 在新模型里对应 toolbar(浮条带标注),故只要 autoConfirm=false 就落 toolbar。
         regionExitCombo.currentIndex = s.regionAutoConfirm === false ? 1 : 0
+        // 智能框选(docs/23):缺失时按 core 默认 true —— 显示与实际行为必须同源。
+        smartCaptureCheck.checked = s.smartCapture !== false
         rightClickCancelCheck.checked = s.regionRightClickCancel === true
         // 多屏遮罩范围:缺失(true=历史行为)时不等价于 false,须显式区分
         allScreensCheck.checked = s.captureAllScreens !== false
@@ -51,6 +53,7 @@ Item {
         // 单一出口 → 回写成 regionAutoConfirm(direct=true / toolbar=false)。
         // regionSkipEditor 已废弃(§18.5):不写它,让它保持读入时的原值(见 core 注释)。
         s.regionAutoConfirm = regionExitCombo.currentIndex === 0
+        s.smartCapture = smartCaptureCheck.checked
         s.regionRightClickCancel = rightClickCancelCheck.checked
         s.captureAllScreens = allScreensCheck.checked
         s.captureDelaySecs = captureDelay.value
@@ -93,6 +96,19 @@ Item {
                 model: ["直接入库并复制(松手即完成)",
                         "浮出工具栏(可标注 / OCR / 贴图 / 保存)"]
                 onActivated: view.scheduleSave()
+            }
+            // 智能框选(docs/23):鼠标移动即自动框住光标下的窗口,单击采纳。
+            // 排在与「框选后」相邻的位置 —— 它决定的是**怎么框**,与"框完去哪儿"
+            // 是同一件事的两半,分开摆用户对不上。
+            ReadableCheckBox {
+                id: smartCaptureCheck
+                objectName: "smartCaptureCheck"   // 验收钩子
+                text: "智能框选(移动鼠标自动框住光标下的窗口,单击即可;滚轮切换重叠窗口)"
+                onClicked: view.scheduleSave()
+            }
+            HintLabel {
+                text: "关闭后回到纯手动拖拽框选。鼠标在目标上停稳约 0.4 秒,"
+                      + "若目标支持 UI Automation(浏览器 / IDE / Office),还会进一步框住其中的元素。"
             }
             ReadableCheckBox {
                 id: rightClickCancelCheck

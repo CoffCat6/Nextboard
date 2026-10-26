@@ -71,6 +71,25 @@ void reportTodoGroups(PanelWindow& panel);
 /// 纯本机几何与渲染断言,不写库、不联网,无需 --data-dir。
 void runCaptureToolbarFlow();
 
+/// 智能框选验收(--smart-capture-flow):A 段纯几何(四套坐标的 4→1 换算 + 命中边界),
+/// B 段端到端(真实窗口 → 悬停预选 → 单击采纳 → 直通模式确认矩形),
+/// C 段手框回归(拖拽不被"单击采纳"劫持),D 段自过滤(本进程窗口不进候选表)。
+/// 不写库、不联网,无需 --data-dir。
+void runSmartCaptureFlow();
+
+/// UIA 元素级正向验收(--smart-uia-flow):对真实窗口探内部元素,断言"元素不超出窗口";
+/// 探不到任何元素不判失败(无 UIA 的实现是合法的),只留日志。
+void runSmartUiaFlow();
+
+/// 智能框选**接线**验收(--smart-live-flow):真走 startCaptureSession、真枚举桌面,
+/// 断言"枚举早于遮罩 show"这条硬约束没被改坏(改坏的典型症状是永远框住整屏)。
+/// 不写库,不需要 --data-dir。
+void runSmartLiveFlow();
+
+/// 设置页「智能框选」开关验收(--smart-settings-flow):切到截图分类 → 真实点击开关
+/// → 读回设置断言翻转并落盘 → 再点一次复原。会写 settings,必须配 --data-dir。
+void runSmartSettingsFlow(PanelWindow& panel);
+
 /// 编辑器裁剪/旋转验收(--editor-flow):A 段引擎级直测(标注图元跟随变换、
 /// 撤销重做绝对还原、马赛克纹理随底图重建、compose 不含裁剪覆盖层),
 /// B 段真窗口端到端(真点画笔按钮 + R/C/Enter/Esc 键位 + committed 收图)。

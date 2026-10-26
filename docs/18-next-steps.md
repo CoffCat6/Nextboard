@@ -50,6 +50,7 @@
 | 贴屏交接处不自动收起 | 2026-10-19 用户拍板(docs/20 §11 Q7):交界处收起几何不成立(推出去=推到邻屏上 → enter/expand 弹回 → 闪烁死循环)。`edgeOutsideIsAnotherScreen()` 拦截 + `leaveEvent` 加 `isCursorOverWindow()` 守卫。见 docs/20 §13.12 |
 | OCR 行级包围盒 + 图中取字 | 2026-10-24:两个引擎统一输出行框,面板悬停预览/双击行复制;`--capture-toolbar-flow` +9 项。见 docs/progress.md 10-24 |
 | 编辑器裁剪/旋转 | 2026-10-25:90° 旋转(R/Shift+R)+ 交互式裁剪(C/Enter/Esc + 覆盖层上的确认/取消按钮),标注图元与撤销栈全程跟随;浮条不暴露(重新框选即裁剪)。验收 `--editor-flow` 38 项。见 docs/17 §18.14 |
+| **智能截图(自动框选)** | 2026-10-26:S1 窗口级(DWM 可见边界 + 碎片过滤)+ S2 滚轮切换重叠窗口 + S3 UIA 元素级(贪心下沉);单击采纳,直通模式单击即确认。新增 `--smart-capture-flow`/`-live`/`-uia`/`-settings` 四条验收。见 docs/23 |
 | 二维码识别 + 浮条翻译按钮 | 2026-10-25:核心 rqrr 解码(FFI `nb_qr_decode_rgba`,6 项单测含 FFI round-trip);浮条 8→10 按钮(0 标注/1 OCR/2 二维码/3 翻译/4 长截图/5 贴图/6 保存/7 透明/8 完成/9 取消);结果面板纯 URL 给「打开链接」;编辑器动作条同步加「识别二维码」。`--capture-toolbar-flow` 索引已迁移 + 新增 B12/B13 |
 
 ---
