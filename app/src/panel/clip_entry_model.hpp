@@ -15,6 +15,8 @@
 #include <QStringList>
 #include <QTimer>
 
+#include <functional>
+
 namespace nb {
 
 class ClipEntryModel : public QAbstractListModel {
@@ -167,6 +169,8 @@ private:
     void refreshTags();
     /// 重新拉取来源统计(S5.1 来源筛选条,与列表同源刷新)。
     void refreshSources();
+    /// 计数徽标 + 标签/来源统计一次性刷新(不经 applyPage 的就地更新路径用)。
+    void refreshStats();
     /// 由 blob 路径拼出 file:// URL(thumb=true 时取同目录 .thumb<版本>.png 缩略图,
     /// 命名规则见 CoreBridge::thumbnailPathFor)。
     /// 静态且只依赖入参:列表重绘时**不得**再走同步 FFI 查询。
@@ -194,6 +198,11 @@ private:
         bool todoOverdue = false;
         QString todoNote;         // 备注(docs/21);空串 = 无备注
     };
+    /// 就地修改一行并对其发 dataChanged(排序不受影响的字段变更用)。
+    /// 整表 reset 会销毁全部委托(含复用池)、丢掉展开态与滚动位置;
+    /// 行内字段变化走这里。返回是否找到该行。
+    /// (声明须在 Row 之后:类内声明处的参数类型要求 Row 已可见。)
+    bool updateRowById(const QString& id, const std::function<void(Row&)>& mutate);
     QVector<Row> m_rows;
     QString m_view = "all";
     QString m_query;

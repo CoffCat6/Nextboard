@@ -7,6 +7,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QIcon>
 #include <QJsonObject>
 #include <QMessageBox>
@@ -70,9 +71,30 @@ LONG WINAPI unhandledExceptionFilter(EXCEPTION_POINTERS* info) {
     const DWORD code = (info && info->ExceptionRecord) ? info->ExceptionRecord->ExceptionCode : 0;
     const void* address =
         (info && info->ExceptionRecord) ? info->ExceptionRecord->ExceptionAddress : nullptr;
-    appendCrashLog(QStringLiteral("未处理异常 code=0x%1 address=%2")
+    // 出错地址落在哪个模块(+偏移):地址本身因 ASLR 每次都变,模块名才是
+    // 能对上号的。反查不到(堆上执行等)就只报地址。
+    QString where;
+    MEMORY_BASIC_INFORMATION mb{};
+    if (address && VirtualQuery(address, &mb, sizeof(mb)) && mb.Type == MEM_IMAGE) {
+        HMODULE mod = nullptr;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                                   | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               static_cast<LPCWSTR>(address), &mod) && mod) {
+            wchar_t path[MAX_PATH] = {};
+            if (GetModuleFileNameW(mod, path, MAX_PATH)) {
+                const QString file = QFileInfo(QString::fromWCharArray(path)).fileName();
+                const uintptr_t base = reinterpret_cast<uintptr_t>(mod);
+                const uintptr_t at = reinterpret_cast<uintptr_t>(address);
+                where = QStringLiteral(" module=%1 offset=0x%2")
+                            .arg(file)
+                            .arg(at - base, 0, 16);
+            }
+        }
+    }
+    appendCrashLog(QStringLiteral("未处理异常 code=0x%1 address=%2%3")
                        .arg(static_cast<quint32>(code), 8, 16, QLatin1Char('0'))
-                       .arg(reinterpret_cast<quintptr>(address), 0, 16));
+                       .arg(reinterpret_cast<quintptr>(address), 0, 16)
+                       .arg(where));
     return EXCEPTION_EXECUTE_HANDLER;   // 记完即终止,不再弹系统崩溃框
 }
 
@@ -220,6 +242,16 @@ int main(int argc, char* argv[]) {
     // 绑定时读一次就定型 —— 晚设不会生效(表现为"验收仍在打编译期那个空地址")。
     if (!updateUrlOverride.isEmpty())
         nb::CoreFacade::setUpdateCheckUrlOverride(updateUrlOverride);
+    // 验收模式:任一 --*-flow / --todo-groups 出现即置位(必须早于 PanelWindow
+    // 构造,QML 绑定初始化时要读到)。Main.qml 据此门控 acceptanceState ——
+    // 产品路径不再为断言维持一串活绑定。
+    for (int i = 1; i < argc; ++i) {
+        const QString arg = QString::fromLocal8Bit(argv[i]);
+        if (arg.endsWith(QStringLiteral("-flow")) || arg == QLatin1String("--todo-groups")) {
+            nb::PanelWindow::setAcceptanceModeForNextInstance();
+            break;
+        }
+    }
     nb::setupQmlEnvironment();
     nb::logMemory("qml-env");      // + Qt Quick Controls 风格与全局字体
     nb::PanelWindow panel(core);

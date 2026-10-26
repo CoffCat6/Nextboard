@@ -184,6 +184,23 @@ void ClipEntryModel::fetchMoreRequest() {
     if (canFetchMore({})) fetchMore({});
 }
 
+bool ClipEntryModel::updateRowById(const QString& id, const std::function<void(Row&)>& mutate) {
+    for (int i = 0; i < m_rows.size(); ++i) {
+        if (m_rows[i].id != id) continue;
+        mutate(m_rows[i]);
+        // 不指定角色集:QML 按需重读该行各角色,成本远低于整表 reset
+        emit dataChanged(index(i), index(i));
+        return true;
+    }
+    return false;
+}
+
+void ClipEntryModel::refreshStats() {
+    CoreFacade::instance().refreshCounts();
+    refreshTags();
+    refreshSources();
+}
+
 QVariantMap ClipEntryModel::copyEntry(const QString& id) {
     return CoreFacade::instance().call("copy_entry", {{"id", id}});
 }
@@ -198,7 +215,21 @@ QVariantMap ClipEntryModel::copyByIndex(int index) {
 
 QVariantMap ClipEntryModel::deleteEntry(const QString& id) {
     const QVariantMap resp = CoreFacade::instance().call("delete_entry", {{"id", id}});
-    if (resp.value("ok").toBool()) reload(m_limit);
+    if (!resp.value("ok").toBool()) return resp;
+    // 单行删除走 beginRemoveRows:整表 reset 会销毁全部委托、丢滚动位置与展开态。
+    // (删除不影响其余行的排序口径 pinned/last_used,单行移除是安全的。)
+    for (int i = 0; i < m_rows.size(); ++i) {
+        if (m_rows[i].id != id) continue;
+        beginRemoveRows({}, i, i);
+        m_rows.remove(i);
+        endRemoveRows();
+        break;
+    }
+    m_total = qMax(0, m_total - 1);
+    emit totalChanged();
+    emit countChanged();
+    emit hasMoreChanged();
+    refreshStats();   // 计数徽标与标签/来源统计都随条目数变化
     return resp;
 }
 
@@ -234,8 +265,14 @@ void ClipEntryModel::saveTags(const QString& id, const QStringList& tags) {
             resp.value("error").toMap().value("message").toString()));
         return;
     }
-    // 重拉列表(applyPage 内会一并刷新标签统计),保证筛选条与条目同步
-    reload(m_limit);
+    // 就地更新:标签变更不再整表 reset。仅当当前正按**被移除的**标签筛选时
+    // 才需要重拉(该行应从列表消失);标签统计条照常刷新。
+    const bool filteredOut = !m_tag.isEmpty() && !tags.contains(m_tag);
+    if (!filteredOut && updateRowById(id, [&tags](Row& r) { r.tags = tags; })) {
+        refreshTags();
+        return;
+    }
+    reload(m_limit);   // applyPage 内会一并刷新标签统计
 }
 
 void ClipEntryModel::refreshTags() {
@@ -353,7 +390,15 @@ void ClipEntryModel::todoSetDone(const QString& id, bool done) {
             resp.value("error").toMap().value("message").toString()));
         return;
     }
-    reload(m_limit);   // 完成态影响排序(归档垫底)与计数,整体重拉
+    // 就地更新:勾选完成不再整表 reset(销毁全部委托、丢展开态与滚动位置)。
+    // 待办视图的排序受完成态影响(归档垫底,见 core TODO_ORDER)→ 保留重拉;
+    // all 视图排序只看 pinned/last_used,与完成态无关,行内更新即可。
+    if (m_view != QLatin1String("todo")
+        && updateRowById(id, [done](Row& r) { r.todoDone = done; })) {
+        CoreFacade::instance().refreshCounts();   // 完成态影响"待办"徽标计数
+        return;
+    }
+    reload(m_limit);
 }
 
 void ClipEntryModel::todoUpdateTimes(const QString& id, const QVariantMap& times) {
@@ -366,6 +411,28 @@ void ClipEntryModel::todoUpdateTimes(const QString& id, const QVariantMap& times
         emit toast(QStringLiteral("推迟失败:%1").arg(
             resp.value("error").toMap().value("message").toString()));
         return;
+    }
+    // 就地更新(取舍同 todoSetDone:待办视图排序受 due_at 影响,保留重拉)。
+    // overdue 按 core 的同一定义重算:due_at 非空且 < now 且未完成(TODO_ORDER 的 CASE)。
+    // req 里是三态化后的值:缺键 = 不提及(不动),null = 清空,double = 新时刻。
+    if (m_view != QLatin1String("todo")) {
+        const bool updated = updateRowById(id, [&req](Row& r) {
+            if (req.contains("dueAt")) {
+                const QVariant v = req.value("dueAt");
+                r.todoDueAt = v.isNull() ? 0 : static_cast<qint64>(v.toDouble());
+            }
+            if (req.contains("remindAt")) {
+                const QVariant v = req.value("remindAt");
+                r.todoRemindAt = v.isNull() ? 0 : static_cast<qint64>(v.toDouble());
+            }
+            r.todoOverdue = r.todoDueAt > 0
+                            && r.todoDueAt < QDateTime::currentMSecsSinceEpoch()
+                            && !r.todoDone;
+        });
+        if (updated) {
+            CoreFacade::instance().refreshCounts();
+            return;
+        }
     }
     reload(m_limit);
 }
@@ -520,11 +587,9 @@ void ClipEntryModel::reload(int limit) {
     if (m_loading) { m_debounce.start(); return; }  // 进行中:稍后重试
     m_loading = true;
     emit loadingChanged();
-    beginResetModel();
-    m_rows.clear();
-    m_total = 0;
-    endResetModel();
-    emit hasMoreChanged();
+    // 不预清空:FFI 是同步调用,数据马就到 —— 预清空只会多出一轮
+    // begin/endReset(一轮 reset 销毁全部委托含复用池),旧画面留到新数据
+    // 一并替换,无闪空。
     // 端点与请求口径都由统一函数决定(待办视图走 todo_list,见 buildListRequest)
     const QVariantMap resp = CoreFacade::instance().call(listMethodFor(m_view),
                                                         buildListRequest(m_limit, 0));
@@ -616,6 +681,8 @@ void ClipEntryModel::applyPage(const QVariantMap& resp, bool append) {
     emit totalChanged();
     emit countChanged();
     emit hasMoreChanged();
+    if (append) return;   // 纯翻页不刷统计:计数/标签/来源不因多看一页而变化,
+                          // 每页 3 次同步 FFI 是触底加载的固定税,去掉。
     // 分类徽标与列表同源:列表重拉后同步刷新计数(无变化则不发信号)
     CoreFacade::instance().refreshCounts();
     refreshTags();   // 标签筛选条同理

@@ -337,6 +337,7 @@ void PinWindow::rotateImage() {
     // 以画面中心为锚点:旋转后宽高互换,重摆位使中心不动(否则会跳到别处)
     const QPoint globalCenter = mapToGlobal(rect().center());
     m_image = rotate90cw(m_image);
+    invalidateDisplayCache();   // 内容变了,缩放缓存作废
     applyScale();                               // 重算尺寸(宽高互换)+ 夹回工具条
     move(globalCenter - rect().center());
     showNotice(QStringLiteral("已旋转 90°"));
@@ -353,6 +354,7 @@ void PinWindow::setImage(const QImage& image) {
     if (image.isNull()) return;
     const QPoint globalCenter = mapToGlobal(rect().center());
     m_image = image;
+    invalidateDisplayCache();   // 内容变了,缩放缓存作废
     applyScale();
     move(globalCenter - rect().center());
 }
@@ -384,7 +386,11 @@ qint64 PinWindow::memoryBytes() const {
     const qreal dpr = currentDpr();
     const qint64 backing =
         static_cast<qint64>(qMax(1, width())) * qMax(1, height()) * dpr * dpr * 4;
-    return m_image.sizeInBytes() + backing;
+    // 缩放缓存(≤ 原图大小,见 paintEvent)一并计入,淘汰预算口径才如实。
+    // QPixmap 无 sizeInBytes():底层恒为 ARGB32_Premultiplied,按物理像素数 ×4。
+    const qint64 cacheBytes = m_displayCache.isNull()
+        ? 0 : static_cast<qint64>(m_displayCache.width()) * m_displayCache.height() * 4;
+    return m_image.sizeInBytes() + backing + cacheBytes;
 }
 
 QSize PinWindow::logicalSizeFor(qreal dpr) const {
@@ -395,6 +401,12 @@ QSize PinWindow::logicalSizeFor(qreal dpr) const {
     const int w = qMax(1, qRound(m_image.width() * m_zoom / dpr));
     const int h = qMax(1, qRound(m_image.height() * m_zoom / dpr));
     return QSize(w + 2 * kShadowMargin, h + 2 * kShadowMargin);
+}
+
+void PinWindow::invalidateDisplayCache() {
+    m_displayCache = QPixmap();
+    m_cacheZoom = -1.0;
+    m_cacheDpr = -1.0;
 }
 
 void PinWindow::paintEvent(QPaintEvent*) {
@@ -420,7 +432,35 @@ void PinWindow::paintEvent(QPaintEvent*) {
                                 cornerRadius, cornerRadius);
     }
 
-    painter.drawImage(imageRect, m_image);
+    // 缩放显示缓存:每次重绘(滚轮缩放/Alt 调透明度/遮挡恢复曝光/跨屏)都对
+    // 整张原图做双线性重采样,4K 贴图上每次几十 ms —— 改为按 (zoom,dpr,质量)
+    // 缓存一次。透明度由 painter 作用于 blit,不用重建缓存。
+    // 仅 zoom ≤ 1 启用(目标像素 ≤ 原图,缓存 ≤ 原图大小);放大走原图直绘,
+    // 否则 zoom=4 时缓存可达原图 16 倍,把贴图内存翻 17 倍。滚轮连续缩放期间
+    // 用快速采样过渡(尺度感优先),停止 ~150ms 后重建一帧平滑的(观感优先)。
+    const qreal dpr = currentDpr();
+    const bool fastTransition = m_scaleSettleTimer && m_scaleSettleTimer->isActive();
+    if (m_zoom <= 1.001) {
+        if (m_displayCache.isNull() || m_cacheZoom != m_zoom || m_cacheDpr != dpr
+                || m_cacheFast != fastTransition) {
+            // 物理尺寸从 imageRect × dpr 反推(与窗口 backing 同口径),避免
+            // 两处各自取整在边缘差出一像素。
+            const QSize physical(qMax(1, qRound(imageRect.width() * dpr)),
+                                 qMax(1, qRound(imageRect.height() * dpr)));
+            m_displayCache = QPixmap(physical);
+            m_displayCache.setDevicePixelRatio(dpr == 0.0 ? 1.0 : dpr);
+            QPainter p(&m_displayCache);
+            p.setRenderHint(QPainter::SmoothPixmapTransform, !fastTransition);
+            p.drawImage(m_displayCache.rect(), m_image);
+            p.end();
+            m_cacheZoom = m_zoom;
+            m_cacheDpr = dpr;
+            m_cacheFast = fastTransition;
+        }
+        painter.drawPixmap(imageRect, m_displayCache, QRectF(m_displayCache.rect()));
+    } else {
+        painter.drawImage(imageRect, m_image);
+    }
 }
 
 void PinWindow::applyScale() {
@@ -528,12 +568,23 @@ void PinWindow::mouseReleaseEvent(QMouseEvent* e) {
 
 void PinWindow::wheelEvent(QWheelEvent* e) {
     if (e->modifiers() & Qt::AltModifier) {
-        // Alt + 滚轮:透明度(第一代语义)
+        // Alt + 滚轮:透明度(第一代语义)。不重建缓存 —— 透明度由 painter
+        // 作用于 blit,缓存原样复用。
         m_opacity = qBound(0.3, m_opacity + (e->angleDelta().y() > 0 ? 0.05 : -0.05), 1.0);
         updateToolbar();   // 回写工具条滑杆
     } else {
         // 滚轮:缩放(1.0 = 1:1 物理像素);下限 0.1 防止缩成一个点
         m_zoom = qBound(0.1, m_zoom * (e->angleDelta().y() > 0 ? 1.1 : 1 / 1.1), 4.0);
+        // 连续滚动期间过渡帧走快速采样;停止 ~150ms 后重建一帧平滑的。
+        if (!m_scaleSettleTimer) {
+            m_scaleSettleTimer = new QTimer(this);
+            m_scaleSettleTimer->setSingleShot(true);
+            connect(m_scaleSettleTimer, &QTimer::timeout, this, [this] {
+                invalidateDisplayCache();
+                update();
+            });
+        }
+        m_scaleSettleTimer->start(150);
         applyScale();
     }
 }

@@ -20,7 +20,16 @@ class PanelWindow : public QWidget {
     /// 当前页:`list`(剪贴板历史)/ `translate`(翻译视图)/ `settings`(设置页)。
     /// QML 据此互斥显示各页;尺寸、最小尺寸与失焦策略也随它切换(见 Mode)。
     Q_PROPERTY(QString mode READ modeString NOTIFY modeChanged)
+    /// 验收模式(任一 --*-flow 启动时由 main.cpp 置位)。QML 侧据此**门控**
+    /// acceptanceState 这类只为断言存在的绑定:产品路径绑定为 null,不再
+    /// 每次模型 reset 白跑一串 IIFE(绑定依赖按实际求值追踪,关掉的分支
+    /// 不会建立依赖)。
+    Q_PROPERTY(bool acceptanceMode READ acceptanceMode CONSTANT)
 public:
+    /// 是否处于验收模式(main.cpp 解析到任一 --*-flow 时置位,QML 构建前)。
+    bool acceptanceMode() const { return m_acceptanceMode; }
+    static void setAcceptanceModeForNextInstance()
+    { s_acceptanceMode = true; }
     /// 窗口的三种形态。合并翻译页之后,同一个窗口要同时服务"呼出即用的历史列表"、
     /// "需要停留的翻译工作区"与"需要停留的设置工作区",三者的尺寸/下限/失焦策略不同。
     /// 设置页沿用翻译页的模式(同窗口同引擎整窗切换,docs/22-settings-page.md):
@@ -183,6 +192,9 @@ signals:
 
 private:
     void setupUi();
+    /// 验收模式实例标记(main.cpp 在构建 PanelWindow 前置位)。
+    bool m_acceptanceMode = s_acceptanceMode;
+    static inline bool s_acceptanceMode = false;
     /// 切换形态(含尺寸/下限调整、翻译/设置页的"停留"抑制)。
     void setMode(Mode mode);
     /// 按当前状态应用/取消置顶:**固定中**或**停在设置页**期间置顶。

@@ -179,7 +179,13 @@ Rectangle {
     readonly property string acceptanceEditId: todoEditId
 
     /// 验收只读状态:浮层几何 + 字段值 + 卡片可见性 + 错误行 + 按钮几何。
-    readonly property var acceptanceState: ({
+    ///
+    /// ⚠️ 由 `panelWindow.acceptanceMode` 门控:非验收模式绑定为 null。
+    /// QML 绑定依赖按**实际求值**追踪 —— 三目的未走分支不建立依赖,于是产品
+    /// 路径不再为断言维持这串活绑定(此前每次模型 reset 都会重跑下面 6 个
+    /// IIFE,它们引用 count/tagStats/浮层状态等十余个生产属性)。
+    /// 验收(--*-flow)下 binding 正常求值,读取方(acceptance.cpp)不受影响。
+    property var acceptanceState: panelWindow.acceptanceMode ? ({
         cardVisible: todoComposerCard.visible,
         clearDoneVisible: clearDoneCard.visible,   // --clear-done-flow:确认卡片开合
         pickerVisible: timePickerPopup.visible,
@@ -255,7 +261,7 @@ Rectangle {
                            ? settingsPage.item.acceptanceUpdateNoteVisible : false,
         // 页签可见性(0 个未完成待办时「待办」页签必须仍在)。
         todoTabVisible: tabRepeater.itemAt(4) ? tabRepeater.itemAt(4).visible : false
-    })
+    }) : null
 
     // ---- 右键菜单:全面板**唯一实例** ----
     // 原先每个 EntryCard 各自持有一个 Menu,存在两个问题:
@@ -272,6 +278,26 @@ Rectangle {
     /// 来源筛选(S5.1):空串 = 不筛选。只看截图/翻译结果/识别文字等。
     /// 与卡片来源徽标同口径,可与分类/搜索/标签叠加。
     property string activeSource: ""
+
+    /// 搜索高亮的防抖源:卡片高亮绑定这个,而不是直绑 searchInput.text ——
+    /// 每键入一字都让全部可见卡重跑正则+富文本重建,打字会出现 CPU 尖峰。
+    /// 与模型 setQuery 的 200ms 防抖同节奏,高亮与列表结果同步出现。
+    property string highlightQuery: ""
+    Timer {
+        id: highlightQueryTimer
+        interval: 200
+        onTriggered: root.highlightQuery = searchInput.text
+    }
+    // 搜索框清空(✕ 按钮/程序性清空)时不等防抖,高亮立即消失
+    Connections {
+        target: searchInput
+        function onTextChanged() {
+            if (searchInput.text === "") {
+                highlightQueryTimer.stop()
+                root.highlightQuery = ""
+            }
+        }
+    }
 
     /// 来源筛选条的可选项(值/文案/图标/计数),由 refreshSourceStats 填充。
     /// 计数取自 Core.counts 的按来源统计(entry_counts 已有各分类计数,
@@ -1273,7 +1299,12 @@ Rectangle {
                                 color: Theme.colors.textTertiary
                                 font: searchInput.font
                             }
-                            onTextEdited: Entries.setQuery(text)
+                            onTextEdited: {
+                                Entries.setQuery(text)
+                                // 高亮走防抖源(见 highlightQueryTimer):逐键直绑会让
+                                // 全部可见卡各重跑一遍正则+富文本重建,打字有 CPU 尖峰。
+                                highlightQueryTimer.restart()
+                            }
                             // 在搜索框里按 ↓ 直接进入列表(Win+V / Spotlight 的通行习惯):
                             // 输入完关键词后不该还要先用鼠标点一下列表。
                             // ⚠️ 这里**只**接管 ↓:↑ 在输入框里保持默认(移光标/不动),
@@ -2015,8 +2046,8 @@ Rectangle {
                     todoDone: rowWrap.todoDone
                     todoOverdue: rowWrap.todoOverdue
                     todoNote: rowWrap.todoNote
-                    // 搜索命中高亮:直接绑搜索框文本(改词即重算,无需模型参与)
-                    query: searchInput.text
+                    // 搜索命中高亮:绑防抖后的快照(改词 200ms 后重算,与列表刷新同节奏)
+                    query: root.highlightQuery
                     // 键盘光标行:与"菜单打开"同用强调语言(两者都是"正在被操作的对象"),
                     // 但键盘光标只在无浮层时出现 —— 有菜单时焦点语义归菜单。
                     menuOpen: (root.menuTarget !== null

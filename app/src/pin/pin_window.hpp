@@ -122,6 +122,17 @@ private:
     QPoint m_dragOffset;
     bool m_doubleClickClose = true;
 
+    // ---- 缩放显示缓存(见 paintEvent 注释)----
+    /// 当前 (zoom, dpr, 质量) 下的缩放结果(物理像素)。仅 zoom ≤ 1(缩小或 1:1)
+    /// 时启用,缓存 ≤ 原图大小;放大走原图直绘(缓存会把峰值翻倍,不值得)。
+    QPixmap m_displayCache;
+    qreal m_cacheZoom = -1.0;
+    qreal m_cacheDpr = -1.0;
+    bool m_cacheFast = false;    ///< true = 滚轮过渡帧(快速采样)
+    /// 滚轮停 ~150ms 后重建一帧平滑缓存的定时器(连续滚动期间用快速采样过渡)。
+    QTimer* m_scaleSettleTimer = nullptr;
+    void invalidateDisplayCache();
+
     // ---- 右键工具条(顶层弹层:不被贴图窗口裁剪,小贴图也能完整显示) ----
     QWidget* m_toolbar = nullptr;
     QLabel* m_zoomLabel = nullptr;

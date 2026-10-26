@@ -44,16 +44,50 @@ Item {
     /// (与 AppMark.qml 的 unit 同一手法。)
     readonly property real unit: size / 16
 
+    /// kind → 形状组件(见下方 Loader;kind 由调用方在创建期给定)
+    readonly property var kindComponents: {
+        "text": textComp,
+        "multiselect": multiselectComp,
+        "capture": captureComp,
+        "translate": translateComp,
+        "settings": settingsComp,
+        "pin": pinComp,
+        "all": allComp,
+        "image": imageComp,
+        "file": fileComp,
+        "chevron": chevronComp,
+        "pencil": pencilComp,
+        "trash": trashComp,
+        "bell": bellComp,
+        "todo": todoComp,
+        "filter": filterComp,
+        "keyboard": keyboardComp,
+        "network": networkComp,
+        "info": infoComp,
+    }
+
     implicitWidth: size
     implicitHeight: size
 
     // 与按钮同节奏换色(变体切换时不会突变)
     Behavior on color { ColorAnimation { duration: Theme.animation.fast } }
 
-    // ---- 翻译:地球(语言 / 翻译的通用隐喻) ----
-    Item {
+    // ---- 图标本体:按 kind 只实例化**一组**形状 ----
+    // 此前 18 组形状全部作为兄弟 Item 常驻(靠 visible 切换),单个图标实例要
+    // 构建 80~120 个 QML item(一张条目卡最多 9 个图标),列表委托因此过重、
+    // 快速滚动与模型 reset 的重建代价都被放大。改为 Component + Loader 后,
+    // 每个图标实例只构建被选中的那一组;kind 是创建期确定的属性,不运行时切换。
+    Loader {
         anchors.fill: parent
-        visible: root.kind === "translate"
+        sourceComponent: root.kindComponents[root.kind] ?? null
+    }
+
+    // ---- 翻译:地球(语言 / 翻译的通用隐喻) ----
+    // (组件化)kind = translate:只被 Loader 按需实例化
+    Component {
+        id: translateComp
+        Item {
+        anchors.fill: parent
 
         // 外圈
         Rectangle {
@@ -77,12 +111,15 @@ Item {
             border.width: root.stroke * root.unit
             border.color: root.color
         }
+        }
     }
 
     // ---- 设置:齿轮(八齿 + 中空圆环) ----
-    Item {
+    // (组件化)kind = settings:只被 Loader 按需实例化
+    Component {
+        id: settingsComp
+        Item {
         anchors.fill: parent
-        visible: root.kind === "settings"
 
         // 八个齿:委托自身填满图标区并绕中心旋转,齿固定在顶端 → 绕中心均匀分布
         Repeater {
@@ -106,12 +143,15 @@ Item {
             border.width: root.stroke * root.unit
             border.color: root.color
         }
+        }
     }
 
     // ---- 固定:图钉(帽 + 身 + 针尖) ----
-    Item {
+    // (组件化)kind = pin:只被 Loader 按需实例化
+    Component {
+        id: pinComp
+        Item {
         anchors.fill: parent
-        visible: root.kind === "pin"
 
         Rectangle {   // 钉帽
             anchors.horizontalCenter: parent.horizontalCenter
@@ -131,13 +171,16 @@ Item {
             width: 1.8 * root.unit; height: 4.5 * root.unit; radius: width / 2
             color: root.color
         }
+        }
     }
 
     // ---- 全部:2×2 网格(收全量历史的"总览"隐喻) ----
     // 用网格而不是再画一组横线:与下面的"文本"图标必须一眼可辨,横线系会互相撞脸。
-    Item {
+    // (组件化)kind = all:只被 Loader 按需实例化
+    Component {
+        id: allComp
+        Item {
         anchors.fill: parent
-        visible: root.kind === "all"
 
         // 四个方块:7 + 2 间距 + 7 = 16,右下角正好落满视口
         Repeater {
@@ -151,14 +194,17 @@ Item {
                 border.color: root.color
             }
         }
+        }
     }
 
     // ---- 文本:段落横线(左对齐、末行短 —— 只靠线条不画外框,
     //      免得与"文件"的文档/文件夹轮廓混淆) ----
-    Item {
+    // (组件化)kind = text:只被 Loader 按需实例化
+    Component {
+        id: textComp
+        Item {
         id: textIcon
         anchors.fill: parent
-        visible: root.kind === "text"
 
         /// 三条线的宽度(16px 视口下);末行短是"段落"的关键特征
         readonly property var lineWidths: [12, 12, 7.5]
@@ -175,12 +221,15 @@ Item {
                 color: root.color
             }
         }
+        }
     }
 
     // ---- 图片:画框 + 日 + 山(框内裁剪,山峰由旋转方块裁出) ----
-    Item {
+    // (组件化)kind = image:只被 Loader 按需实例化
+    Component {
+        id: imageComp
+        Item {
         anchors.fill: parent
-        visible: root.kind === "image"
 
         Rectangle {
             id: imageFrame
@@ -208,12 +257,15 @@ Item {
                 color: root.color
             }
         }
+        }
     }
 
     // ---- 文件:文件夹(页签 + 主体) ----
-    Item {
+    // (组件化)kind = file:只被 Loader 按需实例化
+    Component {
+        id: fileComp
+        Item {
         anchors.fill: parent
-        visible: root.kind === "file"
 
         // ⚠️ 两者的描边必须**落在同一像素区间**,否则交界处会叠出一条 2 倍粗的深色带。
         //    实测坑:页签占 y 2..6(底描边 4.5..6),主体原来从 y=6 起(顶描边 6..7.5),
@@ -235,6 +287,7 @@ Item {
             border.width: root.stroke * root.unit
             border.color: root.color
         }
+        }
     }
 
     // ---- 展开收起:V 形折角(默认开口向下 = 再点收起;反向由使用处 rotation: 180 翻转) ----
@@ -244,9 +297,11 @@ Item {
     //    初版 `x: 8*unit - width*SQRT1_2*0.85` 在 rotation 下触发绑定环,qml.exe 直接挂死
     //    (无报错、永不退出)。两杆的位置由 tmp 工具按"上端点必须同时落在尖点 (8,7.6)"
     //    解出(见 progress.md),数值代死即可,数学不变。
-    Item {
+    // (组件化)kind = chevron:只被 Loader 按需实例化
+    Component {
+        id: chevronComp
+        Item {
         anchors.fill: parent
-        visible: root.kind === "chevron"
 
         Rectangle {   // 左斜杆(−45°):从左下到尖点
             width: 5.5 * root.unit; height: root.stroke * root.unit; radius: height / 2
@@ -264,6 +319,7 @@ Item {
             transformOrigin: Item.Center
             color: root.color
         }
+        }
     }
 
     // ---- 编辑:铅笔(斜杆 + 笔尖) ----
@@ -271,9 +327,11 @@ Item {
     // "上尖"与笔杆下端相接(两段共用同一条 45° 对角线,数值由 tmp 工具解出后代死)。
     // ⚠️ 同 chevron:定位一律用常量,不要引用自身 width/height —— rotation 下自引用
     //    会触发绑定环,qml.exe 挂死且无报错。
-    Item {
+    // (组件化)kind = pencil:只被 Loader 按需实例化
+    Component {
+        id: pencilComp
+        Item {
         anchors.fill: parent
-        visible: root.kind === "pencil"
 
         Rectangle {   // 笔杆:45° 斜置的长胶囊(左上笔尾 → 右下笔尖)
             width: 7.5 * root.unit; height: 3 * root.unit; radius: height / 2
@@ -289,12 +347,15 @@ Item {
             transformOrigin: Item.Center
             color: root.color
         }
+        }
     }
 
     // ---- 删除:垃圾桶(桶盖横杆 + 提手 + 桶身) ----
-    Item {
+    // (组件化)kind = trash:只被 Loader 按需实例化
+    Component {
+        id: trashComp
+        Item {
         anchors.fill: parent
-        visible: root.kind === "trash"
 
         Rectangle {   // 提手(顶部小方块,Outline)
             anchors.horizontalCenter: parent.horizontalCenter
@@ -318,13 +379,16 @@ Item {
             border.width: root.stroke * root.unit
             border.color: root.color
         }
+        }
     }
 
     // ---- 提醒:铃铛(罩 + 底摆 + 铃舌) ----
     // 待办卡片上"已设提醒"的徽标图标(§6.3)。Outline 与其余图标同族。
-    Item {
+    // (组件化)kind = bell:只被 Loader 按需实例化
+    Component {
+        id: bellComp
+        Item {
         anchors.fill: parent
-        visible: root.kind === "bell"
 
         Rectangle {   // 罩:上方圆顶(用大圆角近似的钟罩)
             anchors.horizontalCenter: parent.horizontalCenter
@@ -348,15 +412,18 @@ Item {
             radius: 0.9 * root.unit
             color: root.color
         }
+        }
     }
 
     // ---- 待办:复选框(条目框 + 对勾) ----
     // 对勾两根短杆(左短右长)交出"已勾"的识别度;框用 Outline 与 trash 桶身同族。
     // ⚠️ 两根杆的定位是常量数值(与 chevron/pencil 同规矩):不要引用自身尺寸,
     //    rotation 下自引用会触发绑定环挂死(docs/progress.md 同类踩坑)。
-    Item {
+    // (组件化)kind = todo:只被 Loader 按需实例化
+    Component {
+        id: todoComp
+        Item {
         anchors.fill: parent
-        visible: root.kind === "todo"
 
         Rectangle {   // 条目框
             anchors.centerIn: parent
@@ -379,6 +446,7 @@ Item {
             transformOrigin: Item.Center
             color: root.color
         }
+        }
     }
 
     // ---- 筛选:漏斗(上宽下窄的梯形轮廓 + 短颈) ----
@@ -386,9 +454,11 @@ Item {
     // (16px 视口下内部细节会糊成一团,且与"文本"的横线系撞脸)。
     // ⚠️ 斜边用 rotation 摆角度,定位全用常量数值 —— 不要引用自身尺寸,
     //    rotation 下自引用会触发绑定环挂死(与 chevron/pencil/todo 同规矩)。
-    Item {
+    // (组件化)kind = filter:只被 Loader 按需实例化
+    Component {
+        id: filterComp
+        Item {
         anchors.fill: parent
-        visible: root.kind === "filter"
 
         Rectangle {   // 顶部横边(漏斗口)
             x: 1.8 * root.unit; y: 3.2 * root.unit
@@ -418,6 +488,7 @@ Item {
             radius: height / 2
             color: root.color
         }
+        }
     }
 
     // ---- 多选:三行"行首小方块 + 横线"的列表勾选形态 ----
@@ -432,10 +503,12 @@ Item {
     //    与 chevron/pencil/filter 同一规矩);行距 4.5,三行均布。
     // ⚠️ 行 y 通过 Repeater 的 id 引用(multiSel.lineYs[index]):不要写
     //    parent.parent.parent —— 层级引用结构一变就断(qmllint 也会报)。
-    Item {
+    // (组件化)kind = multiselect:只被 Loader 按需实例化
+    Component {
+        id: multiselectComp
+        Item {
         id: multiSel
         anchors.fill: parent
-        visible: root.kind === "multiselect"
 
         readonly property var lineYs: [2.6, 7.1, 11.6]
         Repeater {
@@ -460,16 +533,19 @@ Item {
                 }
             }
         }
+        }
     }
 
     // ---- 截图:四角取景框 + 对焦十字(设置页「截图」分类) ----
     // 与 "pin"(图钉)的区分:本图标是**中空**的四角括号 + 中心十字,
     // 无任何实心主体;pin 有连续实心形(帽/身/针)。
     // 四个角各自两笔(横 + 竖),角长 4.5 / 笔宽 1.8,16px 视口下留 1 边距。
-    Item {
+    // (组件化)kind = capture:只被 Loader 按需实例化
+    Component {
+        id: captureComp
+        Item {
         id: capture
         anchors.fill: parent
-        visible: root.kind === "capture"
 
         // 四角锚点(角括号的外角),顺序:TL / TR / BL / BR
         readonly property var corners: [
@@ -510,15 +586,18 @@ Item {
             width: 1.4 * root.unit; height: 4.4 * root.unit; radius: width / 2
             color: root.color
         }
+        }
     }
 
     // ---- 键盘:键位阵列(设置页「快捷键」分类) ----
     // 1.5px 描边的外壳 + 实心键帽:3.6px 键帽配 1.5 描边在小尺寸发糊(同 multiselect),
     // 键帽一律实心。与 "multiselect"(三行方块+横线)的区分:本图标有**封闭边框**,
     // 键帽 3 颗 + 空格条,排布在框内。
-    Item {
+    // (组件化)kind = keyboard:只被 Loader 按需实例化
+    Component {
+        id: keyboardComp
+        Item {
         anchors.fill: parent
-        visible: root.kind === "keyboard"
 
         // 键盘外壳(圆角描边)
         Rectangle {
@@ -550,15 +629,18 @@ Item {
             radius: 0.6 * root.unit
             color: root.color
         }
+        }
     }
 
     // ---- 网络:三节点网状(设置页「网络与代理」分类) ----
     // 实心节点 + 细连线(TL—TR 横线 / TR—BR 竖线 / TL—BR 斜线)。
     // 与 "translate"(地球 = 圆 + 经线)的区分:本图标是**离散节点**,无封闭圆。
     // ⚠️ 斜线用旋转矩形画(同齿轮齿的 rotation 手法);旋转项里不引用自身几何。
-    Item {
+    // (组件化)kind = network:只被 Loader 按需实例化
+    Component {
+        id: networkComp
+        Item {
         anchors.fill: parent
-        visible: root.kind === "network"
 
         // TL→BR 斜线(旋转 45°,两端让出节点半径)
         Item {
@@ -593,14 +675,17 @@ Item {
                 }
             }
         }
+        }
     }
 
     // ---- 关于:圆 + i(设置页「关于」分类) ----
     // 圆环描边 + 上点下竖的 i;与 "settings"(八齿齿轮)同用圆形母题,
     // 但齿轮有外齿、本图标是光圆环 + 内部字母形,一眼可分。
-    Item {
+    // (组件化)kind = info:只被 Loader 按需实例化
+    Component {
+        id: infoComp
+        Item {
         anchors.fill: parent
-        visible: root.kind === "info"
 
         Rectangle {
             anchors.centerIn: parent
@@ -625,6 +710,7 @@ Item {
             width: 1.8 * root.unit; height: 5.2 * root.unit
             radius: 0.6 * root.unit
             color: root.color
+        }
         }
     }
 }
