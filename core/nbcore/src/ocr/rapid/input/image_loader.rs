@@ -14,7 +14,7 @@ use crate::ocr::rapid::{
 };
 
 #[derive(Debug, Clone)]
-pub enum OcrInput {
+pub enum OcrInput<'a> {
     #[cfg(feature = "image-io")]
     Path(PathBuf),
     #[cfg(feature = "remote-input")]
@@ -56,6 +56,13 @@ pub enum OcrInput {
         height: usize,
         data: Vec<u8>,
     },
+    /// 借用的 RGBA(FFI 直通道):宿主持有像素,引擎只读 —— 免掉 FFI 边界上的
+    /// 整图 to_vec(4K 33MB)。
+    RgbaU8Ref {
+        width: usize,
+        height: usize,
+        data: &'a [u8],
+    },
     Image(RecImage),
 }
 
@@ -63,7 +70,7 @@ pub enum OcrInput {
 pub struct LoadImage;
 
 impl LoadImage {
-    pub fn load(&self, input: OcrInput) -> Result<RecImage> {
+    pub fn load(&self, input: OcrInput<'_>) -> Result<RecImage> {
         match input {
             #[cfg(feature = "image-io")]
             OcrInput::Path(path) => self.load_path(path),
@@ -120,6 +127,14 @@ impl LoadImage {
             } => {
                 ensure_len(width, height, 4, data.len())?;
                 RecImage::from_bgr_u8(width, height, rgba_to_bgr(width, height, &data))
+            }
+            OcrInput::RgbaU8Ref {
+                width,
+                height,
+                data,
+            } => {
+                ensure_len(width, height, 4, data.len())?;
+                RecImage::from_bgr_u8(width, height, rgba_to_bgr(width, height, data))
             }
             OcrInput::Image(image) => Ok(image),
         }

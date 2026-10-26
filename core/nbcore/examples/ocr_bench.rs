@@ -32,7 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 预热(含 ORT 初始化与引擎构建,不计入统计)
     let started = Instant::now();
     let (text, lines) =
-        recognize_configured_lines(rgba.to_vec(), width, height, &options)?;
+        recognize_configured_lines(&rgba, width, height, &options)?;
     println!(
         "warmup(含引擎构建): {:?}, {} 行 {} 字符",
         started.elapsed(),
@@ -44,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for i in 1..=iterations {
         let started = Instant::now();
         let (text, lines) =
-            recognize_configured_lines(rgba.to_vec(), width, height, &options)?;
+            recognize_configured_lines(&rgba, width, height, &options)?;
         let elapsed = started.elapsed();
         samples.push(elapsed);
         println!("run{i}: {:?}  {} 行 {} 字符", elapsed, lines.len(), text.len());

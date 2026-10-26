@@ -58,6 +58,21 @@ Ok "nbcore.dll 就绪 ($([math]::Round((Get-Item $dll).Length/1MB,1)) MB)"
 # ---- 第 2 步:app(nextboard.exe)----
 Step '构建 nextboard.exe (CMake + Ninja, MSVC)'
 if (-not (Test-Path $BuildDir)) { New-Item -ItemType Directory -Force $BuildDir | Out-Null }
+# ⚠️ 开发树的**运行数据**就在构建目录里(exe 同级 data\,便携式布局):手动清
+# app\build 会连剪贴板历史/设置一起删(2026-10-26 误删过一次,已评审"保持现状"
+# + 启动自动备份兜底,见 app_paths.hpp)。清目录前先确认 data\backups\ 有新备份。
+$devData = Join-Path $BuildDir 'data'
+if (Test-Path $devData) {
+    Write-Host "  注意: 开发数据目录 $devData 在构建目录内 —— 手动清理 app\build 会连它一起删!" -ForegroundColor Yellow
+    $backups = Join-Path $devData 'backups'
+    if (Test-Path $backups) {
+        $latest = Get-ChildItem $backups -Filter 'auto-*.zip' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($latest) { Write-Host "  最近自动备份: $($latest.FullName) ($($latest.LastWriteTime))" -ForegroundColor Yellow }
+        else { Write-Host "  尚无自动备份(data\backups\ 为空)" -ForegroundColor Yellow }
+    } else {
+        Write-Host "  尚无自动备份(启动一次应用后每 24h 生成到 data\backups\,保留 3 份)" -ForegroundColor Yellow
+    }
+}
 if ($Clean) {
     Step '清理构建缓存 (-Clean)'
     Remove-Item (Join-Path $BuildDir 'CMakeCache.txt') -Force -ErrorAction SilentlyContinue

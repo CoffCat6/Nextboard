@@ -244,6 +244,14 @@ fn build_engine(models: &Path, profile: &str) -> AppResult<crate::ocr::rapid::Ra
     cfg.global.use_rec = true;
     // 与既有 spike/CLI 口径一致(CLI 用 -s 960)。
     cfg.global.max_side_len = 960;
+    // rec 批大小旋钮(A/B 用,见 examples/ocr_bench.rs):默认沿用上游 6。
+    if let Ok(v) = std::env::var("NB_OCR_REC_BATCH") {
+        if let Ok(n) = v.parse::<usize>() {
+            if (1..=32).contains(&n) {
+                cfg.rec.rec_batch_num = n;
+            }
+        }
+    }
     // det 放大上界(两道上闸,见常量说明与 docs/12-ocr-memory-analysis.md)。
     // 这是相对上游的关键加固:上游放大倍数无上界,宽扁截图会把 det 输入
     // 撑到几百万像素,峰值内存 265~340MB。
@@ -407,7 +415,7 @@ pub fn release_session() {
 ///   - 中英混排一体,不区分语言标签;
 ///   - 也**不接** `normalize_cjk_spaces`(它不产生中文字间空格)。
 pub fn recognize_with(
-    rgba: Vec<u8>,
+    rgba: &[u8],
     width: u32,
     height: u32,
     _language: &super::LanguageChoice,
@@ -423,7 +431,7 @@ pub fn recognize_with(
 /// 不再做缩放换算。框与行一一对应靠**同序同长**的引擎契约;
 /// 长度不符时宁可整体丢框(文本照常),也不给错位的框。
 pub fn recognize_with_lines(
-    rgba: Vec<u8>,
+    rgba: &[u8],
     width: u32,
     height: u32,
     _language: &super::LanguageChoice,
@@ -439,8 +447,9 @@ pub fn recognize_with_lines(
 
     let started = Instant::now();
     let (text, boxes) = with_engine(|engine| {
-        // 复用 nbcore 既有的 owned RGBA 缓冲,避免整图拷贝。
-        let input = crate::ocr::rapid::OcrInput::RgbaU8 {
+        // 借用变体直通:引擎只读这份像素(转换发生在 rgba_to_bgr 的单遍处理里),
+        // FFI 边界不再需要整图 to_vec(4K 33MB)。
+        let input = crate::ocr::rapid::OcrInput::RgbaU8Ref {
             width: width as usize,
             height: height as usize,
             data: rgba,

@@ -188,6 +188,13 @@ fn parse_url(url: &str) -> AppResult<Url> {
     })
 }
 
+/// 会话缓存的句柄容器（不持有所有权、不 Drop 关闭 —— 进程级复用）。
+struct CachedSession(*mut core::ffi::c_void);
+
+// SAFETY: WinHTTP 会话句柄本身可跨线程并发使用（WinHTTP 官方线程安全声明），
+// 容器访问时序另由 Mutex 串行化。
+unsafe impl Send for CachedSession {}
+
 /// WinHTTP 句柄的 RAII 包装：非空即有效，`Drop` 时关闭。
 struct WinHttpHandle(*mut core::ffi::c_void);
 
@@ -258,6 +265,8 @@ mod winhttp {
     };
 
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
 
     pub(super) fn send(req: &HttpRequest) -> AppResult<HttpResponse> {
         let url = parse_url(&req.url)?;
@@ -280,6 +289,7 @@ mod winhttp {
         // UA 会出现在代理与服务端日志里,产品名必须对得上(第一代叫 clipboard-plus,
         // 本仓已是 Nextboard;docs/07-auto-update.md D-g)。
         let agent = wide(concat!("nextboard/", env!("CARGO_PKG_VERSION")));
+        let proxy_key = manual.map_or(String::new(), |endpoint| proxy_string(endpoint));
         let proxy_w = manual.map(|endpoint| wide(&proxy_string(endpoint)));
         let bypass_w = bypass.filter(|_| manual.is_some()).map(wide);
         let access_type = match (&manual, req.proxy.as_ref()) {
@@ -287,29 +297,45 @@ mod winhttp {
             (_, Some(ProxyConfig::None)) => WINHTTP_ACCESS_TYPE_NO_PROXY,
             _ => WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
         };
-        let session = {
-            // SAFETY：agent/proxy/bypass 的宽字符串在本作用域内存活且以 NUL 结尾；
-            // bypass 只在 NAMED_PROXY 下才有意义，其余访问类型传空指针。
-            let raw = unsafe {
-                WinHttpOpen(
-                    PCWSTR(agent.as_ptr()),
-                    access_type,
-                    proxy_w
-                        .as_ref()
-                        .map_or(PCWSTR::null(), |text| PCWSTR(text.as_ptr())),
-                    bypass_w
-                        .as_ref()
-                        .map_or(PCWSTR::null(), |text| PCWSTR(text.as_ptr())),
-                    0,
-                )
-            };
-            WinHttpHandle::new(raw, "创建 HTTP 会话")?
+        // 会话按 (访问类型|代理串|绕过列表) **跨请求复用**:WinHTTP 按会话句柄缓存
+        // 连接(keep-alive),每次新开会话 = 每次重做 TCP+TLS 握手(实测多 100~300ms)。
+        // 句柄进程级:显式不关闭(数量按不同代理配置计,有界;OS 在进程退出时回收),
+        // 且 WinHTTP 会话句柄本身可多线程并发使用,故 Mutex 只护 map 结构。
+        let session_key = format!("{}|{proxy_key}|{}", access_type.0, bypass.unwrap_or(""));
+        static SESSIONS: Mutex<Option<HashMap<String, CachedSession>>> = Mutex::new(None);
+        let session_raw = {
+            let mut guard = SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+            let map = guard.get_or_insert_with(HashMap::new);
+            if let Some(existing) = map.get(&session_key) {
+                existing.0
+            } else {
+                // SAFETY：agent/proxy/bypass 的宽字符串在本作用域内存活且以 NUL 结尾；
+                // bypass 只在 NAMED_PROXY 下才有意义，其余访问类型传空指针。
+                let raw = unsafe {
+                    WinHttpOpen(
+                        PCWSTR(agent.as_ptr()),
+                        access_type,
+                        proxy_w
+                            .as_ref()
+                            .map_or(PCWSTR::null(), |text| PCWSTR(text.as_ptr())),
+                        bypass_w
+                            .as_ref()
+                            .map_or(PCWSTR::null(), |text| PCWSTR(text.as_ptr())),
+                        0,
+                    )
+                };
+                if raw.is_null() {
+                    return Err(last_error("创建 HTTP 会话"));
+                }
+                map.insert(session_key, CachedSession(raw));
+                raw
+            }
         };
 
         // 四段超时统一取设置值（解析 / 连接 / 发送 / 接收）
         // SAFETY：session 为有效会话句柄，超时参数为纯数值。
         unsafe {
-            WinHttpSetTimeouts(session.raw(), timeout, timeout, timeout, timeout)
+            WinHttpSetTimeouts(session_raw, timeout, timeout, timeout, timeout)
                 .map_err(|err| AppError::Translate(format!("设置请求超时失败：{err}")))?;
         }
 
@@ -325,7 +351,7 @@ mod winhttp {
         };
         // SAFETY：session 有效；host 宽字符串以 NUL 结尾且在本作用域内存活。
         let connect = {
-            let raw = unsafe { WinHttpConnect(session.raw(), PCWSTR(host.as_ptr()), port, 0) };
+            let raw = unsafe { WinHttpConnect(session_raw, PCWSTR(host.as_ptr()), port, 0) };
             WinHttpHandle::new(raw, "连接服务器")?
         };
 

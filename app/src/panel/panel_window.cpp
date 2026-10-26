@@ -52,8 +52,10 @@ constexpr int SETTINGS_MIN_H = 520;
 constexpr int PANEL_SIZE_SAVE_DELAY_MS = 500;
 } // namespace
 
-PanelWindow::PanelWindow(CoreBridge& core, QWidget* parent)
-    : QWidget(parent, Qt::FramelessWindowHint | Qt::Tool), m_core(core) {
+PanelWindow::PanelWindow(CoreBridge& core, const QJsonObject& startupSettings,
+                         QWidget* parent)
+    : QWidget(parent, Qt::FramelessWindowHint | Qt::Tool), m_core(core),
+      m_startupSettings(startupSettings) {
     setWindowTitle("Nextboard");
     applyModeSize(Mode::List);   // 起始形态=列表(内含初始 resize 与最小尺寸)
     setupUi();
@@ -111,8 +113,14 @@ void PanelWindow::applyTopmost() {
 ///   ② 超出屏幕可用区(用户把外接屏拔了)→ 默认 —— 否则面板会大过当前屏幕,
 ///      底部按钮够不到;
 ///   ③ 小于最小尺寸 → 由 setMinimumSize 兜住(这里不判断,交给 Qt)。
-QSize PanelWindow::preferredPanelSize() const {
-    const QJsonObject resp = m_core.call("get_settings");
+QSize PanelWindow::preferredPanelSize() {
+    // 启动快照优先(构造时注入的启动设置,用一次即弃):合并启动期的
+    // get_settings;此后的模式切换走实时读取 —— 用户可能刚在设置页改过尺寸。
+    const bool haveSnapshot = !m_startupSettings.isEmpty();
+    const QJsonObject resp = haveSnapshot
+                                 ? QJsonObject{{"ok", true}, {"data", m_startupSettings}}
+                                 : m_core.call("get_settings");
+    if (haveSnapshot) m_startupSettings = QJsonObject{};   // 快照一次性:用后转实时读
     const QJsonArray arr = resp.value("ok").toBool()
                                ? resp.value("data").toObject().value("panelSize").toArray()
                                : QJsonArray{};

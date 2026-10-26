@@ -155,15 +155,20 @@ pub struct OcrLineBox {
 /// 纯文本入口 [`recognize_configured`] 保持签名不动,既有调用方零感知。
 /// 返回的 text 与 OcrLineBox 列表按同一顺序一一对应。
 pub fn recognize_configured_lines(
-    rgba: Vec<u8>,
+    rgba: &[u8],
     width: u32,
     height: u32,
     options: &OcrOptions,
 ) -> AppResult<(String, Vec<OcrLineBox>)> {
     match options.backend {
-        Backend::System => {
-            system::recognize_with_lines(rgba, width, height, &options.language, options.preprocess)
-        }
+        // System 后端的预处理原地改写像素,自持字节;RapidOCR 只读,直通借用。
+        Backend::System => system::recognize_with_lines(
+            rgba.to_vec(),
+            width,
+            height,
+            &options.language,
+            options.preprocess,
+        ),
         // RapidOCR 自带 max_side_len,不应用 ocr_scale 放大;中英混排一体,不分语言。
         Backend::RapidOcr => {
             rapid::recognize_with_lines(rgba, width, height, &options.language, options.preprocess)
@@ -176,15 +181,19 @@ pub fn recognize_configured_lines(
 /// 收 **owned** RGBA:内部预处理/转换会原地复用这份缓冲(见 `apply_preprocess` 与
 /// `to_bitmap`),避免整图的多余拷贝;调用方传参后即不再需要该像素。
 pub fn recognize_configured(
-    rgba: Vec<u8>,
+    rgba: &[u8],
     width: u32,
     height: u32,
     options: &OcrOptions,
 ) -> AppResult<String> {
     match options.backend {
-        Backend::System => {
-            system::recognize_with(rgba, width, height, &options.language, options.preprocess)
-        }
+        Backend::System => system::recognize_with(
+            rgba.to_vec(),
+            width,
+            height,
+            &options.language,
+            options.preprocess,
+        ),
         // RapidOCR 自带 max_side_len,不应用 ocr_scale 放大;中英混排一体,不分语言。
         Backend::RapidOcr => {
             rapid::recognize_with(rgba, width, height, &options.language, options.preprocess)

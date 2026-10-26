@@ -324,7 +324,7 @@ pub unsafe extern "C" fn nb_ocr_rgba(
         // 一次推理同时产出文本与行框(图中取字);行框是**可选**字段:
         // 旧宿主只读 text 不受影响,新宿主没有框(如引擎内部契约变化)也能降级成纯文本。
         let (text, lines) =
-            crate::ocr::recognize_configured_lines(bytes.to_vec(), width, height, &options)?;
+            crate::ocr::recognize_configured_lines(bytes, width, height, &options)?;
         Ok(serde_json::json!({ "text": text, "lines": lines }).to_string())
     }))
     .unwrap_or_else(|_| Err(AppError::Panicked("nb_ocr_rgba panic".into())));
@@ -1345,7 +1345,7 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
             let (rgba, width, height) = decode_png_to_rgba(&bytes)?;
             let settings = core.settings()?;
             let text = crate::ocr::recognize_configured(
-                rgba,
+                &rgba,
                 width,
                 height,
                 &crate::ocr::OcrOptions::from_settings(&settings),

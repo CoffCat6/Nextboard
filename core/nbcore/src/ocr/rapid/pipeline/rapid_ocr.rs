@@ -119,12 +119,12 @@ impl RapidOcr {
         })
     }
 
-    pub fn run(&mut self, input: OcrInput, opts: OcrCallOptions) -> Result<OcrOutput> {
+    pub fn run(&mut self, input: OcrInput<'_>, opts: OcrCallOptions) -> Result<OcrOutput> {
         let executor = Arc::clone(&self.executor);
         executor.install(|| self.run_inner(input, opts))
     }
 
-    fn run_inner(&mut self, input: OcrInput, opts: OcrCallOptions) -> Result<OcrOutput> {
+    fn run_inner(&mut self, input: OcrInput<'_>, opts: OcrCallOptions) -> Result<OcrOutput> {
         let e2e_timing = crate::ocr::rapid::diagnostics::timing_start();
         let mut output = OcrOutput::default();
         let switches = self.resolve_run_switches(&opts);
@@ -164,7 +164,7 @@ impl RapidOcr {
         }
     }
 
-    fn prepare_image(&mut self, input: OcrInput, use_det: bool) -> Result<PreparedImage> {
+    fn prepare_image(&mut self, input: OcrInput<'_>, use_det: bool) -> Result<PreparedImage> {
         let ori_img = self.loader.load(input)?;
         let ori_h = ori_img.height();
         let ori_w = ori_img.width();
@@ -530,7 +530,7 @@ impl RapidOcrEngine {
         })
     }
 
-    pub fn run(&mut self, input: OcrInput, options: RunOptions) -> Result<OcrResult> {
+    pub fn run(&mut self, input: OcrInput<'_>, options: RunOptions) -> Result<OcrResult> {
         let out = self.inner.run(input, options)?;
         OcrResult::try_from(out)
     }

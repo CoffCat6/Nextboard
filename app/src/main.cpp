@@ -224,11 +224,12 @@ int main(int argc, char* argv[]) {
     // ~55MB 首帧 / ~101MB 稳态(隐藏态 231MB → 130MB),是唯一"开箱即超预算"的来源
     // (docs/06-memory-optimization.md §1)。设置项或 --hardware 可切回硬件后端。
     // 命令行开关优先级高于设置,便于 A/B 与排障。
-    bool softwareFromSettings = false;
-    {
-        const QJsonObject s = core.call("get_settings").value("data").toObject();
-        softwareFromSettings = s.value("softwareRender").toBool(true);
-    }
+    //
+    // 启动设置快照:渲染后端判定 / QML 主题 / 面板初始尺寸三处共用这一次
+    // get_settings(同一时刻同一内容,此前各读一次 ×3)。后续的模式切换、设置页
+    // 改动仍走实时读取,不受快照影响。
+    const QJsonObject startupSettings = core.call("get_settings").value("data").toObject();
+    const bool softwareFromSettings = startupSettings.value("softwareRender").toBool(true);
     const bool useSoftware = hardwareBackend ? false : (softwareBackend || softwareFromSettings);
     if (useSoftware) {
         QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
@@ -254,9 +255,9 @@ int main(int argc, char* argv[]) {
             break;
         }
     }
-    nb::setupQmlEnvironment();
+    nb::setupQmlEnvironment(startupSettings);
     nb::logMemory("qml-env");      // + Qt Quick Controls 风格与全局字体
-    nb::PanelWindow panel(core);
+    nb::PanelWindow panel(core, startupSettings);
     nb::logMemory("panel-built");  // + 主面板 QQuickWidget 与整棵 QML 树(含列表)
     nb::qmlAttachPanel(&panel);
     if (startHidden) {

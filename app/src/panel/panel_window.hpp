@@ -42,7 +42,9 @@ public:
     /// - `ScreenCenter`:居中于光标所在屏(托盘菜单等"人在别处"的入口用)。
     enum class Orientation { AtCursor, ScreenCenter };
 
-    explicit PanelWindow(CoreBridge& core, QWidget* parent = nullptr);
+    explicit PanelWindow(CoreBridge& core,
+                         const QJsonObject& startupSettings = {},
+                         QWidget* parent = nullptr);
     ~PanelWindow() override;
 
     /// 显示在**光标处**(以光标为窗口中心,夹回屏幕可用区)并前置
@@ -194,6 +196,8 @@ private:
     void setupUi();
     /// 验收模式实例标记(main.cpp 在构建 PanelWindow 前置位)。
     bool m_acceptanceMode = s_acceptanceMode;
+    /// 启动设置快照(构造注入,preferredPanelSize 首次调用消费后清空)。
+    QJsonObject m_startupSettings;
     static inline bool s_acceptanceMode = false;
     /// 切换形态(含尺寸/下限调整、翻译/设置页的"停留"抑制)。
     void setMode(Mode mode);
@@ -207,7 +211,9 @@ private:
     void applyModeSize(Mode mode);
     /// 从 settings.panelSize 读回用户上次调过的列表尺寸;无记录/非法/放不下时
     /// 各自回退(见实现处注释),不阻塞启动。
-    QSize preferredPanelSize() const;
+    /// 面板初始尺寸:优先用**启动快照**(构造时注入,合并启动期 get_settings),
+    /// 用后即弃;之后的模式切换读实时设置(用户可能刚在设置页改过尺寸)。
+    QSize preferredPanelSize();
     /// 把当前列表尺寸写回 settings.panelSize。只在**用户改过尺寸**时调用
     /// (无边框窗口的边缘缩放会触发 resizeEvent,鼠标拖动时每秒几十次 —— 必须在
     /// 松手后再存,否则是往 sqlite 里灌高频写)。

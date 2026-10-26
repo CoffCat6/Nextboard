@@ -27,7 +27,10 @@ static ClipEntryModel* s_entries = nullptr;
 
 ClipEntryModel* entryModelInstance() { return s_entries; }
 
-void setupQmlEnvironment() {
+void setupQmlEnvironment(const QJsonObject& startupSettings) {
+    // startupSettings:main 早期读好的启动设置快照,主题从这里取 —— 省掉
+    // 启动期第二次同步 get_settings(见 main.cpp 的快照注释)。
+
     // ⚠️ 字体必须**最先**装,且必须在 QQuickStyle 之前:
     //   ① 缺字回退替换表要在任何 QFont 解析前生效(QFont 文档:替换后需重建
     //      QFont 才生效),晚一步装,已解析过的控件字体仍是旧的;
@@ -73,7 +76,7 @@ void setupQmlEnvironment() {
     // 按 settings.theme 应用一次(QPalette + Theme 单例),并跟随系统配色变化
     // (仅 theme=system 会真正改变)
     CoreFacade& facade = CoreFacade::instance();
-    facade.refreshThemeFromSettings();
+    facade.refreshThemeFromSettings(startupSettings);
     QObject::connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged,
                      &facade, &CoreFacade::reapplyTheme);
 }

@@ -58,6 +58,8 @@ public:
 
     /// 启动时按 settings.theme 应用一次。
     void refreshThemeFromSettings();
+    /// 重载:直接给一份**已读好的设置**(启动快照),省一次同步 get_settings。
+    void refreshThemeFromSettings(const QJsonObject& known);
 
     /// 系统配色变化时重新解析(仅 theme=system 会真正改变)。
     void reapplyTheme() { applyTheme(m_themeMode); }

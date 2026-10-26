@@ -52,12 +52,9 @@ Item {
     }
 
     function saveTargetLang(code) {
-        const resp = Core.call("get_settings")
-        if (!resp.ok) return
-        const s = resp.data
-        if (s.translateTargetLang === code) return
-        s.translateTargetLang = code
-        Core.call("save_settings", s)
+        // save_settings 在 core 侧就是**字段级合并**(以当前设置为底,请求键覆盖):
+        // 只带目标键一次调用即可,无需先 get_settings 拉全量再回写(两次 FFI → 一次)。
+        Core.call("save_settings", { translateTargetLang: code })
     }
 
     function reset() {

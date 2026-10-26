@@ -255,7 +255,12 @@ impl Default for RecognizerConfig {
         Self {
             model: ModelConfig::default(),
             runtime: RuntimeConfig::default(),
-            rec_batch_num: 6,
+            // 6 → 8(A/B 实测 2026-10-26,examples/ocr_bench.rs,4K 密集文本
+            // 28 行):6 中位 2.386s vs 8 中位 2.204s(-7.6%),10 回落至
+            // 2.270s(张量按批内最宽 padding,再大浪费)。⚠️ 批组变化会改变
+            // padding 宽度,个别边缘字符识别有 ~0.2% 的微小差异 —— 在意
+            // 基线指纹可用 NB_OCR_REC_BATCH 环境变量回退 6。
+            rec_batch_num: 8,
             rec_img_shape: [3, 48, 320],
             rec_width_alignment: 32,
             model_store_dir: None,

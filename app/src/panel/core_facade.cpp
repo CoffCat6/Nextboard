@@ -145,6 +145,10 @@ void CoreFacade::refreshThemeFromSettings() {
     applyTheme(mode);
 }
 
+void CoreFacade::refreshThemeFromSettings(const QJsonObject& known) {
+    applyTheme(known.value("theme").toString(QStringLiteral("system")));
+}
+
 namespace {
 
 /// nbcore JSON 响应 → QVariant(嵌套 object/array 递归转换)。

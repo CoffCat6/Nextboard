@@ -8,6 +8,8 @@
 // - CoreFacade::clipChanged 的发射源是 PanelWindow::nativeEvent(见下 qmlAttach)。
 #pragma once
 
+#include <QJsonObject>
+
 class QObject;
 class QQuickWidget;
 class QBoxLayout;
@@ -23,7 +25,7 @@ class ClipEntryModel;
 ClipEntryModel* entryModelInstance();
 
 /// 在 QApplication 之后、PanelWindow 创建前调用一次。
-void setupQmlEnvironment();
+void setupQmlEnvironment(const QJsonObject& startupSettings = {});
 
 /// 面板创建后接线:nbcore 通知 → CoreFacade 信号(线程安全,直连同线程)。
 void qmlAttachPanel(PanelWindow* panel);
