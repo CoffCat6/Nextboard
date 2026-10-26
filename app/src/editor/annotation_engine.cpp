@@ -321,22 +321,7 @@ QPainterPath AnnotationEngine::strokePath() const {
     return path;
 }
 
-QGraphicsItem* AnnotationEngine::buildDragItem() const {
-    const QRectF rect = QRectF(m_start, m_current).normalized();
-    if (m_tool == EditorTool::Line) {
-        auto* item = new QGraphicsLineItem(QLineF(m_start, m_current));
-        item->setPen(QPen(m_color, m_size, Qt::SolidLine, Qt::RoundCap));
-        return item;
-    }
-    if (m_tool == EditorTool::Rect || m_tool == EditorTool::Ellipse) {
-        // 两者同为 QAbstractGraphicsShapeItem 子类,统一设置画笔/画刷
-        auto* item = m_tool == EditorTool::Rect
-                         ? static_cast<QAbstractGraphicsShapeItem*>(new QGraphicsRectItem(rect))
-                         : static_cast<QAbstractGraphicsShapeItem*>(new QGraphicsEllipseItem(rect));
-        item->setPen(QPen(m_color, m_size));
-        item->setBrush(Qt::NoBrush);
-        return item;
-    }
+QPainterPath AnnotationEngine::dragPath() const {
     // 箭头:主干 + 两条箭头边
     QPainterPath path;
     path.moveTo(m_start);
@@ -353,7 +338,26 @@ QGraphicsItem* AnnotationEngine::buildDragItem() const {
             path.lineTo(m_current + QPointF(std::cos(a), std::sin(a)) * head);
         }
     }
-    auto* item = new QGraphicsPathItem(path);
+    return path;
+}
+
+QGraphicsItem* AnnotationEngine::buildDragItem() const {
+    const QRectF rect = QRectF(m_start, m_current).normalized();
+    if (m_tool == EditorTool::Line) {
+        auto* item = new QGraphicsLineItem(QLineF(m_start, m_current));
+        item->setPen(QPen(m_color, m_size, Qt::SolidLine, Qt::RoundCap));
+        return item;
+    }
+    if (m_tool == EditorTool::Rect || m_tool == EditorTool::Ellipse) {
+        // 两者同为 QAbstractGraphicsShapeItem 子类,统一设置画笔/画刷
+        auto* item = m_tool == EditorTool::Rect
+                         ? static_cast<QAbstractGraphicsShapeItem*>(new QGraphicsRectItem(rect))
+                         : static_cast<QAbstractGraphicsShapeItem*>(new QGraphicsEllipseItem(rect));
+        item->setPen(QPen(m_color, m_size));
+        item->setBrush(Qt::NoBrush);
+        return item;
+    }
+    auto* item = new QGraphicsPathItem(dragPath());
     item->setPen(QPen(m_color, m_size, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     item->setBrush(Qt::NoBrush);
     return item;
@@ -402,6 +406,43 @@ void AnnotationEngine::clearPreview() {
     m_scene->removeItem(m_preview);
     delete m_preview;
     m_preview = nullptr;
+}
+
+void AnnotationEngine::refreshPreview() {
+    // 类型匹配时只更新几何(样式在拖拽中途不变,建时已设):省掉每帧
+    // delete + new + 场景索引重排。工具只在拖拽间隙切换,拖拽中恒走快路。
+    if (m_preview) {
+        if (m_tool == EditorTool::Line) {
+            if (auto* line = dynamic_cast<QGraphicsLineItem*>(m_preview)) {
+                line->setLine(QLineF(m_start, m_current));
+                return;
+            }
+        } else if (m_tool == EditorTool::Rect || m_tool == EditorTool::Ellipse) {
+            const QRectF rect = QRectF(m_start, m_current).normalized();
+            if (m_tool == EditorTool::Rect) {
+                if (auto* r = dynamic_cast<QGraphicsRectItem*>(m_preview)) {
+                    r->setRect(rect);
+                    return;
+                }
+            } else if (auto* e = dynamic_cast<QGraphicsEllipseItem*>(m_preview)) {
+                e->setRect(rect);
+                return;
+            }
+        } else if (auto* path = dynamic_cast<QGraphicsPathItem*>(m_preview)) {
+            if (m_tool == EditorTool::Arrow) {
+                path->setPath(dragPath());
+                return;
+            }
+            if (m_tool == EditorTool::Pen || m_tool == EditorTool::Mosaic ||
+                m_tool == EditorTool::Blur) {
+                path->setPath(strokePath());
+                return;
+            }
+        }
+    }
+    clearPreview();
+    m_preview = buildPreviewItem();
+    if (m_preview) m_scene->addItem(m_preview);
 }
 
 void AnnotationEngine::onCanvasPressed(const QPointF& scenePos) {
@@ -501,9 +542,7 @@ void AnnotationEngine::onCanvasMoved(const QPointF& scenePos) {
     if (m_tool == EditorTool::Pen || m_tool == EditorTool::Mosaic ||
         m_tool == EditorTool::Blur)
         m_stroke.append(scenePos);
-    clearPreview();
-    m_preview = buildPreviewItem();
-    if (m_preview) m_scene->addItem(m_preview);
+    refreshPreview();
 }
 
 void AnnotationEngine::onCanvasReleased(const QPointF& scenePos) {

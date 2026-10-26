@@ -1,5 +1,6 @@
 #include "editor/tool_icons.hpp"
 
+#include <QHash>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
@@ -308,10 +309,18 @@ QIcon barIcon(BarIcon icon, int size, const QColor& ink) {
 }
 
 QCursor crosshairCursor(bool dark, qreal dpr) {
+    // (dark, dpr) → 光标 缓存:光标与鼠标位置无关,但编辑器的 syncCanvasState
+    // 在**每次 mouseMove**都来取(要压回被 QGraphicsView 冲掉的视口光标),
+    // 重复光栅化 + 重建 GDI 光标句柄是纯浪费。两处调用(editor/capture)都在
+    // GUI 线程,静态缓存无需加锁。
+    static QHash<quint64, QCursor> cache;
+    const qreal k = dpr > 0.1 ? dpr : 1.0;
+    const quint64 key = (quint64(dark) << 32) | quint64(qRound(k * 1000.0));
+    if (const auto it = cache.constFind(key); it != cache.constEnd()) return *it;
+
     // 逻辑尺寸 24:比 Qt 内置十字(约 16)略大,容错更好;
     // 四条臂在中心留 4px 空隙,不遮住落点本身。
     constexpr int kLogical = 24;
-    const qreal k = dpr > 0.1 ? dpr : 1.0;
     const int px = qRound(kLogical * k);
     QPixmap pm(px, px);
     pm.setDevicePixelRatio(k);   // 物理像素画布 + 声明 DPR
@@ -356,8 +365,10 @@ QCursor crosshairCursor(bool dark, qreal dpr) {
     p.drawEllipse(QPointF(c, c), 0.9, 0.9);
 
     p.end();
-    // 热点 = 正中心(与 drawArms 的对称中心一致)
-    return QCursor(pm, kLogical / 2, kLogical / 2);
+    // 热点 = 正中心(与 drawArms 的对称中心一致);入缓存供后续 mouseMove 直接取
+    const QCursor cur(pm, kLogical / 2, kLogical / 2);
+    cache.insert(key, cur);
+    return cur;
 }
 
 QIcon strokeIcon(int width, int size, const QColor& ink) {

@@ -17,7 +17,7 @@
 //!   - RapidOCR 中英混排一体,**不区分语言**,`ocr_language` 对它无效。
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, Once, OnceLock};
+use std::sync::{Condvar, Mutex, Once, OnceLock};
 use std::time::{Duration, Instant};
 
 use log::info;
@@ -142,6 +142,75 @@ static SESSION: Mutex<Session> = Mutex::new(Session {
     engine: None,
     last_used: None,
 });
+
+/// ---- 空闲销毁看门狗(D7)----
+///
+/// 此前的空闲检查只发生在**下一次** `with_engine` 开头:IDLE60 档空闲期引擎
+/// (~40MB)从不回落,过期后的首次识别还要先付一遍销毁。看门狗线程懒启动、
+/// 常驻但挂在 Condvar 上(无任务时零开销),到点核对 `last_used` 仍空闲满 TTL
+/// 才释放 —— 期间若又有识别,`last_used` 变新,本次跳过(那次使用已自行 arm)。
+static IDLE_DEADLINE: Mutex<Option<Instant>> = Mutex::new(None);
+static IDLE_KICK: Condvar = Condvar::new();
+static IDLE_WATCHDOG: Once = Once::new();
+
+fn idle_deadline_lock() -> std::sync::MutexGuard<'static, Option<Instant>> {
+    IDLE_DEADLINE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// 看门狗到点:仅当引擎仍在且空闲已满 TTL 才释放。
+fn reap_idle_engine() {
+    let Ok(mut session) = SESSION.lock() else { return };
+    if session.engine.is_some()
+        && session.last_used.is_some_and(|t| t.elapsed() >= IDLE_TTL)
+    {
+        info!("OCR session 空闲超过 {:?}(看门狗销毁)", IDLE_TTL);
+        session.engine = None;
+        session.last_used = None;
+    }
+}
+
+/// 安排/取消空闲销毁任务。`ttl=None`(resident,永不销毁)与 `Some(ZERO)`
+/// (ephemeral,用完即毁)都无需安排;仅 IDLE60 档在每次用完后 arm。
+fn arm_idle_reap(ttl: Option<Duration>) {
+    if ttl != Some(IDLE_TTL) {
+        if idle_deadline_lock().take().is_some() {
+            IDLE_KICK.notify_all();
+        }
+        return;
+    }
+    IDLE_WATCHDOG.call_once(|| {
+        let _ = std::thread::Builder::new()
+            .name("ocr-idle-watch".into())
+            .spawn(|| loop {
+                let mut deadline = idle_deadline_lock();
+                match *deadline {
+                    Some(at) if Instant::now() < at => {
+                        // 等到到期时刻,或被新 arm 提前唤醒(重读最新截止)。
+                        let (g, _) = IDLE_KICK
+                            .wait_timeout(deadline, at - Instant::now())
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        deadline = g;
+                    }
+                    Some(_) => {
+                        // 到期:持锁取走任务(此刻不可能有新 arm 插入),再拿 SESSION 锁。
+                        deadline.take();
+                        drop(deadline);
+                        reap_idle_engine();
+                    }
+                    None => {
+                        // 无任务:挂起等下一次 arm,不空转。
+                        deadline = IDLE_KICK
+                            .wait(deadline)
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    }
+                }
+            });
+    });
+    *idle_deadline_lock() = Some(Instant::now() + IDLE_TTL);
+    IDLE_KICK.notify_all();
+}
 
 /// 解析安装目录(exe 同级)。
 ///
@@ -292,11 +361,17 @@ fn with_engine<T>(f: impl FnOnce(&mut crate::ocr::rapid::RapidOcr) -> AppResult<
         session.engine = None;
         session.last_used = None;
     }
+    // 空闲档安排看门狗到点销毁(此前只在下次调用开头检查,空闲期内存从不回落)。
+    arm_idle_reap(ttl);
     out
 }
 
 /// 显式释放 session(设置变更/退出时调用;空闲销毁是兜底,不必依赖它)。
 pub fn release_session() {
+    // 引擎已显式释放,取消挂着的看门狗任务(避免它到点空查一次)。
+    if idle_deadline_lock().take().is_some() {
+        IDLE_KICK.notify_all();
+    }
     if let Ok(mut session) = SESSION.lock() {
         if session.engine.is_some() {
             info!("OCR session 已显式释放");

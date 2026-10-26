@@ -316,10 +316,12 @@ pub fn append_frame(session: &str, rgba: Vec<u8>, width: u32, height: u32) -> Ap
                                     state,
                                     fingerprint_frame(&rgba[src_start..src_end], width, take),
                                 );
+                                // 截断分支不走 commit_frame:整帧仍要留作互相关兜底的参照。
+                                state.last_frame = rgba;
                             } else {
-                                commit_frame(state, next_fp.clone(), rgba.clone(), width, height);
+                                // commit_frame 内部已把 rgba 收进 last_frame,无需再赋值。
+                                commit_frame(state, next_fp, rgba, width, height);
                             }
-                            state.last_frame = rgba;
                             return Ok(StitchResult {
                                 matched: true,
                                 shift_px: take,
@@ -355,7 +357,7 @@ pub fn append_frame(session: &str, rgba: Vec<u8>, width: u32, height: u32) -> Ap
             state.pending_gap = true;
             // 以本帧为新基线(否则后续全部失配),但**保留**更老的基线:
             // 下一帧若能对上上一帧,就能继续拼,不必等用户重新滚。
-            commit_frame(state, next_fp.clone(), rgba.clone(), width, height);
+            commit_frame(state, next_fp, rgba, width, height);
             return Ok(StitchResult {
                 matched: false,
                 shift_px: 0,
@@ -390,7 +392,7 @@ pub fn append_frame(session: &str, rgba: Vec<u8>, width: u32, height: u32) -> Ap
                 .map(|b| rows_all_equal(b, &next_fp))
                 .unwrap_or(false);
             if m.k == 0 && identical {
-                commit_frame(state, next_fp.clone(), rgba.clone(), width, height);
+                commit_frame(state, next_fp, rgba, width, height);
                 return Ok(StitchResult {
                     matched: false,
                     shift_px: 0,
@@ -404,7 +406,7 @@ pub fn append_frame(session: &str, rgba: Vec<u8>, width: u32, height: u32) -> Ap
             // 首行对齐但内容已变(动画/重绘):不是「没滚动」,按失配处理
             state.gaps = state.gaps.saturating_add(1);
             state.pending_gap = true;
-            commit_frame(state, next_fp.clone(), rgba.clone(), width, height);
+            commit_frame(state, next_fp, rgba, width, height);
             return Ok(StitchResult {
                 matched: false,
                 shift_px: 0,
@@ -431,7 +433,7 @@ pub fn append_frame(session: &str, rgba: Vec<u8>, width: u32, height: u32) -> Ap
 
         let room = state.max_height.saturating_sub(state.height);
         if room <= band_rows {
-            commit_frame(state, next_fp.clone(), rgba.clone(), width, height);
+            commit_frame(state, next_fp, rgba, width, height);
             return Ok(StitchResult {
                 matched: false,
                 shift_px: 0,
@@ -452,7 +454,7 @@ pub fn append_frame(session: &str, rgba: Vec<u8>, width: u32, height: u32) -> Ap
         let room_left = state.max_height.saturating_sub(state.height);
         let take = new_rows.min(room_left);
         if take == 0 {
-            commit_frame(state, next_fp.clone(), rgba.clone(), width, height);
+            commit_frame(state, next_fp, rgba, width, height);
             return Ok(StitchResult {
                 matched: false,
                 shift_px: 0,
@@ -479,7 +481,7 @@ pub fn append_frame(session: &str, rgba: Vec<u8>, width: u32, height: u32) -> Ap
             state.baselines.clear();
             push_baseline(state, fingerprint_frame(&rgba[src_start..src_end], width, take));
         } else {
-            commit_frame(state, next_fp.clone(), rgba.clone(), width, height);
+            commit_frame(state, next_fp, rgba, width, height);
         }
 
         Ok(StitchResult {

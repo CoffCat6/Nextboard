@@ -163,10 +163,15 @@ private:
     void pushItem(QGraphicsItem* item, const QString& label);
     qreal badgeRadius() const;
     QPainterPath strokePath() const;
+    /// 箭头路径(主干+两条边),buildDragItem 与预览刷新共用一份几何。
+    QPainterPath dragPath() const;
     QGraphicsItem* buildDragItem() const;
     QGraphicsItem* buildPreviewItem() const;
     QGraphicsItem* buildFinalItem() const;
     void clearPreview();
+    /// 预览图元就地刷新(几何随 m_start/m_current 变);类型不符才删建。
+    /// mouseMove 每帧删建图元 + 重排场景索引是纯浪费(60-125Hz 拖笔画)。
+    void refreshPreview();
 
     // ---- 构图类操作的内部支撑(实现见 .cpp)----
     class CropOverlayItem;                       // 裁剪框覆盖层(遮罩/手柄/三分线)

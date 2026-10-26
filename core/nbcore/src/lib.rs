@@ -36,16 +36,24 @@ pub fn init_logging(data_dir: &std::path::Path) {
         .open(&file_path);
     if let Ok(file) = file {
         let _ = log::set_boxed_logger(Box::new(SimpleFileLogger {
-            file: std::sync::Mutex::new(file),
+            file: std::sync::Mutex::new(std::io::BufWriter::with_capacity(
+                LOG_BUF_BYTES,
+                file,
+            )),
         }));
         log::set_max_level(log::LevelFilter::Info);
     }
 }
 
 /// 极简文件日志器(单文件追加;排障用,不追求轮转)。
+///
+/// 带 8KB BufWriter:Info 级日志(剪贴板事件/待办 tick)不再每条一次 write
+/// 系统调用;Warn 及以上立即 flush,崩溃时诊断信息不丢。
 struct SimpleFileLogger {
-    file: std::sync::Mutex<std::fs::File>,
+    file: std::sync::Mutex<std::io::BufWriter<std::fs::File>>,
 }
+
+const LOG_BUF_BYTES: usize = 8 * 1024;
 
 impl log::Log for SimpleFileLogger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
@@ -65,6 +73,9 @@ impl log::Log for SimpleFileLogger {
                 record.level(),
                 record.args()
             );
+            if record.level() <= log::Level::Warn {
+                let _ = f.flush();
+            }
         }
     }
 

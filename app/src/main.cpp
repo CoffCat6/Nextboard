@@ -32,7 +32,10 @@ static void fileMessageHandler(QtMsgType type, const QMessageLogContext& ctx, co
         : type == QtWarningMsg ? "WARN" : type == QtCriticalMsg || type == QtFatalMsg ? "CRIT" : "?";
     if (log.isOpen()) {
         log.write(QStringLiteral("[%1] %2\n").arg(level, msg).toUtf8());
-        log.flush();
+        // 仅 Warning 及以上才强制刷盘(flush 含 _commit 同步盘);Debug/Info 交给
+        // OS 页缓存。注意 QtMsgType 枚举序(Info=4 排在 Warning 之后),不可用 >= 比较。
+        // Info/Debug 不刷盘的代价:进程被强杀时尾部普通日志可能丢,崩溃诊断(WARN+)不受影响。
+        if (type == QtWarningMsg || type == QtCriticalMsg || type == QtFatalMsg) log.flush();
     }
 }
 
@@ -410,8 +413,16 @@ int main(int argc, char* argv[]) {
     //    而 CoreFacade::clipChanged 只在宿主 C++ 主动调 notifyClipChanged() 的
     //    两处(截图入库、编辑器提交)发,面板内的编辑根本不经过它。
     //    接错信号的症状正是"便签永远停在打开那一刻的内容"。
-    QObject::connect(&panel, &nb::PanelWindow::clipChanged, &panel,
+    // 同步本身 200ms 去抖:clipChanged 由**所有** sqlite 写入触发(含每一次
+    // 剪贴板入库),连续复制粘贴时每次复制都会全量拉一次 todo_note_list FFI。
+    // syncFromCore 有"无便签早退/内容不变不回灌"兜底,这里只合并突发。
+    auto* noteSyncDebounce = new QTimer(&panel);
+    noteSyncDebounce->setSingleShot(true);
+    noteSyncDebounce->setInterval(200);
+    QObject::connect(noteSyncDebounce, &QTimer::timeout, &panel,
                      [] { nb::NoteRegistry::instance().syncFromCore(); });
+    QObject::connect(&panel, &nb::PanelWindow::clipChanged, &panel,
+                     [noteSyncDebounce] { noteSyncDebounce->start(); });
     // 屏幕增删/分辨率变化:全部重夹回各自可用区(拔副屏后不留虚空的窗口)
     QObject::connect(qApp, &QGuiApplication::screenAdded, &panel,
                      [] { nb::NoteRegistry::instance().reclampAll(); });

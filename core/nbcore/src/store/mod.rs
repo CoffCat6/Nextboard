@@ -57,6 +57,9 @@ pub fn open(path: &Path) -> AppResult<rusqlite::Connection> {
     let mut conn = rusqlite::Connection::open(path)?;
     // journal_mode 会返回新模式的行,pragma_update 不接受返回行,故用 query_row
     let _mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+    // WAL 默认 synchronous=FULL,每个事务 commit 都 fsync;NORMAL 在 WAL 下断电
+    // 只丢最后几笔事务、不损坏库 —— 剪贴板历史完全可接受,换掉每次入库的同步盘。
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
     migrate(&mut conn)?;
     Ok(conn)
 }
