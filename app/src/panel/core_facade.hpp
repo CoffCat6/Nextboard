@@ -101,6 +101,10 @@ public:
     // ---- 数据备份与导出(慢 I/O:线程池执行,完成发 backupFinished/exportFinished) ----
     /// 创建备份 zip:path 由 QFileDialog 提供,nbcore 内 checkpoint 后打包。
     Q_INVOKABLE void backupCreate(const QString& path);
+    /// 启动自动备份(数据安全,2026-10-26 数据目录事故后加):距 `<数据目录>/
+    /// backups/` 里最新一份 auto-*.zip 超过 24h 时,后台补一份全量备份并只保留
+    /// 最近 3 份。静默失败(只进日志);宿主启动时调用一次。
+    void maybeAutoBackup();
     /// 导出全部条目为单文件。format: "markdown"(默认,图片 base64 内嵌)/
     /// "json" / "csv"(结构化,图片只记 blob 相对路径)。未知格式由核心报错。
     Q_INVOKABLE void exportEntries(const QString& path, const QString& format = QStringLiteral("markdown"));

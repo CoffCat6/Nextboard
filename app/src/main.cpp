@@ -471,6 +471,9 @@ int main(int argc, char* argv[]) {
     // 启动恢复:只为 todo_note.visible=1 的行建窗(visible=0 是"几何记忆")。
     // ⚠️ 必须在 setNotifyHwnd 之后:恢复时会读库,而库通知目标此刻才就位。
     nb::NoteRegistry::instance().restoreAll();
+    // 启动自动备份(24h 节流,后台线程,保留最近 3 份):静默数据安全网。
+    // 放在恢复之后:此时核心就绪、且启动高峰的写库(恢复/迁移)已落定。
+    nb::CoreFacade::instance().maybeAutoBackup();
     // 面板改动(改标题/备注/完成/删除)→ 便签同步。
     //
     // ⚠️ 必须接 **PanelWindow::clipChanged**,不是 CoreFacade::clipChanged

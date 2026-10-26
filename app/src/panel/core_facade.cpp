@@ -4,6 +4,7 @@
 
 #include "capture/capture_session.hpp"
 #include "editor/editor_window.hpp"
+#include "host/app_paths.hpp"
 #include "host/auto_paste.hpp"
 #include "host/auto_start.hpp"
 #include "host/core_bridge.hpp"
@@ -16,8 +17,10 @@
 #include <QJsonArray>
 #include <QJsonValue>
 #include <QColor>
+#include <QDateTime>
 #include <QDir>
 #include <QDesktopServices>
+#include <QFile>
 #include <QFileInfo>
 #include <QUrl>
 #include <QProcess>
@@ -284,6 +287,44 @@ void CoreFacade::backupCreate(const QString& path) {
     job->setAutoDelete(true);
     job->onDone = [this](const QJsonObject& resp) {
         emit backupFinished(jsonToVariant(resp).toMap());
+    };
+    QThreadPool::globalInstance()->start(job);
+}
+
+void CoreFacade::maybeAutoBackup() {
+    // 节流:24h 内备过就不重复。空库(主库刚初始化,不足 8KB)不值得备。
+    const QDir backupDir(nb::appDataDir() + QStringLiteral("/backups"));
+    const QStringList stamps = backupDir.entryList({QStringLiteral("auto-*.zip")},
+                                                   QDir::Files, QDir::Time);
+    if (!stamps.isEmpty()) {
+        const QFileInfo newest(backupDir.filePath(stamps.first()));
+        if (newest.lastModified().msecsTo(QDateTime::currentDateTime())
+            < 24LL * 3600 * 1000) return;
+    }
+    const QFileInfo dbFile(nb::appDataDir() + QStringLiteral("/clipboard.db"));
+    if (!dbFile.exists() || dbFile.size() < 8 * 1024) return;
+
+    const QString target = backupDir.filePath(
+        QStringLiteral("auto-%1.zip")
+            .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"))));
+    auto* job = new AsyncCall;
+    job->method = "backup_create";
+    job->req = QJsonObject{{"path", target}};
+    job->setAutoDelete(true);
+    job->onDone = [target, backupDir](const QJsonObject& resp) {
+        if (!resp.value("ok").toBool()) {
+            qWarning() << "auto-backup 失败(不影响使用):"
+                       << resp.value("error").toObject().value("message").toString();
+            return;
+        }
+        // 只保留最近 3 份 auto-*(手动备份的 *.zip 不在清理范围)。
+        const QStringList stamps = backupDir.entryList({QStringLiteral("auto-*.zip")},
+                                                       QDir::Files, QDir::Time);
+        for (int i = 3; i < stamps.size(); ++i)
+            QFile::remove(backupDir.filePath(stamps.at(i)));
+        qInfo().nospace() << "auto-backup 完成: " << target << " ("
+                          << resp.value("data").toObject().value("zipBytes").toInt()
+                          << " bytes)";
     };
     QThreadPool::globalInstance()->start(job);
 }
