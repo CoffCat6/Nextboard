@@ -437,6 +437,10 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured) {
     // 而底板不透明度却记得住" —— 口吻不一致,这里补齐。
     // ⚠️ data 在这段之后还可能被别的分支用,这里只读不消费。
     const int idleSecs = qBound(0, data.value("overlayIdleSecs").toInt(60), 3600);
+    // 多屏遮罩范围(settings captureAllScreens):默认每屏都建(历史行为);关闭后
+    // 只对**光标所在屏**建遮罩 —— 省 N-1 次全屏抓取与 N-1 份整屏冻结底图的会话期
+    // 常驻(三屏 4K 约 100MB)。与全屏意图只抓光标屏是同一取向(docs/06)。
+    const bool allScreens = data.value("captureAllScreens").toBool(true);
     if (idleSecs > 0 && !g_idleTimer) {
         g_idleTimer = new QTimer(qApp);
         g_idleTimer->setSingleShot(true);
@@ -447,6 +451,9 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured) {
     }
     for (int i = 0; i < screens.size(); ++i) {
         QScreen* screen = screens[i];
+        if (!allScreens && !screen->geometry().contains(QCursor::pos())) {
+            continue;   // 仅光标所在屏:其余屏不抓取、不建遮罩
+        }
         // 按**设备名**取本屏底图(见上方 byName 注释:索引在两端口径不同)
         const QImage frozen = frozenFor(screen, i);
         if (frozen.isNull()) {

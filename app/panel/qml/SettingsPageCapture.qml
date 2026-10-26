@@ -20,6 +20,8 @@ Item {
         // 在新模型里对应 toolbar(浮条带标注),故只要 autoConfirm=false 就落 toolbar。
         regionExitCombo.currentIndex = s.regionAutoConfirm === false ? 1 : 0
         rightClickCancelCheck.checked = s.regionRightClickCancel === true
+        // 多屏遮罩范围:缺失(true=历史行为)时不等价于 false,须显式区分
+        allScreensCheck.checked = s.captureAllScreens !== false
         captureDelay.value = s.captureDelaySecs > 0 ? s.captureDelaySecs : 3
         // 长截图(docs/19 §6):上限与重叠门槛都来自 core,兜底值必须与
         // settings.rs 的默认一致(30000 / 3),否则"显示与行为分叉"。
@@ -50,6 +52,7 @@ Item {
         // regionSkipEditor 已废弃(§18.5):不写它,让它保持读入时的原值(见 core 注释)。
         s.regionAutoConfirm = regionExitCombo.currentIndex === 0
         s.regionRightClickCancel = rightClickCancelCheck.checked
+        s.captureAllScreens = allScreensCheck.checked
         s.captureDelaySecs = captureDelay.value
         s.stitchMaxHeight = stitchMaxHeight.value
         s.stitchOverlapRatio = stitchOverlap.value
@@ -94,6 +97,11 @@ Item {
             ReadableCheckBox {
                 id: rightClickCancelCheck
                 text: "框选时鼠标右键取消截图"
+                onClicked: view.scheduleSave()
+            }
+            ReadableCheckBox {
+                id: allScreensCheck
+                text: "多屏截图时每块屏都建立选区(关闭则仅光标所在屏,更省内存)"
                 onClicked: view.scheduleSave()
             }
             // 延时截图(F16):托盘「延时截图」入口的等待秒数

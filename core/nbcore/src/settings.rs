@@ -119,6 +119,10 @@ pub struct Settings {
     /// 取代原先 `regionAutoConfirm` 与 `regionSkipEditor` 两个布尔量（§18.4）：
     /// 两者叠加出四种组合，其中「松开即确认 + 进编辑器」自相矛盾，且无法向用户解释。
     pub region_auto_confirm: bool,
+    /// 多屏截图是否为**每块屏**都建遮罩(默认 true = 历史行为)。关闭后只对
+    /// **光标所在屏**建遮罩:多屏机器上省 N-1 次全屏抓取与 N-1 份整屏冻结底图
+    /// 的会话期常驻(三屏 4K 约 100MB),适合"框选永远只在一块屏内"的用户。
+    pub capture_all_screens: bool,
     /// 框选时鼠标右键是否取消本次截图(默认开启;第一代无此项,按用户习惯补)。
     pub region_right_click_cancel: bool,
     /// ⚠️ **已废弃**（§18.5）：编辑器只保留唯一入口 = 右键编辑，框选链路不再有
@@ -521,6 +525,7 @@ impl Default for Settings {
             // 默认"最近复制优先"：复制文字后按热键即贴该文字（关闭第一代的"图片优先"）
             pin_prefer_image: false,
             region_auto_confirm: true,
+            capture_all_screens: true,
             region_right_click_cancel: true,
             capture_bar_alpha: 217,        // 半透档(docs/17 §17.5):默认不挡原图又看得清按钮
             annotation_color: default_annotation_color(),
