@@ -304,6 +304,8 @@ void CoreFacade::maybeAutoBackup() {
     const QFileInfo dbFile(nb::appDataDir() + QStringLiteral("/clipboard.db"));
     if (!dbFile.exists() || dbFile.size() < 8 * 1024) return;
 
+    // nbcore 的 backup_create 不建父目录,首次先补上。
+    if (!backupDir.exists() && !QDir().mkpath(backupDir.absolutePath())) return;
     const QString target = backupDir.filePath(
         QStringLiteral("auto-%1.zip")
             .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"))));
