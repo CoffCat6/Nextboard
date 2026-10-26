@@ -322,6 +322,20 @@ fn rgba_to_bgr_img(rgba: RgbaImage) -> Vec<u8> {
 }
 
 fn rgba_to_bgr(width: usize, height: usize, data: &[u8]) -> Vec<u8> {
+    // 快路径:截图链路的 alpha 恒为 255(宿主不入透明像素)。a=1 时混合结果
+    // 恰为原通道,背景色完全不参与输出 —— 逐像素 f32 混合与背景统计(全图
+    // 第二遍)都纯浪费;4K 图上这两步约 10-30ms/次。先单遍字节扫描判定
+    // (纯读,微秒级),不透明即直走通道重排;有任何透明像素再回原路径。
+    if data.chunks_exact(4).all(|px| px[3] == 255) {
+        let mut out = vec![0_u8; width * height * 3];
+        for (src, dst) in data.chunks_exact(4).zip(out.chunks_exact_mut(3)) {
+            dst[0] = src[2];
+            dst[1] = src[1];
+            dst[2] = src[0];
+        }
+        return out;
+    }
+
     let bg = auto_background_for_rgba(data);
     let mut out = vec![0_u8; width * height * 3];
 

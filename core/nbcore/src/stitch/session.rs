@@ -576,9 +576,8 @@ fn looks_backward(prev: &FrameFingerprint, next: &FrameFingerprint) -> bool {
 
 /// 结束会话并取出拼接结果(PNG 字节)。
 ///
-/// 成功后会话被销毁(无论成功失败,取完即弃):长截图是**一次成型**的产物,
-/// 不支持「取完继续追加」(docs/19 §2.2 N5)。
-pub fn finish_session(session: &str) -> AppResult<Finished> {
+/// 收尾公共段:取走会话并补上未画的警示条(编码/移交前的最后一步)。
+fn finish_take_state(session: &str) -> AppResult<Session> {
     if session.is_empty() {
         return Err(AppError::InvalidInput("长截图会话 id 为空".into()));
     }
@@ -590,18 +589,21 @@ pub fn finish_session(session: &str) -> AppResult<Finished> {
     // 收尾兜底:最后一次失配之后若没再成功吸收,警示条还没画 —— 但那段内容确实
     // 丢了。必须在编码前补上,否则产物是一张"静默缺行"的长图(docs/19 §4.3 禁止)。
     let mut state = state;
-    let mut bands = state.bands;
     if state.pending_gap && state.height > 0 {
         push_gap_band(&mut state);
-        bands = state.bands;
     }
+    Ok(state)
+}
+
+pub fn finish_session(session: &str) -> AppResult<Finished> {
+    let state = finish_take_state(session)?;
     let png = encode_png(&state.rgba, state.width, state.height)?;
     Ok(Finished {
         png,
         width: state.width,
         height: state.height,
         gaps: state.gaps,
-        bands,
+        bands: state.bands,
         monitor: state.monitor,
         region_x: state.region_x,
         region_y: state.region_y,
@@ -623,6 +625,41 @@ pub struct Finished {
     pub region_x: i32,
     pub region_y: i32,
     pub dpr: f32,
+}
+
+/// [`finish_session`] 的**未编码**形态:直接交出拼接 RGBA 缓冲(零拷贝 move)。
+///
+/// 长图成品入库走 RGBA 直通道(`ingest_capture_rgba`)时,整条链路只剩落盘
+/// blob 那一次 PNG 编码 —— 此前"拼完编码 → 宿主解码 → 入库再编码"的两次
+/// 整图编码 + 一次解码与 base64/JSON 往返(128MB 级长图上秒级 CPU、~200MB
+/// 峰值)全部省去。
+pub struct FinishedRaw {
+    /// RGBA8888 紧凑排布,width × height × 4 字节。
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub gaps: u32,
+    pub bands: u32,
+    pub monitor: String,
+    pub region_x: i32,
+    pub region_y: i32,
+    pub dpr: f32,
+}
+
+/// 同 [`finish_session`],产物为原始 RGBA(见 [`FinishedRaw`])。
+pub fn finish_session_rgba(session: &str) -> AppResult<FinishedRaw> {
+    let state = finish_take_state(session)?;
+    Ok(FinishedRaw {
+        rgba: state.rgba,
+        width: state.width,
+        height: state.height,
+        gaps: state.gaps,
+        bands: state.bands,
+        monitor: state.monitor,
+        region_x: state.region_x,
+        region_y: state.region_y,
+        dpr: state.dpr,
+    })
 }
 
 /// 取消会话(释放缓冲)。会话不存在时静默成功(幂等)。

@@ -79,6 +79,8 @@ bool CoreBridge::init(bool /*startHidden*/, QString* error) {
     m_stitchBegin = reinterpret_cast<NbStitchBegin>(resolve("nb_stitch_begin"));
     m_stitchAppend = reinterpret_cast<NbStitchAppend>(resolve("nb_stitch_append"));
     m_stitchFinish = reinterpret_cast<NbStitchFinish>(resolve("nb_stitch_finish"));
+    m_stitchFinishRgba =
+        reinterpret_cast<NbStitchFinishRgba>(resolve("nb_stitch_finish_rgba"));
     m_stitchAbort = reinterpret_cast<NbStitchAbort>(resolve("nb_stitch_abort"));
     // 截图入库的 RGBA 直入通道:同样是**可选**导出 —— 旧核心没有时宿主回退
     // 到 ingest_capture_png(见 hasRgbaIngest),不会因为新宿主配旧 DLL 就崩。
@@ -387,12 +389,37 @@ QJsonObject CoreBridge::stitchAppend(const QString& session, const QImage& frame
 }
 
 bool CoreBridge::stitchFinish(const QString& session, QImage* outPng, QJsonObject* outMeta) {
-    if (!m_stitchFinish || !m_freeString || !m_freeBuffer || !outPng || !outMeta) return false;
+    if ((!m_stitchFinish && !m_stitchFinishRgba) || !m_freeString || !m_freeBuffer
+        || !outPng || !outMeta) return false;
     if (session.isEmpty()) return false;
     const QByteArray sessionUtf8 = session.toUtf8();
     unsigned char* png = nullptr;
     unsigned long long pngLen = 0;
     char* meta = nullptr;
+    // ---- RGBA 直通道(新核心):产物就是拼接 RGBA,零拷贝包成 QImage ----
+    // 免掉"拼完 PNG 编码 → 宿主解码"的两次整图编解码(128MB 级长图上秒级
+    // CPU、~200MB 峰值);入库那一次 PNG 编码仍在核心侧 ingest 时发生。
+    if (m_stitchFinishRgba) {
+        unsigned char* rgba = nullptr;
+        unsigned long long rgbaLen = 0;
+        unsigned w = 0, h = 0;
+        const int rcR = m_stitchFinishRgba(sessionUtf8.constData(), &rgba, &rgbaLen, &w, &h, &meta);
+        if (rcR != 0 || !rgba || rgbaLen == 0 || w == 0 || h == 0 || !meta) {
+            if (rgba) m_freeBuffer(rgba, rgbaLen);
+            if (meta) m_freeString(meta);
+            return false;
+        }
+        const QByteArray metaJson(meta);
+        m_freeString(meta);
+        // 零拷贝:与 captureMonitor 同一套 CoreBuffer 托管,最后一份引用析构
+        // 时把缓冲归还核心。会话已取走,不再有第二读者,共享生命周期安全。
+        auto* buffer = new CoreBuffer{rgba, rgbaLen, m_freeBuffer};
+        *outPng = QImage(rgba, static_cast<int>(w), static_cast<int>(h),
+                         QImage::Format_RGBA8888, &releaseCoreBuffer, buffer);
+        *outMeta = QJsonDocument::fromJson(metaJson).object();
+        return true;
+    }
+
     const int rc = m_stitchFinish(sessionUtf8.constData(), &png, &pngLen, &meta);
     if (rc != 0 || !png || pngLen == 0 || !meta) {
         if (png) m_freeBuffer(png, pngLen);

@@ -45,6 +45,10 @@ using NbStitchAppend = int(__cdecl*)(const char*, const unsigned char*, unsigned
                                      unsigned, unsigned, char**);
 /// 长截图取回结果:out_png 走 nb_free_buffer,out_meta 走 nb_free_string。
 using NbStitchFinish = int(__cdecl*)(const char*, unsigned char**, unsigned long long*, char**);
+/// 长截图取回结果(RGBA 直通道,可选导出):产物为原始 RGBA 字节,免掉
+/// "拼完编码 → 宿主解码"的整图编解码往返;旧核心没有时回退 NbStitchFinish。
+using NbStitchFinishRgba = int(__cdecl*)(const char*, unsigned char**, unsigned long long*,
+                                         unsigned*, unsigned*, char**);
 /// 长截图丢弃会话(幂等)。
 using NbStitchAbort = int(__cdecl*)(const char*);
 /// 按屏幕描述**直接捕获显示器内的一个矩形**(设备像素,相对该屏左上角)。
@@ -182,8 +186,9 @@ public:
                                 const QRect& regionDevice);
 
     /// 结束并取回拼接结果。`ok` 为 false 时 outMeta 亦为空。
-    /// 成功时 *outPng 为独立 QImage(核心缓冲已在内部转为 PNG 解码后的自有数据,
-    /// 无需额外归还),*outMeta 为小 JSON。
+    /// 新核心有 `nb_stitch_finish_rgba` 时走 **RGBA 直通道**(产物为零拷贝
+    /// 托管缓冲,入库/写剪贴板只剩落盘 blob 那一次 PNG 编码);旧核心回退
+    /// PNG 编解码路径。成功时 *outMeta 为小 JSON。
     bool stitchFinish(const QString& session, QImage* outPng, QJsonObject* outMeta);
 
     /// 丢弃会话(幂等)。
@@ -272,6 +277,7 @@ private:
     NbStitchBegin m_stitchBegin = nullptr;
     NbStitchAppend m_stitchAppend = nullptr;
     NbStitchFinish m_stitchFinish = nullptr;
+    NbStitchFinishRgba m_stitchFinishRgba = nullptr;
     NbStitchAbort m_stitchAbort = nullptr;
     NbIngestCaptureRgba m_ingestCaptureRgba = nullptr;
     NbCopyRgbaToClipboard m_copyRgbaToClipboard = nullptr;

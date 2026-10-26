@@ -558,6 +558,73 @@ pub unsafe extern "C" fn nb_stitch_finish(
     report_out_text(result, out_meta)
 }
 
+/// 滚动长截图:**结束并取回拼接结果(RGBA 直通道)**。
+///
+/// 与 [`nb_stitch_finish`] 同语义,但产物是**原始 RGBA 字节**而非 PNG:
+/// 宿主拿到后直接走 `nb_ingest_capture_rgba` 入库 / `nb_copy_rgba_to_clipboard`
+/// 写剪贴板 —— 长图链路只剩落盘 blob 那一次 PNG 编码(拼完编码 → 宿主解码 →
+/// 入库再编码的两次整图编解码与 base64 往返全部省去)。
+/// 旧宿主按 resolve 失败自动回退 PNG 通道,本导出缺席不构成兼容性破坏。
+///
+/// # Safety
+/// 出参契约同 `nb_stitch_finish`;`out_rgba` 缓冲按 (len,1) 由 `nb_free_buffer` 归还。
+#[no_mangle]
+pub unsafe extern "C" fn nb_stitch_finish_rgba(
+    session: *const c_char,
+    out_rgba: *mut *mut u8,
+    out_len: *mut usize,
+    out_width: *mut u32,
+    out_height: *mut u32,
+    out_meta: *mut *mut c_char,
+) -> i32 {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if out_rgba.is_null()
+            || out_len.is_null()
+            || out_width.is_null()
+            || out_height.is_null()
+            || out_meta.is_null()
+        {
+            return Err(AppError::InvalidInput("出参指针为空".into()));
+        }
+        let session = cstr_to_string(session)?;
+        let finished = crate::stitch::finish_session_rgba(&session)?;
+        let meta = serde_json::json!({
+            "width": finished.width,
+            "height": finished.height,
+            "gaps": finished.gaps,
+            "bands": finished.bands,
+            "monitor": finished.monitor,
+            "regionX": finished.region_x,
+            "regionY": finished.region_y,
+            "dpr": finished.dpr,
+        })
+        .to_string();
+
+        // RGBA 缓冲按 Vec 布局移交宿主(与 nb_stitch_finish 的 PNG 同一套
+        // nb_free_buffer 归还约定)。
+        let mut rgba = finished.rgba;
+        let len = rgba.len();
+        if rgba.capacity() != len {
+            rgba.shrink_to_fit();
+        }
+        if len == 0 || rgba.capacity() != len {
+            return Err(AppError::Internal("长截图 RGBA 缓冲整理失败".into()));
+        }
+        let ptr = rgba.as_mut_ptr();
+        std::mem::forget(rgba);
+        // SAFETY: 出参已校验非空,ptr 指向长度为 len 的 u8 缓冲
+        unsafe {
+            *out_rgba = ptr;
+            *out_len = len;
+            *out_width = finished.width;
+            *out_height = finished.height;
+        }
+        Ok(meta)
+    }))
+    .unwrap_or_else(|_| Err(AppError::Panicked("nb_stitch_finish_rgba panic".into())));
+    report_out_text(result, out_meta)
+}
+
 /// 滚动长截图:**丢弃会话**(取消/换选区/异常退出时释放缓冲)。幂等。
 ///
 /// # Safety

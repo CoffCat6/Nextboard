@@ -40,8 +40,9 @@ pub mod fingerprint;
 mod session;
 
 pub use session::{
-    abort_session, active_session_count, append_frame, begin_session, finish_session, Finished,
-    SessionSpec, BASELINE_DEPTH, GAP_BAND_HEIGHT, GAP_BAND_RGBA,
+    abort_session, active_session_count, append_frame, begin_session, finish_session,
+    finish_session_rgba, Finished, FinishedRaw, SessionSpec, BASELINE_DEPTH, GAP_BAND_HEIGHT,
+    GAP_BAND_RGBA,
 };
 
 use crate::error::{AppError, AppResult};

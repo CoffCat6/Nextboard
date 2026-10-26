@@ -273,6 +273,12 @@ fn build_engine(models: &Path, profile: &str) -> AppResult<crate::ocr::rapid::Ra
         rt.intra_threads = Some(threads);
         rt.inter_threads = Some(1);
         rt.auto_tune_threads = false;
+        // 引擎侧图像处理(det 阈值化/连通域、裁片透视校正、rec 批张量填充)跑在
+        // 引擎自建的 rayon 池上:此前未配 rayon_threads,resolve_rayon_threads 返回
+        // None → unwrap_or(1),池恒 1 线程,全部既有 par_iter 退化为串行。
+        // 给 2 线程让并行化生效(ORT 推理仍为上面的 intra 线程数,互不叠加);
+        // CPU 峰值从 4 核升到约 6 核、时长缩短,对宿主 Qt 侧的挤占可接受。
+        rt.rayon_threads = Some(2);
         // ⚠️ **必须关闭** ONNX Runtime 的 CPU arena 分配器。
         //
         // 实测(1920x1080 全屏、150 个文本框,同一进程同一张图):

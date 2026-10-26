@@ -336,7 +336,15 @@ pub fn list(
     let pattern = query.map(like_pattern);
     let mut items = conn
         .prepare(
-            "SELECT e.id, e.kind, e.text_content, e.blob_path, e.file_paths, e.width, e.height,
+            // ⚠️ 只截断**下发**的正文(WHERE 里的 text_content 匹配仍看全文):
+            // 列表折叠态最多显示 4 行,单条上限却是 1MB —— 大文本条目混在列表里
+            // 时,JSON 载荷/解析/QString 拷贝全按全量计,首呼出与翻页被拖慢。
+            // 复制/翻译/编辑都按 id 走 get_entry 取全文,不受影响。
+            "SELECT e.id, e.kind, \
+                    CASE WHEN length(e.text_content) > 4096 \
+                         THEN substr(e.text_content, 1, 4096) || '…' \
+                         ELSE e.text_content END AS text_content, \
+                    e.blob_path, e.file_paths, e.width, e.height,
                     e.hash, e.byte_size, e.preview, e.pinned, e.created_at, e.last_used_at,
                     e.source, e.tags,
                     m.due_at AS todo_due_at, m.done_at AS todo_done_at
@@ -395,7 +403,11 @@ fn list_via_fts(
 ) -> AppResult<(Vec<ClipEntry>, i64)> {
     let items = conn
         .prepare(
-            "SELECT e.id, e.kind, e.text_content, e.blob_path, e.file_paths, e.width, e.height,
+            "SELECT e.id, e.kind, \
+                    CASE WHEN length(e.text_content) > 4096 \
+                         THEN substr(e.text_content, 1, 4096) || '…' \
+                         ELSE e.text_content END AS text_content, \
+                    e.blob_path, e.file_paths, e.width, e.height,
                     e.hash, e.byte_size, e.preview, e.pinned, e.created_at, e.last_used_at,
                     e.source, e.tags,
                     m.due_at AS todo_due_at, m.done_at AS todo_done_at
