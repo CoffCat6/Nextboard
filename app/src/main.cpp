@@ -11,6 +11,7 @@
 #include <QIcon>
 #include <QJsonObject>
 #include <QMessageBox>
+#include <QPainter>
 #include <QQuickWindow>
 #include <QSGRendererInterface>
 #include <QTimer>
@@ -49,6 +50,7 @@ static void fileMessageHandler(QtMsgType type, const QMessageLogContext& ctx, co
 #include "host/acceptance.hpp"
 #include "host/auto_start.hpp"
 #include "panel/core_facade.hpp"
+#include "pin/pin_window.hpp"
 #include "panel/panel_window.hpp"
 #include "panel/qml_bootstrap.hpp"
 
@@ -391,6 +393,40 @@ int main(int argc, char* argv[]) {
     if (stitchLiveFlow) nb::runStitchLiveFlow();
     if (noteFlow) nb::runNoteAcceptanceFlow();
     if (todoLayoutFlow) nb::runTodoLayoutFlow(panel);
+    // 贴图 DPI 探针(--pin-probe <path>):以四角色块的测试图建一枚贴图,渲染
+    // 稳定后 grab() 存档再退出。回归件:2026-10-26 缩放缓存误用 DPR 画布,
+    // 高分屏上贴图内容放大 1/d² 且裁边 —— 本探针在任何缩放比下都可断言
+    // "四个角色块完整在框内"。
+    for (int i = 1; i < argc; ++i) {
+        if (QString::fromLocal8Bit(argv[i]) == QLatin1String("--pin-probe")
+            && i + 1 < argc) {
+            const QString probePath = QString::fromLocal8Bit(argv[++i]);
+            QTimer::singleShot(800, qApp, [probePath] {
+                QImage img(480, 320, QImage::Format_ARGB32_Premultiplied);
+                img.fill(0xFFF5F5F5);
+                {
+                    QPainter p(&img);
+                    p.fillRect(0, 0, 60, 60, QColor(220, 30, 30));        // 左上 红
+                    p.fillRect(420, 0, 60, 60, QColor(30, 160, 30));      // 右上 绿
+                    p.fillRect(0, 260, 60, 60, QColor(30, 30, 220));      // 左下 蓝
+                    p.fillRect(420, 260, 60, 60, QColor(220, 200, 30));   // 右下 黄
+                    p.fillRect(200, 120, 80, 80, QColor(20, 20, 20));     // 中央 黑
+                }
+                nb::PinContent content;
+                content.idPrefix = QStringLiteral("pinprobe");
+                content.image = img;
+                auto* pin = new nb::PinWindow(content, nb::PinOptions{});
+                pin->setAttribute(Qt::WA_DeleteOnClose);
+                pin->show();
+                QTimer::singleShot(600, pin, [pin, probePath] {
+                    qInfo() << "pin-probe ->" << probePath;
+                    pin->grab().save(probePath);
+                    QApplication::quit();
+                });
+            });
+            break;
+        }
+    }
     if (!shotPath.isEmpty()) {
         QTimer::singleShot(5000, &panel, [path = shotPath, queryText, openSettings,
                                           translateText, &panel] {

@@ -125,7 +125,9 @@ private:
     // ---- 缩放显示缓存(见 paintEvent 注释)----
     /// 当前 (zoom, dpr, 质量) 下的缩放结果(物理像素)。仅 zoom ≤ 1(缩小或 1:1)
     /// 时启用,缓存 ≤ 原图大小;放大走原图直绘(缓存会把峰值翻倍,不值得)。
-    QPixmap m_displayCache;
+    /// ⚠️ 必须保持 QImage 且**不设** devicePixelRatio(DPR≠1 的画布会让
+    ///    QPainter 按逻辑坐标作画,高分屏上内容放大裁边 —— 2026-10-26 实测)。
+    QImage m_displayCache;
     qreal m_cacheZoom = -1.0;
     qreal m_cacheDpr = -1.0;
     bool m_cacheFast = false;    ///< true = 滚轮过渡帧(快速采样)

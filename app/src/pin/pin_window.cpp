@@ -387,10 +387,7 @@ qint64 PinWindow::memoryBytes() const {
     const qint64 backing =
         static_cast<qint64>(qMax(1, width())) * qMax(1, height()) * dpr * dpr * 4;
     // 缩放缓存(≤ 原图大小,见 paintEvent)一并计入,淘汰预算口径才如实。
-    // QPixmap 无 sizeInBytes():底层恒为 ARGB32_Premultiplied,按物理像素数 ×4。
-    const qint64 cacheBytes = m_displayCache.isNull()
-        ? 0 : static_cast<qint64>(m_displayCache.width()) * m_displayCache.height() * 4;
-    return m_image.sizeInBytes() + backing + cacheBytes;
+    return m_image.sizeInBytes() + backing + m_displayCache.sizeInBytes();
 }
 
 QSize PinWindow::logicalSizeFor(qreal dpr) const {
@@ -404,7 +401,7 @@ QSize PinWindow::logicalSizeFor(qreal dpr) const {
 }
 
 void PinWindow::invalidateDisplayCache() {
-    m_displayCache = QPixmap();
+    m_displayCache = QImage();
     m_cacheZoom = -1.0;
     m_cacheDpr = -1.0;
 }
@@ -438,6 +435,12 @@ void PinWindow::paintEvent(QPaintEvent*) {
     // 仅 zoom ≤ 1 启用(目标像素 ≤ 原图,缓存 ≤ 原图大小);放大走原图直绘,
     // 否则 zoom=4 时缓存可达原图 16 倍,把贴图内存翻 17 倍。滚轮连续缩放期间
     // 用快速采样过渡(尺度感优先),停止 ~150ms 后重建一帧平滑的(观感优先)。
+    //
+    // ⚠️ 缓存必须是**不带 DPR 标记**的 QImage(恒物理像素,DPR=1 语义):
+    //   2026-10-26 实测,给画布 setDevicePixelRatio(dpr) 后按物理坐标作画,
+    //   会被 painter 当成逻辑坐标(物理÷dpr)→ 整图放大 dpr 倍、只留下左上角
+    //   1/d² 区域 —— 高分屏上贴图内容放大且裁边。DPR=1 的画布上 drawImage
+    //   (target, image) 与原实现 drawImage(imageRect, m_image) 完全同语义。
     const qreal dpr = currentDpr();
     const bool fastTransition = m_scaleSettleTimer && m_scaleSettleTimer->isActive();
     if (m_zoom <= 1.001) {
@@ -447,8 +450,7 @@ void PinWindow::paintEvent(QPaintEvent*) {
             // 两处各自取整在边缘差出一像素。
             const QSize physical(qMax(1, qRound(imageRect.width() * dpr)),
                                  qMax(1, qRound(imageRect.height() * dpr)));
-            m_displayCache = QPixmap(physical);
-            m_displayCache.setDevicePixelRatio(dpr == 0.0 ? 1.0 : dpr);
+            m_displayCache = QImage(physical, QImage::Format_ARGB32_Premultiplied);
             QPainter p(&m_displayCache);
             p.setRenderHint(QPainter::SmoothPixmapTransform, !fastTransition);
             p.drawImage(m_displayCache.rect(), m_image);
@@ -457,7 +459,7 @@ void PinWindow::paintEvent(QPaintEvent*) {
             m_cacheDpr = dpr;
             m_cacheFast = fastTransition;
         }
-        painter.drawPixmap(imageRect, m_displayCache, QRectF(m_displayCache.rect()));
+        painter.drawImage(imageRect, m_displayCache);
     } else {
         painter.drawImage(imageRect, m_image);
     }
