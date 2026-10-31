@@ -1076,7 +1076,7 @@ void OverlayWidget::applyElementCandidate(const QRect& elementPhysical, const QS
     const QRect old = m_candidate;
     m_candidate = local;
     m_candidateLevel = 1;
-    m_elementTitle = title;
+    m_elementTitle = title;   // 暂不展示(尺寸提示统一后移除了元素名);保留以备后续 UI
     m_elementWindowId = windowId;
     // 与 smartHoverUpdate 同口径:**本屏相对**物理(见那边的注释)。
     m_lastCandidatePhysical =
@@ -1283,11 +1283,18 @@ void OverlayWidget::paintEvent(QPaintEvent*) {
 
         // 尺寸提示按**物理像素**显示,即最终截出来的分辨率。
         // ⚠️ 这一行文字压在**冻结底图**上(不是压在主题面板上),底图颜色由用户桌面
-        //    决定 —— 因此**刻意不跟主题**:白字 + 深色底纹才是任意底色上都读得清的组合。
-        //    改成主题前景色,在浅色页面上会直接消失。
-        painter.setPen(QColor(255, 255, 255));
-        painter.drawText(QPoint(sel.x(), sel.y() - 6),
-                         QStringLiteral("%1 × %2").arg(src.width()).arg(src.height()));
+        //    决定 —— 因此**刻意不跟主题**,但**要跟底图的明暗**:浅色底图(白底文档/
+        //    浅色网页)用深色字,深色底图(IDE 深色主题/暗页)用白字,都叠加一层
+        //    低α反色底板把对比度再抬一档。
+        //
+        // 演进史:① 早期只有白字没底板,底图一浅文字直接糊(用户反馈"显示不清");
+        // ② 补了恒定 α160 黑底板 + 白字 —— 但浅底上"黑板白字"对比巨大,底图内容
+        //    被压得很重;用户随后反馈"浅底应深色字,深底应浅色字"(2026-10-31)。
+        // ③ 现方案:按**提示覆盖区域**的底图亮度自适应取色。
+        //
+        // 亮度判定走**物理像素**均值(阈值 128,0~255):采样窗 = 底板将覆盖的区域
+        // (在屏外则退到选区内部顶部 —— 那是底图上紧邻提示、明暗最接近的一块)。
+        drawSizeHint(painter, sel, src.size());
 
         // 二级条再浮条(二级条在上层);长截图态下浮条让位给长截图面板
         if (!stitchActive()) {
@@ -1316,7 +1323,7 @@ void OverlayWidget::paintEvent(QPaintEvent*) {
 /// 预选高亮(智能框选)。
 ///
 /// 与选区的画法**刻意不同**:选区是"已确定的答案"(实线 2px accent),
-/// 候选是"跟着鼠标走的猜想"(虚线 1px 亮青 + 内部恢复原图)。
+/// 候选是"跟着鼠标走的猜想"(虚线 2px accent + 内部恢复原图)。
 /// 两者同时出现时用户一眼能分清"我选的"和"它猜的"。
 ///
 /// ⚠️ 内部恢复原图这一步不能省:遮罩上盖了 90α 的黑罩,不恢复的话候选框里
@@ -1331,30 +1338,84 @@ void OverlayWidget::drawCandidate(QPainter& painter) {
                     QSize(qRound(r.width() * k), qRound(r.height() * k)));
     if (!src.isEmpty() && m_frozen.rect().contains(src)) painter.drawImage(r, m_frozen, src);
 
-    // 2) 虚线描边。颜色固定(不跟主题):它压在**用户桌面的内容**上,而底图颜色
-    //    由用户决定 —— 与尺寸提示那行字同一理由(见 paintEvent 的注释)。
+    // 2) 虚线描边 = 主题 accent(docs/theme.md §13「Accent 默认使用 Blue」+
+    //    §21「截图选区 Border 1~2px Accent」),与选区实线同一取色来源。
+    //
+    // ⚠️ 早期写死 0x2EE6FF(青色)有两个问题:① 与 accent 不同源,浅色主题下
+    //    偏"荧光";② 深浅两套主题的 accent 对比度各调过,写死一个值总有一套
+    //    显得发灰 —— 与 paintEvent 里选区边框"取主题 accent 而非写死"同一理由。
+    // 宽度取 2(规范允许 1~2px):候选压在 90α 黑罩上,1px 虚线容易断续看不清。
     painter.save();
-    QPen pen(QColor(0x2E, 0xE6, 0xFF), 1, Qt::DashLine);
+    QPen pen(ui::themeTokens().accent, 2, Qt::DashLine);
     pen.setDashPattern({4, 3});
     painter.setPen(pen);
     painter.setBrush(Qt::NoBrush);
     painter.drawRect(r.adjusted(0, 0, -1, -1));
     painter.restore();
 
-    // 3) 尺寸角标(与选区尺寸提示同一位置约定:选框左上外侧,压深色底纹)
-    const QString label = m_elementTitle.isEmpty()
-                              ? QStringLiteral("%1 × %2").arg(src.width()).arg(src.height())
-                              : QStringLiteral("%1  %2 × %3")
-                                    .arg(m_elementTitle, QString::number(src.width()),
-                                         QString::number(src.height()));
-    const int textW = painter.fontMetrics().horizontalAdvance(label) + 10;
-    const QRect badge(r.left(), qMax(0, r.top() - 20), textW, 18);
+    // 3) 尺寸提示与选区**同一块**(drawSizeHint,自适应底板 + 同一位置约定)
+    //    —— 预览时用户对照的就是"最终截出来的分辨率",两个提示必须一眼同源。
+    drawSizeHint(painter, r, src.size());
+}
+
+/// 尺寸提示(选区与候选预览共用,保证两个提示"同一眼缘")。
+///
+/// 文字 = 指定尺寸的 "宽 × 高";底板压在冻结底图上,颜色按**底板覆盖区域**的
+/// 底图亮度自适应:浅底(均值 ≥ 128)→ 白板 + 深字,深底 → 黑板 + 白字。
+///
+/// 演进史(docs/progress.md):① 纯白字无底板 → 浅色页面糊;② 恒定黑板白字 →
+/// 浅底上底图被压得很重;③ 现方案按底图明暗自适应。采样窗 = 底板自身位置,
+/// 越出屏幕上缘则退到选区/候选内部顶部等高的一条(明暗最接近)。
+void OverlayWidget::drawSizeHint(QPainter& painter, const QRect& anchorLogical,
+                                 const QSize& physicalSize) {
+    const QString sizeText =
+        QStringLiteral("%1 × %2").arg(physicalSize.width()).arg(physicalSize.height());
+    const QFontMetrics fm = painter.fontMetrics();
+    const QSize hintSize(fm.horizontalAdvance(sizeText) + 12, fm.height() + 6);
+    const QRect hintPlate(anchorLogical.x(), qMax(0, anchorLogical.y() - hintSize.height() - 4),
+                          hintSize.width(), hintSize.height());
+
+    // 采样窗(局部物理):优先底板自身位置,越界则取锚矩形内部顶部等高的一条
+    const qreal scale = dpr();
+    const QRect anchorNorm = anchorLogical.normalized();
+    QRect sampleLocal = hintPlate;
+    if (sampleLocal.top() < 0) {
+        sampleLocal = QRect(anchorNorm.x(), anchorNorm.top(),
+                            qMin(hintPlate.width(), anchorNorm.width()),
+                            hintPlate.height());
+    }
+    const QRect samplePhys(
+        QPoint(qRound(sampleLocal.x() * scale), qRound(sampleLocal.y() * scale)),
+        QSize(qRound(sampleLocal.width() * scale),
+              qRound(sampleLocal.height() * scale)));
+    const bool lightBackground = [this, &samplePhys] {
+        // 均值而非中位数:这里只求"这块底图整体偏亮还是偏暗",均值够用且便宜
+        qint64 sum = 0;
+        qint64 n = 0;
+        for (int y = samplePhys.top(); y <= samplePhys.bottom(); ++y) {
+            if (y < 0 || y >= m_frozen.height()) continue;
+            const QRgb* line = reinterpret_cast<const QRgb*>(m_frozen.constScanLine(y));
+            for (int x = samplePhys.left(); x <= samplePhys.right(); ++x) {
+                if (x < 0 || x >= m_frozen.width()) continue;
+                const QRgb c = line[x];
+                // Rec.601 亮度(与验收 medianLuma 同一近似)
+                sum += (qRed(c) * 299 + qGreen(c) * 587 + qBlue(c) * 114) / 1000;
+                ++n;
+            }
+        }
+        return n == 0 ? true : (sum / n) >= 128;
+    }();
+
+    // 浅底:深色字 + 白色半透明底板;深底:白字 + 黑色半透明底板。
+    // 底板 α 取 120:字色已对,底板只需轻压一档,不必靠浓底板硬抬对比度。
     painter.save();
     painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(0x2E, 0xE6, 0xFF, 210));
-    painter.drawRoundedRect(badge, 3, 3);
-    painter.setPen(QColor(0x10, 0x24, 0x28));
-    painter.drawText(badge.adjusted(5, 0, -5, 0), Qt::AlignVCenter | Qt::AlignLeft, label);
+    painter.setBrush(lightBackground ? QColor(255, 255, 255, 120)
+                                     : QColor(0, 0, 0, 120));
+    painter.drawRoundedRect(hintPlate, 3, 3);
+    painter.setPen(lightBackground ? QColor(0x1A, 0x1A, 0x1A)
+                                   : QColor(255, 255, 255));
+    painter.drawText(hintPlate, Qt::AlignCenter, sizeText);
     painter.restore();
 }
 

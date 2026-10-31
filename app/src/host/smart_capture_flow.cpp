@@ -683,6 +683,55 @@ void runSmartCaptureFlow() {
                               .arg(gotOther.width()).arg(gotOther.height()));
                 }
 
+                // ---- G2. 浅色底图 → 深色字(反向场景)----
+                //
+                // G 段的底图是深色(0x334455),只覆盖了"深底→白字"分支;
+                // 用户报的场景恰是浅色页面(白底文档)上白字看不清,必须补浅底分支。
+                // 判定:浅底图上 grab 提示底板区域,亮度中位数应为"亮"
+                // (白板)且明显亮于深底场景的黑板 —— 两个分支都钉住。
+                QImage lightFrozen(otherGeo.size() * otherDpr,
+                                   QImage::Format_ARGB32_Premultiplied);
+                lightFrozen.fill(QColor(0xF2, 0xF2, 0xF2));   // 浅底
+                auto* ovLight = new OverlayWidget(lightFrozen, 0, otherScreen,
+                                                  /*autoConfirm=*/true,
+                                                  /*rightClickCancel=*/true,
+                                                  /*autoStartStitching=*/false, otherList);
+                ovLight->setGeometry(otherGeo);
+                ovLight->show();
+                QApplication::processEvents();
+
+                // 底板在选区左上外侧:采样它实际渲染出的位置
+                moveMouse(ovLight, QPoint(otherOrigin.x() + 40, otherOrigin.y() + 40));
+                QApplication::processEvents();
+                const QImage grab = ovLight->grab().toImage().convertToFormat(
+                    QImage::Format_RGB32);
+                // 提示底板矩形(与 paintEvent 同一算式):sel = (90,80 300x200) 时
+                // 底板 top = 80 - h - 4,先按字体高度 16 估:top ≈ 60
+                // 采样区域取"选区左上角外一条",足够覆盖底板(宽容差,避免字体相关脆断言)
+                const QRect plateZone(otherOrigin.x() - 4,
+                                      qMax(0, otherOrigin.y() - 40),
+                                      140, 38);
+                int lumas = 0;
+                int count = 0;
+                for (int y = plateZone.top(); y < plateZone.bottom(); ++y) {
+                    for (int x = plateZone.left(); x < plateZone.right(); ++x) {
+                        const QColor c(grab.pixel(x, y));
+                        lumas += (c.red() * 299 + c.green() * 587 + c.blue() * 114) / 1000;
+                        ++count;
+                    }
+                }
+                const int plateLuma = count ? lumas / count : -1;
+                qInfo() << "SMART-CAPTURE  浅底提示区域平均亮度 =" << plateLuma
+                        << "(浅底:底板为白 α120,区域均值应明显高于深底场景)";
+                // 深底场景黑板 α120 压在 0x334455 上 → 均值远低于 128;
+                // 浅底场景白板 α120 压在 0xF2 上 → 均值必然高
+                check(plateLuma > 128,
+                      QStringLiteral("浅色底图:提示区域为**亮**(白板 + 深字,得亮度 %1)")
+                          .arg(plateLuma));
+
+                ovLight->close();
+                ovLight->deleteLater();
+
                 ovOther->close();
                 ovOther->deleteLater();
             }

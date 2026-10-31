@@ -327,8 +327,12 @@ private:
     void smartClearCandidate(bool clearElement = false);
     /// 本机的"绝对物理"屏幕矩形(会话内不变:底图与屏几何都不变)。
     QRect smartScreenPhysical() const;
-    /// 画预选高亮(虚线框 + 框内恢复原图 + 尺寸角标)。
+    /// 画预选高亮(虚线框 + 框内恢复原图 + 尺寸提示)。
     void drawCandidate(QPainter& painter);
+    /// 尺寸提示("宽 × 高" + 自适应底板,选区与候选预览共用)。
+    /// anchorLogical = 锚矩形(提示压在其左上外侧);physicalSize = 显示的尺寸。
+    void drawSizeHint(QPainter& painter, const QRect& anchorLogical,
+                      const QSize& physicalSize);
     /// 投一次 UIA 元素探测(工作线程);cursorLocal 是**遮罩局部逻辑**坐标。
     void startElementProbe(const QPoint& cursorLocal);
     /// 合并探测结果(UI 线程;元素矩形为绝对物理像素)。
