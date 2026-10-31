@@ -81,6 +81,7 @@ qt_add_qml_module(nextboard
         panel/qml/KeyCap.qml
         panel/qml/AppMark.qml
         panel/qml/HeaderIcon.qml
+        panel/qml/QuickRail.qml
         panel/qml/ReadableComboBox.qml
         panel/qml/ReadableCheckBox.qml
         panel/qml/ReadableSpinBox.qml

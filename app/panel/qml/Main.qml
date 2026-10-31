@@ -1373,7 +1373,23 @@ Rectangle {
             }
         }
 
-        // ---- 分类标签 + 筛选入口(§15 选中态:AccentSoft 底 + Accent 字 + 左侧指示条) ----
+        // ---- 中部内容区:主列(分类/筛选/列表) + 右侧快捷栏(QuickRail) ----
+        // 快捷栏只属于列表页:它是"呼出即用"形态的固定落点,翻译/设置页是
+        // 整窗工作区,不带这条栏(与列表页互斥显示,同 panelWindow.mode 门控)。
+        // 头部与状态栏保持通宽在布局外层 —— 侧栏不切断"品牌/搜索"与"快捷键提示"。
+        RowLayout {
+            id: contentRow
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            spacing: 0
+
+            // 左列:原有垂直堆叠(分类行→筛选行→列表→空状态),原样内移
+            ColumnLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                spacing: 0
+
+                // ---- 分类标签 + 筛选入口(§15 选中态:AccentSoft 底 + Accent 字 + 左侧指示条) ----
         // 布局:分类项左对齐,「筛选」按钮与生效条件右对齐。
         // ⚠️ 用 RowLayout 而非 Row:右对齐需要一个 fillWidth 的弹性空隙,
         //    Row 没有 Layout 附件属性。
@@ -2169,6 +2185,21 @@ Rectangle {
             }
         }
 
+            } // 左列 ColumnLayout 结束
+
+            // 右侧快捷栏:固定窄条,占位钮见 actions;动作接线在下方 onActionTriggered
+            QuickRail {
+                id: quickRail
+                Layout.fillHeight: true
+                onActionTriggered: function(actionId) {
+                    // 本期唯一占位动作:诚实提示"还没做",好过静默无响应;
+                    // 二期动作注册表落地后,这里按 id 分发到真实功能。
+                    if (actionId === "addQuick")
+                        Core.showToast("快捷功能自定义开发中,敬请期待")
+                }
+            }
+        } // 中部内容区 RowLayout 结束
+
         // ---- 状态栏(§37:快捷键可视化) ----
         Rectangle {
             Layout.fillWidth: true
@@ -2300,7 +2331,8 @@ Rectangle {
             hideTimer.restart()
         }
         anchors.right: parent.right
-        anchors.rightMargin: 16
+        // 列表形态右移避开 QuickRail(52),与主列右缘对齐;翻译/设置页无侧栏,贴边 16
+        anchors.rightMargin: panelWindow.mode === "list" ? 52 + 16 : 16
         anchors.bottom: parent.bottom
         anchors.bottomMargin: 44
         radius: Theme.metrics.radiusPopup

@@ -30,6 +30,8 @@ Item {
     ///    与近邻图标的区分:"capture" 四角取景框(vs "pin" 图钉),"keyboard" 键位阵列
     ///    (vs "multiselect" 勾选列表),"network" 三节点网状(translate 的地球是圆 +
     ///    经线,不混淆),"info" 圆 + i(单字母立形,无近邻)。
+    ///  "plus"                           —— QuickRail「添加快捷功能」占位钮,
+    ///    两臂正交的圆头加号,与近邻图标无共用母题,不会混淆。
     property string kind: ""
     /// 描边与填充色(由调用方按所在处的文字色注入)
     property color color: Theme.colors.textPrimary
@@ -64,6 +66,7 @@ Item {
         "keyboard": keyboardComp,
         "network": networkComp,
         "info": infoComp,
+        "plus": plusComp,
     }
 
     implicitWidth: size
@@ -709,6 +712,29 @@ Item {
             y: 6.6 * root.unit
             width: 1.8 * root.unit; height: 5.2 * root.unit
             radius: 0.6 * root.unit
+            color: root.color
+        }
+        }
+    }
+
+    // ---- 添加:加号(QuickRail「添加快捷功能」占位钮) ----
+    // 两枚圆头胶囊正交;16px 视口下臂长 10px,悬停可读、缩小不糊。
+    // (组件化)kind = plus:只被 Loader 按需实例化
+    Component {
+        id: plusComp
+        Item {
+        anchors.fill: parent
+
+        Rectangle {   // 横臂
+            anchors.centerIn: parent
+            width: 10 * root.unit; height: 1.8 * root.unit
+            radius: height / 2
+            color: root.color
+        }
+        Rectangle {   // 竖臂
+            anchors.centerIn: parent
+            width: 1.8 * root.unit; height: 10 * root.unit
+            radius: width / 2
             color: root.color
         }
         }
