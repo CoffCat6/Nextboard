@@ -191,6 +191,14 @@ QRect screenPhysicalRect(QScreen* screen, const QImage& frozen) {
     return QRect(screenPhysicalOrigin(screen), screenPhysicalSize(screen, frozen));
 }
 
+QRect toLocalPhysical(const QRect& globalPhysical, const QRect& screenPhysical) {
+    if (globalPhysical.isEmpty() || screenPhysical.isEmpty()) return {};
+    const QRect rel = globalPhysical.translated(-screenPhysical.topLeft());
+    const QRect clamped = rel.intersected(QRect(QPoint(0, 0), screenPhysical.size()));
+    if (clamped.isEmpty()) return {};
+    return clamped;
+}
+
 QRect toLocalLogical(const QRect& globalPhysical, const QRect& screenPhysical, qreal dpr) {
     if (globalPhysical.isEmpty() || screenPhysical.isEmpty() || dpr <= 0.01) return {};
     const QRect rel = globalPhysical.translated(-screenPhysical.topLeft());

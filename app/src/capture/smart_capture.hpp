@@ -71,6 +71,17 @@ QSize screenPhysicalSize(QScreen* screen, const QImage& frozen);
 QPoint screenPhysicalOrigin(QScreen* screen);
 QRect screenPhysicalRect(QScreen* screen, const QImage& frozen);
 
+/// 绝对物理矩形 → 本屏**局部物理**矩形(原点 = 本屏左上)。
+///
+/// 这是 `selectionPhysical()` 的契约口径:核心 `nb_capture_crop` 吃的本屏
+/// 底图,矩形必须相对它的左上角。候选在悬停时就要换算并存进
+/// `m_lastCandidatePhysical` —— 采纳时原样交回,**不能**等到采纳才换算:
+/// 那样存下的是"虚拟桌面绝对"物理,非主屏(原点非 (0,0))上会让裁剪完全越界,
+/// 表现为"非主屏智能框选截屏后既不入库也不进剪贴板"。
+///
+/// 越界部分裁掉(跨屏窗口只取本屏内那块);完全在屏外返回空矩形。纯函数,可单测。
+QRect toLocalPhysical(const QRect& globalPhysical, const QRect& screenPhysical);
+
 /// 绝对物理矩形 → 本屏**局部逻辑**矩形(遮罩的命中与绘制都用它)。
 ///
 /// 越出本屏的部分被裁掉;完全在屏外返回空矩形。纯函数,可单测。

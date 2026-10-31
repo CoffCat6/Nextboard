@@ -250,7 +250,8 @@ private:
     };
 
     qreal dpr() const;
-    /// 选区(局部逻辑坐标)按 DPR 换算为物理像素(桌面**全局**物理坐标);越界由核心钳制。
+    /// 选区换算为**本屏相对**物理像素(原点 = 本屏左上角;核心裁剪/长截图 begin
+    /// 的契约口径)。⚠️ 不是虚拟桌面绝对坐标 —— 混用就是"非主屏截屏丢失"的根因。
     QRect selectionPhysical() const;
     /// 引擎场景矩形 = 选区**局部**物理像素(原点在选区左上)。
     /// ⚠️ 二者不是一回事:前者给核心裁剪用,后者给引擎用;混用就是"标注画不准"的根因。
@@ -296,13 +297,13 @@ private:
     int m_candidateLevel = -1;      // 当前预选的层级(-1 = 无)
     int m_smartAccepts = 0;         // 单击采纳次数(验收用)
     QString m_elementTitle;         // 元素级预选的名称(UIA Name;窗口级为空)
-    /// 上一次候选项的**原始物理矩形**(Win32/UIA 直出,未经过逻辑像素往返)。
-    /// 采纳时把它存进 m_candidatePhysical,见 selectionPhysical() 的注释。
+    /// 当前候选的**本屏相对**物理矩形(由 toLocalPhysical 在悬停/滚轮/元素落地时
+    /// 换算好;绝不能存虚拟桌面绝对坐标,见 toLocalPhysical 的注释)。
     QRect m_lastCandidatePhysical;
     /// 采纳那一刻的选区(逻辑)。与 m_selection 相等 = 用户没动过手柄,
     /// 可以安全地交回原始物理矩形。
     QRect m_adoptedSelection;
-    /// 采纳时的精确物理矩形。
+    /// 采纳时的精确物理矩形(**本屏相对**口径,同上)。
     QRect m_candidatePhysical;
     /// 元素级预选**所属的窗口** HWND。用途:判断"光标是否还停在该窗口上" ——
     /// 后台窗口的元素绝不能压过前台窗口(见 smartHoverUpdate 的 keepElement)。

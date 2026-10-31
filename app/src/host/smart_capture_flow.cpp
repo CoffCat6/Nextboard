@@ -258,6 +258,9 @@ void runSmartCaptureFlow() {
             return;
         }
 
+        // 本屏物理矩形(原点取 Qt 几何、尺寸取底图 —— 与产品同口径,见 docs/23 §4.2)
+        const QRect screenPhysicalRef(screenGeo.topLeft(), frozen.size());
+
         // ---- B. 窗口级:候选表**手工注入 target 的物理矩形** ----
         //
         // 为什么不直接给 probeWindows() 的结果:本进程窗口按设计被剔除了,
@@ -330,9 +333,14 @@ void runSmartCaptureFlow() {
         check(overlay->smartAcceptCount() == 1,
               QStringLiteral("单击采纳计数 = 1(得 %1)").arg(overlay->smartAcceptCount()));
         check(confirmed, QStringLiteral("直通模式:单击即确认,regionConfirmed 已发出"));
-        const QRect expectedPhysical =
-            QRect(QPoint(qRound(expected.x() * dpr), qRound(expected.y() * dpr)),
-                  QSize(qRound(expected.width() * dpr), qRound(expected.height() * dpr)));
+        // ⚠️ 期望值 = 目标窗口的**本屏相对**物理矩形(selectionPhysical 的契约
+        //    口径),不是"绝对 * dpr"。主屏原点 (0,0) 时二者相等,曾掩盖了
+        //    "采纳路径回传绝对坐标"的缺陷 —— 副屏上表现为裁剪完全越界、
+        //    截图既不入库也不进剪贴板(2026-10-31 用户实测)。
+        const QRect expectedPhysical(
+            QPoint(qRound(expected.x() * dpr), qRound(expected.y() * dpr))
+                - screenPhysicalRef.topLeft(),
+            QSize(qRound(expected.width() * dpr), qRound(expected.height() * dpr)));
         check(confirmed && nearRect(confirmedRect, expectedPhysical, 3),
               QStringLiteral("确认矩形 == 目标窗口的物理像素(得 %1x%2,期望 %3x%4)")
                   .arg(confirmedRect.width()).arg(confirmedRect.height())
@@ -573,6 +581,111 @@ void runSmartCaptureFlow() {
 
             overlay5->close();
             overlay5->deleteLater();
+        }
+
+        // ---- G. 非主屏端到端:悬停 → 单击 → 确认矩形必须是"本屏相对" ----
+        //
+        // 回归对象(2026-10-31 用户实测):非主屏上智能框选截图后**不入库、剪贴板
+        // 为空**。根因:采纳路径把候选的"虚拟桌面绝对"物理矩形原样交给了核心
+        // crop_rgba,而它要的是"本屏相对";非主屏原点非 (0,0),矩形在核心侧
+        // 越界钳制后变成空 → 裁剪失败 → 链路静默终止。
+        //
+        // 为什么既有验收没抓到:B 段只在主屏(primaryScreen)跑,期望值又把
+        // "绝对 * dpr"当成了正确答案 —— 主屏原点 (0,0) 时两个口径恰好相等。
+        //
+        // 做法:把验收遮罩搬到**另一块屏**(若有)上重建一次,单击采纳后断言
+        //   ① regionConfirmed 发出;
+        //   ② 确认矩形在 [0,0,屏物理尺寸] 之内(口径对了的必要条件);
+        //   ③ 用确认矩形对**本屏底图**真实裁剪,产物非空且尺寸 == 矩形尺寸
+        //     (口径错了的充分条件:核心会报"完全越界",裁出来是空图)。
+        {
+            QScreen* otherScreen = nullptr;
+            for (QScreen* s : QGuiApplication::screens()) {
+                if (s != screen) { otherScreen = s; break; }
+            }
+            if (!otherScreen) {
+                qInfo() << "SMART-CAPTURE  (单屏环境,G 段跳过 —— 非主屏回归需要多屏真机)";
+            } else {
+                const QRect otherGeo = otherScreen->geometry();
+                const qreal otherDpr = otherScreen->devicePixelRatio();
+                // 在另一块屏上造一个"目标窗口"形状的候选(逻辑 300x200,屏内偏移固定)
+                const QPoint otherOrigin(90, 80);
+                const QSize otherSize(300, 200);
+                // 本屏相对物理(注入候选时仍需**绝对**物理 —— 那是候选表的口径)
+                const QRect relPhysical(
+                    QPoint(qRound(otherOrigin.x() * otherDpr),
+                           qRound(otherOrigin.y() * otherDpr)),
+                    QSize(qRound(otherSize.width() * otherDpr),
+                          qRound(otherSize.height() * otherDpr)));
+                const QRect absPhysical = relPhysical.translated(otherGeo.topLeft());
+
+                QVector<smart::Candidate> otherList;
+                smart::Candidate oc;
+                oc.physical = absPhysical;
+                oc.title = QStringLiteral("副屏验收窗口");
+                oc.id = 0x9001;
+                oc.windowId = 0x9001;
+                oc.level = 0;
+                otherList << oc;
+
+                QImage otherFrozen(otherGeo.size() * otherDpr,
+                                   QImage::Format_ARGB32_Premultiplied);
+                otherFrozen.fill(QColor(0x33, 0x44, 0x55));
+
+                auto* ovOther = new OverlayWidget(otherFrozen, 0, otherScreen,
+                                                  /*autoConfirm=*/true,
+                                                  /*rightClickCancel=*/true,
+                                                  /*autoStartStitching=*/false, otherList);
+                ovOther->setGeometry(otherGeo);
+                ovOther->show();
+                QApplication::processEvents();
+
+                QRect gotOther;
+                bool confirmedOther = false;
+                // ⚠️ connect 必须在 clickAt **之前**:直通模式下单击即确认,
+                //    信号发完遮罩就被收起,connect 晚了什么也收不到。
+                QObject::connect(ovOther, &OverlayWidget::regionConfirmed, ovOther,
+                                 [&gotOther, &confirmedOther](const QRect& r) {
+                    gotOther = r;
+                    confirmedOther = true;
+                });
+
+                const QPoint inOther(otherOrigin.x() + 40, otherOrigin.y() + 40);
+                moveMouse(ovOther, inOther);
+                QApplication::processEvents();
+                clickAt(ovOther, inOther);
+                QApplication::processEvents();
+
+                qInfo() << "SMART-CAPTURE  副屏确认矩形 =" << gotOther
+                        << " 期望(本屏相对)=" << relPhysical
+                        << " 屏物理尺寸 =" << otherFrozen.size();
+                check(confirmedOther, QStringLiteral("副屏:单击采纳触发 regionConfirmed"));
+
+                // ① 口径:必须落在本屏物理矩形之内(绝对坐标必越界)
+                check(!gotOther.isNull() &&
+                          QRect(QPoint(0, 0), otherFrozen.size()).contains(gotOther, true),
+                      QStringLiteral("副屏:确认矩形在**本屏相对**口径内(得 %1,%2 %3x%4)")
+                          .arg(gotOther.x()).arg(gotOther.y())
+                          .arg(gotOther.width()).arg(gotOther.height()));
+                check(!gotOther.isNull() && nearRect(gotOther, relPhysical, 3),
+                      QStringLiteral("副屏:确认矩形 == 候选的本屏相对物理矩形"));
+
+                // ② 终态验证:拿确认矩形对**本屏底图**真实裁剪 —— 修复前这里是空图
+                if (!gotOther.isNull()) {
+                    const QImage cropped =
+                        CoreBridge::instance().captureCrop(otherFrozen, gotOther);
+                    qInfo() << "SMART-CAPTURE  副屏真实裁剪产物 =" << cropped.size();
+                    check(!cropped.isNull() &&
+                              qAbs(cropped.width() - gotOther.width()) <= 2 &&
+                              qAbs(cropped.height() - gotOther.height()) <= 2,
+                          QStringLiteral("副屏:用确认矩形可正常裁剪入库(得 %1x%2,期望 %3x%4)")
+                              .arg(cropped.width()).arg(cropped.height())
+                              .arg(gotOther.width()).arg(gotOther.height()));
+                }
+
+                ovOther->close();
+                ovOther->deleteLater();
+            }
         }
 
         target->close();

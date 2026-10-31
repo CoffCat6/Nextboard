@@ -982,7 +982,13 @@ bool OverlayWidget::smartHoverUpdate(const QPoint& pos, bool allowElement) {
         const smart::Candidate& c = m_candidates.at(idx);
         picked = smart::toLocalLogical(c.physical, smartScreenPhysical(), dpr());
         pickedLevel = c.level;
-        m_lastCandidatePhysical = c.physical;
+        // ⚠️ 必须存成**本屏相对**物理矩形(selectionPhysical() 的契约口径),而不是
+        //    c.physical 的"虚拟桌面绝对"物理。二者只在原点为 (0,0) 的主屏上相等
+        //    —— 非主屏上直接回传绝对坐标,核心 crop_rgba 一钳制就是"完全越界",
+        //    裁剪失败 → 不入库、不写剪贴板(用户实测:非主屏智能框选截屏丢失)。
+        //    越界钳制不能省:跨屏窗口被裁进本屏的那部分才是可截的。
+        m_lastCandidatePhysical =
+            smart::toLocalPhysical(c.physical, smartScreenPhysical());
         // 换窗口/换目标 → 旧的元素结果作废(它属于另一个窗口)。
         if (c.level == 0 && c.windowId != m_elementWindowId) {
             m_elementTitle.clear();
@@ -1072,7 +1078,9 @@ void OverlayWidget::applyElementCandidate(const QRect& elementPhysical, const QS
     m_candidateLevel = 1;
     m_elementTitle = title;
     m_elementWindowId = windowId;
-    m_lastCandidatePhysical = elementPhysical;
+    // 与 smartHoverUpdate 同口径:**本屏相对**物理(见那边的注释)。
+    m_lastCandidatePhysical =
+        smart::toLocalPhysical(elementPhysical, smartScreenPhysical());
     const QRect dirty = old.isNull() ? local : (old | local);
     update(dirty.adjusted(-3, -3, 3, 3));
 }
@@ -1599,6 +1607,11 @@ void OverlayWidget::wheelEvent(QWheelEvent* e) {
         const QRect old = m_candidate;
         m_candidate = picked;
         m_candidateLevel = c.level;
+        // ⚠️ 这里此前漏更新 m_lastCandidatePhysical:滚轮切到另一个窗口后单击
+        //    采纳,拿到的却是**上一个**候选的物理矩形 —— 主屏上也会裁错区域。
+        //    与 smartHoverUpdate 同口径,存**本屏相对**物理。
+        m_lastCandidatePhysical =
+            smart::toLocalPhysical(c.physical, smartScreenPhysical());
         const QRect dirty = old.isNull() ? picked : (old | picked);
         update(dirty.adjusted(-3, -3, 3, 3));
     }
