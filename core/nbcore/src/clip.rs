@@ -455,6 +455,7 @@ pub fn ingest_image(
     width: u32,
     height: u32,
     source: &str,
+    owner: Option<&str>,
 ) -> AppResult<Option<ClipEntry>> {
     let settings = core.settings()?;
     let item = ClipItem::Image {
@@ -463,7 +464,7 @@ pub fn ingest_image(
         height,
     };
     let hash = item.hash();
-    let mut stored = process(core, item, &hash, &settings, None)?;
+    let mut stored = process(core, item, &hash, &settings, owner)?;
     if let Some(entry) = &mut stored {
         if entry.source != source {
             set_source(core, &entry.id, source)?;

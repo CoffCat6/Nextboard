@@ -656,7 +656,7 @@ void showPinWindow(const PinContent& content) {
         QObject::connect(editor, &EditorWindow::committed, editor,
                          [guard, notice](const QImage& composed) {
             CoreFacade& facade = CoreFacade::instance();
-            if (ingestImageAndCopy(composed, nullptr, nullptr).isEmpty()) {
+            if (ingestImageAndCopy(composed, nullptr, nullptr, QString()).isEmpty()) {
                 facade.showToast(QStringLiteral("编辑结果未入库(可能超过图片大小上限)"));
                 // 主面板隐藏时 toast 看不见,恢复时由贴图自己说一句
                 *notice = QStringLiteral("保存失败");
@@ -678,7 +678,7 @@ void showPinWindow(const PinContent& content) {
         QObject::connect(editor, &EditorWindow::pinRequested, editor,
                          [guard, notice](const QImage& composed) {
             CoreFacade& facade = CoreFacade::instance();
-            if (ingestImageAndCopy(composed, nullptr, nullptr).isEmpty()) {
+            if (ingestImageAndCopy(composed, nullptr, nullptr, QString()).isEmpty()) {
                 facade.showToast(QStringLiteral("贴图失败(可能超过图片大小上限)"));
                 *notice = QStringLiteral("贴图失败");
                 return;
@@ -784,7 +784,7 @@ void CoreFacade::editEntry(const QString& id) {
     auto* editor = new EditorWindow(image);
     // 与第一代一致:编辑产物走同一条入库通道(按 hash 去重),并写回剪贴板
     QObject::connect(editor, &EditorWindow::committed, editor, [this](const QImage& composed) {
-        if (ingestImageAndCopy(composed, nullptr, nullptr).isEmpty()) {
+        if (ingestImageAndCopy(composed, nullptr, nullptr, QString()).isEmpty()) {
             emit toastMessage(QStringLiteral("编辑结果未入库(可能超过图片大小上限)"));
             return;
         }
@@ -795,7 +795,7 @@ void CoreFacade::editEntry(const QString& id) {
     //    地方)下线后遗留的孤儿信号,点了按钮编辑器关闭、贴图却没出现。
     //    口径与 committed 一致:入库 + 写剪贴板,再开贴图窗口。
     QObject::connect(editor, &EditorWindow::pinRequested, editor, [this](const QImage& composed) {
-        if (ingestImageAndCopy(composed, nullptr, nullptr).isEmpty()) {
+        if (ingestImageAndCopy(composed, nullptr, nullptr, QString()).isEmpty()) {
             emit toastMessage(QStringLiteral("贴图失败(可能超过图片大小上限)"));
             return;
         }

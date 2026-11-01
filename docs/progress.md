@@ -6138,3 +6138,18 @@ docs/24-quick-commands-plan.md(v1 设计稿:§3 数据模型/§4 注册表/§5 s
 - 单测:owner_app_name 路径提取;394 项全量绿。
 - 真机确认项(沙箱无法模拟第三方复制):从浏览器/聊天窗复制文本 → 卡片显示
   对应应用名;UWP 应用属主为容器进程按 NULL 处理(不显示,不报错)。
+
+## 2026-11-01(六)应用来源追踪 II:截图来源(docs/25 扩展)
+
+- **语义拍板**:截图的"来源应用"= 用户截取的内容所属应用,非 nextboard。
+  智能框选采纳 = 被采纳候选窗口;手动框选 = 选区**中心点**所在窗口(用户拍板,
+  排除自身遮罩);全屏截图不设(整屏无单一来源);长截图同手框。
+- **时序**:浮条模式「完成」点击时光标在浮条上 —— 来源必须在**采纳/松手时**
+  (窗口存活)解析存 g_sourceOwnerExe(会话级 static,closeAllOverlays 清空,
+  startCaptureSession 重置),不能确认时再取。
+- **FFI**:新增 nb_ingest_capture_rgba2(7 参,多 owner),**不改 v1 签名** ——
+  ABI 闸门只查版本号,改参数会破坏"新宿主配旧 DLL";宿主 resolve 失败回退 v1。
+  PNG JSON 通道加 source_owner 字段。
+- 编辑器/贴图链路的入库(编辑器产物,非框选)传空 owner(卡片不显示来源段)。
+- --quick-commands-flow / --settings-flow / --capture-toolbar-flow 回归 exit 0。
+- 真机确认项:浏览器上智能框选截图 → 卡片「来自 Chrome」。

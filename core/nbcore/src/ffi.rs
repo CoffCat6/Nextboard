@@ -754,11 +754,63 @@ pub unsafe extern "C" fn nb_ingest_capture_rgba(
         let bytes = std::slice::from_raw_parts(rgba, rgba_len);
         // 唯一一次整帧拷贝:ingest_image 收 owned(Vec),编码 PNG / 生成缩略图都要它
         let owned = bytes.to_vec();
-        let stored = crate::clip::ingest_image(core, owned, width, height, &source)?;
+        let stored = crate::clip::ingest_image(core, owned, width, height, &source, None)?;
         notify_host(WM_APP_CLIP_CHANGED);
         Ok(serde_json::json!({ "entry": stored }).to_string())
     }))
     .unwrap_or_else(|_| Err(AppError::Panicked("nb_ingest_capture_rgba panic".into())));
+    report_out_text(result, out_result)
+}
+
+/// v2:带来源应用(docs/25)。与 v1 的唯一差异是多一个 owner 参数(NULL = 无);
+/// 新增独立导出而不是改 v1 签名 —— 宿主按导出名探测,新宿主配旧 DLL 自动回退 v1
+/// (与 nb_stitch_* 的可选导出模式一致)。
+///
+/// # Safety
+/// rgba 由宿主持有,本函数只读(len 必须恰为 width*height*4)。
+#[no_mangle]
+pub unsafe extern "C" fn nb_ingest_capture_rgba2(
+    rgba: *const u8,
+    rgba_len: usize,
+    width: u32,
+    height: u32,
+    source: *const c_char,
+    owner: *const c_char,
+    out_result: *mut *mut c_char,
+) -> i32 {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if rgba.is_null() || rgba_len == 0 {
+            return Err(AppError::InvalidInput("截图入库:像素为空".into()));
+        }
+        let expected = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or_else(|| AppError::InvalidInput("截图入库:尺寸溢出".into()))?;
+        if rgba_len != expected {
+            return Err(AppError::InvalidInput(format!(
+                "截图入库:RGBA 长度 {rgba_len} 与尺寸 {width}x{height} 不匹配"
+            )));
+        }
+        let source = if source.is_null() {
+            "capture".to_owned()
+        } else {
+            cstr_to_string(source)?
+        };
+        let owner = if owner.is_null() {
+            None
+        } else {
+            Some(cstr_to_string(owner)?)
+        };
+        let core = crate::core::Core::get()?;
+        // SAFETY: 调用方契约保证 rgba 指向 rgba_len 字节的可读缓冲
+        let bytes = std::slice::from_raw_parts(rgba, rgba_len);
+        let owned = bytes.to_vec();
+        let stored =
+            crate::clip::ingest_image(core, owned, width, height, &source, owner.as_deref())?;
+        notify_host(WM_APP_CLIP_CHANGED);
+        Ok(serde_json::json!({ "entry": stored }).to_string())
+    }))
+    .unwrap_or_else(|_| Err(AppError::Panicked("nb_ingest_capture_rgba2 panic".into())));
     report_out_text(result, out_result)
 }
 
@@ -1358,11 +1410,13 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
             let core = crate::core::Core::get()?;
             let png_b64 = str_req(req, "png_base64")?;
             let source = str_opt(req, "source").unwrap_or_else(|| "capture".to_owned());
+            // 来源应用(docs/25):截图场景由宿主传入(框选中心点/采纳窗口的 exe 名)
+            let owner = str_opt(req, "source_owner");
             let png = base64::engine::general_purpose::STANDARD
                 .decode(png_b64.as_bytes())
                 .map_err(|err| AppError::InvalidInput(format!("PNG base64 非法: {err}")))?;
             let (rgba, width, height) = decode_png_to_rgba(&png)?;
-            let stored = crate::clip::ingest_image(core, rgba, width, height, &source)?;
+            let stored = crate::clip::ingest_image(core, rgba, width, height, &source, owner.as_deref())?;
             notify_host(WM_APP_CLIP_CHANGED);
             Ok(serde_json::json!({ "entry": stored }))
         }

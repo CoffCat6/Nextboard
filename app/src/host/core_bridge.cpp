@@ -86,6 +86,9 @@ bool CoreBridge::init(bool /*startHidden*/, QString* error) {
     // 到 ingest_capture_png(见 hasRgbaIngest),不会因为新宿主配旧 DLL 就崩。
     m_ingestCaptureRgba =
         reinterpret_cast<NbIngestCaptureRgba>(resolve("nb_ingest_capture_rgba"));
+    // v2(带来源应用):旧核心没有该导出时保持 nullptr,调用处回退 v1。
+    m_ingestCaptureRgba2 =
+        reinterpret_cast<NbIngestCaptureRgba2>(resolve("nb_ingest_capture_rgba2"));
     m_copyRgbaToClipboard =
         reinterpret_cast<NbCopyRgbaToClipboard>(resolve("nb_copy_rgba_to_clipboard"));
     if (!m_init || !m_callFn || !m_freeString || !m_shutdown || !m_abi) {
@@ -452,18 +455,37 @@ void CoreBridge::stitchAbort(const QString& session) {
 // ---- 截图入库(RGBA 直入)----
 
 QJsonObject CoreBridge::ingestCaptureRgba(const QImage& image, const QString& source) {
-    if (!m_ingestCaptureRgba || !m_freeString || image.isNull()) return {};
+    return ingestCaptureRgba2(image, source, QString());
+}
+
+QJsonObject CoreBridge::ingestCaptureRgba2(const QImage& image, const QString& source,
+                                           const QString& owner) {
+    if (!m_freeString || image.isNull()) return {};
     // 核心按 RGBA8888 紧凑排布读(与 captureCrop / ocrImage / stitchAppend 同口径)。
     // ⚠️ convertToFormat 在原图已是 RGBA8888 时**返回同一份数据**(隐式共享,不拷贝),
     //    故这里不额外付一份整帧;真正的一次拷贝在核心侧 bytes.to_vec()。
     const QImage src = image.convertToFormat(QImage::Format_RGBA8888);
     const QByteArray srcUtf8 = source.toUtf8();
+    const QByteArray ownerUtf8 = owner.toUtf8();
     char* out = nullptr;
-    const int rc = m_ingestCaptureRgba(
-        src.constBits(),
-        static_cast<unsigned long long>(src.sizeInBytes()),
-        static_cast<unsigned>(src.width()), static_cast<unsigned>(src.height()),
-        srcUtf8.constData(), &out);
+    int rc;
+    if (m_ingestCaptureRgba2) {
+        // v2:带来源应用(docs/25)
+        rc = m_ingestCaptureRgba2(
+            src.constBits(),
+            static_cast<unsigned long long>(src.sizeInBytes()),
+            static_cast<unsigned>(src.width()), static_cast<unsigned>(src.height()),
+            srcUtf8.constData(),
+            owner.isEmpty() ? nullptr : ownerUtf8.constData(), &out);
+    } else {
+        // 旧核心:回退 v1(无来源应用)
+        if (!m_ingestCaptureRgba) return {};
+        rc = m_ingestCaptureRgba(
+            src.constBits(),
+            static_cast<unsigned long long>(src.sizeInBytes()),
+            static_cast<unsigned>(src.width()), static_cast<unsigned>(src.height()),
+            srcUtf8.constData(), &out);
+    }
     if (rc != 0 || !out) {
         if (out) m_freeString(out);
         return {};

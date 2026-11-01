@@ -59,6 +59,10 @@ using NbCaptureMonitorRegionMatched = int(__cdecl*)(const char*, int, int, unsig
 /// 截图入库(RGBA 直入,不走 base64/PNG):出参为**裸**小 JSON {"entry": …|null}。
 using NbIngestCaptureRgba = int(__cdecl*)(const unsigned char*, unsigned long long,
                                           unsigned, unsigned, const char*, char**);
+/// v2:多一个来源应用参数(docs/25)。旧核心无此导出 → 回退 v1。
+using NbIngestCaptureRgba2 = int(__cdecl*)(const unsigned char*, unsigned long long,
+                                           unsigned, unsigned, const char*, const char*,
+                                           char**);
 /// 把宿主内存里的 RGBA 直接写进系统剪贴板(CF_DIBV5,不经 PNG/base64)。
 using NbCopyRgbaToClipboard = int(__cdecl*)(const unsigned char*, unsigned long long,
                                             unsigned, unsigned);
@@ -211,6 +215,9 @@ public:
     /// ⚠️ 阻塞调用(PNG 编码 + 缩略图 + 落盘):大图几十毫秒到几百毫秒,
     ///    **别在 UI 线程高频调用**(截图链路本就是用户动作触发的低频路径)。
     QJsonObject ingestCaptureRgba(const QImage& image, const QString& source);
+    /// v2:带来源应用(docs/25;owner 空串 = 无)。旧核心无导出时自动回退 v1。
+    QJsonObject ingestCaptureRgba2(const QImage& image, const QString& source,
+                                   const QString& owner);
 
     /// 把该图直接写进系统剪贴板(不经 PNG/base64)。返回是否成功。
     bool copyRgbaToClipboard(const QImage& image);
@@ -280,6 +287,7 @@ private:
     NbStitchFinishRgba m_stitchFinishRgba = nullptr;
     NbStitchAbort m_stitchAbort = nullptr;
     NbIngestCaptureRgba m_ingestCaptureRgba = nullptr;
+    NbIngestCaptureRgba2 m_ingestCaptureRgba2 = nullptr;
     NbCopyRgbaToClipboard m_copyRgbaToClipboard = nullptr;
     bool m_initialized = false;
     QString m_dataDir;

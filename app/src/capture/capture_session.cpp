@@ -51,6 +51,29 @@ QList<QPointer<OverlayWidget>> g_overlays;
 // 本次会话的入库后回调(截图翻译/取字接续 OCR 用);会话结束即清空。
 CaptureDone g_onCaptured;
 
+// 本次会话的来源应用 exe 名(docs/25):在**窗口仍存活时**(采纳/手框确认点)
+// 立即解析,存 exe 文件名;全屏截图无单一来源应用 → 空串(卡片不显示来源)。
+// 会话级 QString 而非 OverlayWidget 成员:浮条模式下「完成」点击时遮罩已销毁,
+// 成员随窗口亡而失;static 让入库(异步链路)仍可读。
+QString g_sourceOwnerExe;
+
+/// HWND → 所属进程 exe 文件名(小写);失败返回空串。
+/// 限权打开(ProcessQueryLimitedInformation)对大多数进程足够;系统进程会失败 → 空。
+QString hwndToExeName(HWND hwnd) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == 0) return {};
+    const HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!proc) return {};
+    WCHAR buf[MAX_PATH] = {};
+    DWORD len = MAX_PATH;
+    const BOOL ok = QueryFullProcessImageNameW(proc, 0, buf, &len);
+    CloseHandle(proc);
+    if (!ok || len == 0) return {};
+    const QString full = QString::fromWCharArray(buf, static_cast<qsizetype>(len));
+    return full.mid(full.lastIndexOf('\\') + 1).toLower();
+}
+
 /// 剔除已销毁的遮罩;返回是否仍有活跃遮罩(即会话进行中)。
 bool pruneOverlays() {
     g_overlays.removeIf([](const QPointer<OverlayWidget>& p) { return p.isNull(); });
@@ -124,6 +147,7 @@ void closeAllOverlays(std::function<void()> after = {}) {
     const QList<QPointer<OverlayWidget>> overlays = g_overlays;
     g_overlays.clear();
     g_onCaptured = {};
+    g_sourceOwnerExe.clear();
     // 长截图会话核在核心侧持有整张结果图,会话结束必须显式丢弃 ——
     // 否则用户中途 Esc / 空闲超时后,那几百 MB 会一直挂在核心的表里。
     abortStitchSession();
@@ -227,7 +251,8 @@ private:
 ///
 /// 顺序遵循第一代 docs/phase5.md §3.6:**先入库、后写剪贴板**——剪贴板监听线程
 /// 读到同一张图时按 hash 命中去重,只 touch 不新建,不会产生重复条目。
-QString ingestImageAndCopy(const QImage& image, bool* outOversize, QString* outNotice) {
+QString ingestImageAndCopy(const QImage& image, bool* outOversize, QString* outNotice,
+                           const QString& sourceOwner) {
     if (outOversize) *outOversize = false;
     if (outNotice) outNotice->clear();
     CoreBridge& core = CoreBridge::instance();
@@ -238,12 +263,13 @@ QString ingestImageAndCopy(const QImage& image, bool* outOversize, QString* outN
     QString pngBase64;
     QJsonObject resp;
     if (direct) {
-        resp = core.ingestCaptureRgba(image, QStringLiteral("capture"));
+        resp = core.ingestCaptureRgba2(image, QStringLiteral("capture"), sourceOwner);
     } else {
         pngBase64 = quickPngBase64(image);
         resp = core.call("ingest_capture_png", {
             {"png_base64", pngBase64},
             {"source", "capture"},
+            {"source_owner", sourceOwner},
         });
         if (!resp.value("ok").toBool()) {
             const QString err = resp.value("error").toObject().value("message").toString();
@@ -322,7 +348,8 @@ namespace {
 void finishCapture(const QImage& image, const CaptureDone& done) {
     bool oversize = false;
     QString notice;
-    const QString id = ingestImageAndCopy(image, &oversize, &notice);
+    // 来源应用(docs/25):采纳/手框确认点已解析好 exe(窗口存活时),此处直接用
+    const QString id = ingestImageAndCopy(image, &oversize, &notice, g_sourceOwnerExe);
     if (!id.isEmpty() && done) done(id);
     // 超限必须让用户看见(尤其长截图 —— 尺寸大,撞上限是常态而非意外)。
     // 走 CoreFacade 的 toast:截图会话没有自己的 UI 层,而面板已有统一的提示通道。
@@ -354,6 +381,9 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured) {
         return;
     }
     g_onCaptured = onCaptured;
+    // 来源应用(docs/25):每会话重置 —— 全屏截图不设置(无单一来源应用),
+    // 智能框选采纳/手动框选松手时按各自语义填。
+    g_sourceOwnerExe.clear();
     // 桌面便签是置顶窗口,截图时不该被拍进画面(docs/20 §7.4)。隐藏是**产品约定**
     // 而非"当前后端恰好没暴露"的补偿:xcap 现在的 GDI BitBlt 不带 CAPTUREBLT,
     // 大概率本来就拍不到分层窗口,但换 DXGI/WGC 后端就会。代价只是两次调用。
@@ -1604,6 +1634,13 @@ void OverlayWidget::mouseReleaseEvent(QMouseEvent* e) {
         m_adoptedSelection = m_candidate;
         m_candidatePhysical = m_lastCandidatePhysical;
         ++m_smartAccepts;
+        // 来源应用(docs/25):被采纳的候选窗口,窗口存活时立刻解析 exe 名
+        {
+            const QVector<int> stack = hoverStack(e->pos());
+            if (!stack.isEmpty())
+                g_sourceOwnerExe = hwndToExeName(reinterpret_cast<HWND>(
+                    m_candidates.at(stack.first()).windowId));
+        }
         const QRect picked = m_selection.normalized();
         // 采纳后**保留候选**:用户点「完成」之前还想看/想换,光标一动就更新。
         if (!picked.isEmpty()) {
@@ -1627,6 +1664,23 @@ void OverlayWidget::mouseReleaseEvent(QMouseEvent* e) {
         update();
         if (m_autoConfirm) emit cancelled();   // 直通模式保持"点空即取消"的原有手感
         return;
+    }
+    // 来源应用(docs/25):选区**中心点**所在的窗口(用户拍板的中心点方案),
+    // 排除自身遮罩(遮罩盖满全屏,不排除的话永远命中自己)。
+    // 注意 WindowFromPoint 会命中**透明遮罩下**的窗口吗?会 —— 遮罩是 WS_EX_LAYERED
+    // + 全绘制,WindowFromPoint 按 hit-test 走,遮罩自身会被命中;故必须排除。
+    {
+        const QPoint center = m_selection.center();
+        const QPoint centerGlobal = mapToGlobal(center);
+        const HWND hit = ::WindowFromPoint(
+            POINT{centerGlobal.x(), centerGlobal.y()});
+        const bool isSelfOverlay = std::any_of(
+            g_overlays.cbegin(), g_overlays.cend(),
+            [hit](const QPointer<OverlayWidget>& p) {
+                return !p.isNull() && p->winId() == reinterpret_cast<WId>(hit);
+            });
+        if (hit != nullptr && !isSelfOverlay)
+            g_sourceOwnerExe = hwndToExeName(hit);
     }
     // 三种出口:
     //   1) 长截图意图(热键 Ctrl+Shift+L)→ 直接进长截图就绪态;

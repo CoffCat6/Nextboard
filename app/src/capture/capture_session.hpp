@@ -81,7 +81,8 @@ int captureDelaySeconds();
 /// 读到同一张图时按 hash 命中去重,只 touch 不新建,不会产生重复条目。
 /// outOversize *非空时*回填"是否因超限未入库";outNotice 回填给用户看的提示文案。
 /// 两者都可传 nullptr(不需要区分的调用方,如编辑器链路)。
-QString ingestImageAndCopy(const QImage& image, bool* outOversize, QString* outNotice);
+QString ingestImageAndCopy(const QImage& image, bool* outOversize, QString* outNotice,
+                           const QString& sourceOwner = QString());
 
 /// 遮罩窗口:铺满**指定**屏幕,绘制冻结底图 + 半透明遮罩 + 选区。
 class OverlayWidget : public QWidget {
