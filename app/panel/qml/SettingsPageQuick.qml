@@ -140,7 +140,14 @@ Item {
         }
         railCommands = arr
         editorCard.visible = false
+        // 反馈必须显式:此前创建成功/失败全靠卡片红字与 statusText,用户不知道
+        // 到底成没成(实测反馈"无法创建"时无法区分是校验拒绝还是保存失败)。
+        if (typeof view.scheduleSave !== "function") {
+            Core.showToast("保存通道不可用,请重启应用后重试")
+            return
+        }
         view.scheduleSave()
+        Core.showToast(editingNew ? "已添加到快捷栏" : "已更新")
     }
     function genId() {
         const hex = Math.floor(Math.random() * 0xffff).toString(16)

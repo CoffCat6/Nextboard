@@ -154,6 +154,8 @@ Item {
         const resp = Core.call("save_settings", s)
         root.statusText = resp.ok ? "已保存" : "保存失败:" + errText(resp)
         root.statusError = !resp.ok
+        // 保存失败同时 toast:statusText 在页面中部,自动保存无按钮,用户容易错过
+        if (!resp.ok) Core.showToast("设置保存失败:" + errText(resp))
         if (!resp.ok) return
         if (root.dataDirDirty) {
             root.statusText = "已保存。数据目录将在下次启动时生效(数据库与图片自动迁移)"
