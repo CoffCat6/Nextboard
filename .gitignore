@@ -28,3 +28,4 @@ tools/smoke_host/*.exe
 # clangd 索引缓存(工具产物,按目录整体忽略 —— 原先逐文件列了 28 行,新增/改名即失效)
 app/.cache/
 .zcode/plans/plan-session_4a51cf214ce8f99eb7c1e573d36ecb9d.md
+build_app.bat
