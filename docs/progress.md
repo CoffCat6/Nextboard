@@ -6069,3 +6069,37 @@ cargo release + ninja 全过;`--settings-flow` 新增 STEP16(导航进入/初值
 docs/24-quick-commands-plan.md(v1 设计稿:§3 数据模型/§4 注册表/§5 system 目录/
 §6 UI/§7 扩展与安全/§8 分期 Q1–Q3/§10 `--quick-commands-flow` 7 项验收设计);
 18-next-steps.md 加 backlog 3.15。Q1 待实施。
+
+## 2026-11-01(六)快捷功能 IV:Q1 主体实施(docs/24 §8)
+
+### 实现
+
+- 数据层:QuickCommand/QuickPayload(settings.rs,kind 开放字符串 + 校验白名单,
+  12 条上限;7 分支校验单测,393 项全量绿)。
+- 分发层:QuickCommands(host,{hpp,cpp})—— internal 动作注册表 6 项(全复用
+  现有链路)、system 精选目录 12 项(target 存键名)、app ShellExecute(不 shell 包装);
+  经 CoreFacade 转发(invokeMethod,避免 panel→host 反向包含),main.cpp 装配。
+- 界面:QuickRail 渲染真实化(settingsChanged 信号驱动刷新;新增 CoreFacade
+  notifySettingsChanged);设置页管理列表(增删改排启)+ 编辑卡片(三类型表单,
+  路径/工作目录浏览按钮 —— 新增 openDirectoryDialog);图标自定义
+  (16 内置图标网格 + 首字字母块,icon 编码 ""/"@"/HeaderIcon 词汇);
+  悬停提示重做(自绘双行卡片:名称 + 类型摘要;ToolTip attached 共享实例
+  干扰不弹的坑实测确认);HeaderIcon 补 app/pause/theme/plus 四图标。
+- 验收:`--quick-commands-flow`(目录完备/internal 真实执行翻转复原/app 拒绝
+  无效路径/system 白名单拒 calc/配置往返/未知 type 前向兼容/13 条上限拒)七项全过;
+  --settings-flow STEP16 回归过。
+
+### 修复(实施中暴露)
+
+- 中文乱码:system 目录 label 经 QLatin1String 把 UTF-8 字节按 Latin1 逐字节
+  解释 → fromUtf8(/utf-8 全局开着,坑只在转换点)。
+- 悬停提示不弹:逐按钮 attached ToolTip 共享 overlay 实例,visible 绑定互扰 →
+  改自绘卡片(属性驱动)。
+- 界面加载失败:QuickRail 漏 import QtQuick.Layouts(ColumnLayout)。
+- 管理列表类型徽标调错作用域(cmdRow.typeBadgeColor → page.typeBadgeColor),
+  每行刷 TypeError 且徽标失色。
+
+### 真机确认项
+
+- system 类型实际打开 msc/cpl 页面(flow 只断言映射);编辑卡片三类型
+  添加→rail 点击执行;悬停提示弹出时序(数据链路已被 flow 覆盖)。
