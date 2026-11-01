@@ -30,19 +30,14 @@ struct OcrLineBox;   // host/core_bridge.hpp(图中取字的行数据;此处只�
 class AnnotationToolbar;   // 二级条共享控件(编辑器/浮条同一类)
 
 /// 截图会话的**意图**,决定"框完之后去哪儿"。
-///
-/// 与 regionAutoConfirm(设置项)的关系:**Scrolling 优先于它**。
-/// 设了 regionAutoConfirm=true(松手即入库)的用户同样能用长截图 ——
-/// 长截图意图本来就是"我明确要长截图",不该被一个通用的"框完立刻入库"
-/// 偏好否掉。这也是把意图单独做出来的原因(旧写作方式只能靠 regionAutoConfirm
-/// 区分 Direct / Toolbar,没有第三种出口)。
 enum class CaptureIntent {
-    /// 普通框选:按 regionAutoConfirm 决定"松手即入库"或"浮出工具栏"。
+    /// 普通框选:选区保留并浮出工具栏(标注/OCR取字/二维码/翻译/长截图/贴图/保存)。
+    /// ⚠️ 原"松手即入库"直通出口已移除(2026-11-01,regionAutoConfirm 设置删除):
+    /// 直通下浮条不可达,工具栏的取字/翻译/长截图就全够不到 —— 浮条成为唯一出口。
     Region,
     /// 整屏直通:不建遮罩,直接入库。
     Fullscreen,
-    /// **滚动长截图**:框完即进长截图就绪态(选区锁定 + 「开始」面板),
-    /// 与 regionAutoConfirm 无关。热键 Ctrl+Shift+L 走这条。
+    /// **滚动长截图**:框完即进长截图就绪态(选区锁定 + 「开始」面板)。
     Scrolling,
 };
 
@@ -50,7 +45,7 @@ enum class CaptureIntent {
 /// 截图翻译/取字用它接续 OCR → 翻译链路;不传则只做"入库 + 写剪贴板"。
 using CaptureDone = std::function<void(const QString& entryId)>;
 
-/// 启动会话(Fullscreen = 光标屏整屏直通;Region = 各屏遮罩框选)。
+/// 启动会话(Fullscreen = 光标屏整屏直通;Region/Scrolling = 各屏遮罩框选)。
 /// 忙碌重入检查沿用第一代 CAPTURE_BUSY 语义。
 ///
 /// ⚠️ 框选确认后**一律直通**(入库 + 写剪贴板),不再有"进编辑器"这条出口(§18.5):
@@ -89,16 +84,14 @@ class OverlayWidget : public QWidget {
     Q_OBJECT
 public:
     /// screen:本遮罩所属屏幕(frozen 即该屏的物理像素底图)。
-    /// autoConfirm:对应设置 regionAutoConfirm —— true = 松开鼠标即确认(默认);
-    ///              false = 选区保留,可用 8 向手柄微调,Enter/双击确认。
     /// rightClickCancel:对应设置 regionRightClickCancel —— 右键是否取消本次截图。
     /// autoStartStitching:框完**直接进长截图就绪态**(CaptureIntent::Scrolling 用)。
-    /// 此时 autoConfirm 的语义只剩"点空是否取消",不再决定"松手即入库" ——
-    /// 否则设了 regionAutoConfirm=true 的用户一松手就入库了,永远进不了长截图。
     /// candidates:智能框选的候选表(**虚拟桌面绝对物理像素**,z 序从顶到底),
     ///             见 smart_capture.hpp。空表 = 退化为纯手动框选(总是允许的状态:
     ///             智能框选是增益,拿不到候选绝不能让截图不可用)。
-    OverlayWidget(QImage frozen, int screenIndex, QScreen* screen, bool autoConfirm,
+    /// ⚠️ autoConfirm 参数已移除(2026-11-01):regionAutoConfirm 设置已删,
+    /// 框选**恒为浮条模式** —— 选区保留 + 8 向手柄微调 + Enter/双击/完成确认。
+    OverlayWidget(QImage frozen, int screenIndex, QScreen* screen,
                   bool rightClickCancel, bool autoStartStitching = false,
                   const QVector<smart::Candidate>& candidates = {},
                   QWidget* parent = nullptr);
@@ -136,8 +129,7 @@ public:
     QRect smartCandidate() const { return m_candidate; }
     /// 候选表条目数(验收断言"枚举到了东西 / 没枚举到自己")。
     int smartCandidateCount() const { return m_candidates.size(); }
-    /// 已采纳过几次"单击即框选"。直通模式下**单击即确认**,浮条模式下单击只
-    /// 采纳、仍需再点完成 —— 两条路径都由它计数,验收据此区分。
+    /// 已采纳过几次"单击即框选"。浮条模式下单击只采纳、仍需再点完成。
     int smartAcceptCount() const { return m_smartAccepts; }
     /// 当前候选的层级(0 = 窗口,1 = UIA 元素;-1 = 无)。
     int smartCandidateLevel() const { return m_candidateLevel; }
@@ -276,7 +268,8 @@ private:
     qreal m_maskedBaseDpr = 0.0;
     int m_screenIndex;
     QScreen* m_screen = nullptr;
-    bool m_autoConfirm = true;
+    // m_autoConfirm 已移除(2026-11-01):regionAutoConfirm 设置删除,
+    // 框选恒为浮条模式(选区保留 + 手柄微调 + Enter/双击/完成确认)。
     bool m_rightClickCancel = true;
 
     QPoint m_origin;          // 新选区的起点(局部逻辑坐标)
@@ -342,7 +335,7 @@ private:
     /// 光标处的重叠候选栈(窗口级)。
     QVector<int> hoverStack(const QPoint& pos) const;
 
-    // ---- 框选后浮出工具栏(docs/14 §16;仅 autoConfirm=false 生效)----
+    // ---- 框选后浮出工具栏(docs/14 §16;框选后的唯一出口)----
     // 内嵌于遮罩窗口(不新建窗口),挂在选区底部;按钮走既有信号通道。
     bool toolbarVisible() const;
     QRect toolbarRect() const;              // 局部逻辑坐标(跟随选区/翻转)

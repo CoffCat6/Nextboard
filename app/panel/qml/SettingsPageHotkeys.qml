@@ -1,4 +1,5 @@
-// 设置页 · 快捷键分类:九个动作的组合键录制。
+// 设置页 · 快捷键分类:六个动作的组合键录制。
+// (截图翻译/截图取字/滚动长截图三项已移除,2026-11-01:截图工具栏按钮承担。)
 // 页面协议(load/collect/view)见 SettingsView.qml 头注释。
 import QtQuick
 import QtQuick.Controls.Basic
@@ -19,10 +20,7 @@ Item {
         hkCaptureFullscreen.value = hk.captureFullscreen || ""
         hkPinLatest.value = hk.pinLatest || ""
         hkOpenTranslate.value = hk.openTranslate || ""
-        hkCaptureTranslate.value = hk.captureTranslate || ""
-        hkCaptureOcr.value = hk.captureOcr || ""
         hkCaptureDelayed.value = hk.captureDelayed || ""
-        hkCaptureScrolling.value = hk.captureScrolling || ""
     }
 
     function collect(s) {
@@ -32,10 +30,7 @@ Item {
         hk.captureFullscreen = hkCaptureFullscreen.value
         hk.pinLatest = hkPinLatest.value
         hk.openTranslate = hkOpenTranslate.value
-        hk.captureTranslate = hkCaptureTranslate.value
-        hk.captureOcr = hkCaptureOcr.value
         hk.captureDelayed = hkCaptureDelayed.value
-        hk.captureScrolling = hkCaptureScrolling.value
         s.hotkeys = hk
     }
 
@@ -104,38 +99,11 @@ Item {
                     view.scheduleSave()
                 }
             }
-            FieldLabel { text: "截图翻译" }
-            HotkeyField {
-                id: hkCaptureTranslate
-                Layout.fillWidth: true
-                onValueModified: {
-                    view.hotkeysDirty = true
-                    view.scheduleSave()
-                }
-            }
-            FieldLabel { text: "截图取字（入列表）" }
-            HotkeyField {
-                id: hkCaptureOcr
-                Layout.fillWidth: true
-                onValueModified: {
-                    view.hotkeysDirty = true
-                    view.scheduleSave()
-                }
-            }
+            // 截图翻译/截图取字/滚动长截图三行已移除(2026-11-01):
+            // 三个功能由截图工具栏按钮承担(OCR取字/翻译/长截图),不再有全局热键。
             FieldLabel { text: "延时截图" }
             HotkeyField {
                 id: hkCaptureDelayed
-                Layout.fillWidth: true
-                onValueModified: {
-                    view.hotkeysDirty = true
-                    view.scheduleSave()
-                }
-            }
-            // 长截图是**独立入口**:直通模式(框选后→直接入库)下浮条不出现,
-            // 没有热键就完全够不到这个功能,故默认预置 Ctrl+Shift+L(docs/19 §9 Q3)。
-            FieldLabel { text: "滚动长截图" }
-            HotkeyField {
-                id: hkCaptureScrolling
                 Layout.fillWidth: true
                 onValueModified: {
                     view.hotkeysDirty = true

@@ -72,7 +72,7 @@ void reportTodoGroups(PanelWindow& panel);
 void runCaptureToolbarFlow();
 
 /// 智能框选验收(--smart-capture-flow):A 段纯几何(四套坐标的 4→1 换算 + 命中边界),
-/// B 段端到端(真实窗口 → 悬停预选 → 单击采纳 → 直通模式确认矩形),
+/// B 段端到端(真实窗口 → 悬停预选 → 单击采纳 → 确认矩形),
 /// C 段手框回归(拖拽不被"单击采纳"劫持),D 段自过滤(本进程窗口不进候选表)。
 /// 不写库、不联网,无需 --data-dir。
 void runSmartCaptureFlow();

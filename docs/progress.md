@@ -6154,6 +6154,30 @@ docs/24-quick-commands-plan.md(v1 设计稿:§3 数据模型/§4 注册表/§5 s
 - --quick-commands-flow / --settings-flow / --capture-toolbar-flow 回归 exit 0。
 - 真机确认项:浏览器上智能框选截图 → 卡片「来自 Chrome」。
 
+## 2026-11-01(六)冗余功能收口:框选恒浮工具栏,三热键退役
+
+- **动机**(用户拍板):移除"截图后直接入库"出口 —— 直通模式下浮条不可达,
+  取字/翻译/长截图三个功能就全够不到,还得各配一个全局热键来补入口。工具栏
+  上本就有这三个按钮,收口后入口唯一、行为一致。
+- **行为变化**:框选截图**恒为浮出工具栏**(选区保留 + 手柄微调 + Enter/双击/
+  「完成」确认);原设"直接入库"的用户框完后在浮条点「完成」即完成入库+剪贴板,
+  代价是多一次点击,换来全部工具栏功能可达。全屏截图不变(仍直通)。
+- **移除清单**:
+  - core:Settings.regionAutoConfirm 字段、HotkeyAction 的 CaptureTranslate/
+    CaptureOcr/CaptureScrolling 三枚举、HotkeyMap 对应三字段与其默认键
+    (Ctrl+Shift+E / 预置 Ctrl+Shift+L);相关单测同步(395 项全绿)。
+  - app:Hotkeys 三 case、OverlayWidget 的 autoConfirm 参数与全部直通分支
+    (智能框选单击确认保留 —— 采纳即确认的语义不变)、遮罩空态文案两分支合一。
+  - QML:设置页「框选后」下拉(regionExitCombo)与三行热键字段删除。
+- **兼容性**:Settings 反序列化是容器级 default(非 deny_unknown_fields),旧配置
+  里残留的 regionAutoConfirm / captureTranslate / captureOcr / captureScrolling
+  键被静默忽略(与已废弃的 regionSkipEditor 同路数),下次保存自然消失;
+  翻译页「截图取字」按钮与 CoreFacade::captureOcr **保留**(页内快捷路径)。
+- 验收流同步:stitch-settings(热键断言改为"残留键读回为空")、smart-capture
+  (直通文案)、capture-toolbar(长截图意图断言文案)。
+- 真机确认项:框选松手 → 浮条出现;浮条「完成」入库+剪贴板;托盘「滚动长截图」
+  入口可用;设置页截图分类无「框选后」下拉、快捷键页剩 6 行。
+
 ## 2026-11-01(六)qmllint 内存爆满排查(Qt 6.9.0 解析器 bug)
 
 - **现象**:一跑 qmllint(直接跑或 CMake `nextboard_qmllint` 目标)内存 4 秒

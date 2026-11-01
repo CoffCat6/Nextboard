@@ -17,16 +17,15 @@ class Hotkeys : public QObject {
     Q_OBJECT
 public:
     /// 动作 id(与设置里的 hotkeys 表一致)。
+    /// ⚠️ 截图翻译/截图取字/滚动长截图三动作已移除(2026-11-01):
+    /// 功能由截图工具栏按钮承担(OCR取字/翻译/长截图),不再有全局热键。
     enum class Action {
         ToggleMain,
         CaptureRegion,
         CaptureFullscreen,
         PinLatest,
         OpenTranslate,
-        CaptureTranslate,
         CaptureDelayed,   ///< 延时截图(F16):倒计时后再框选
-        CaptureOcr,       ///< 截图取字入列表:框选 → OCR → 文本存为条目
-        CaptureScrolling, ///< 滚动长截图:框选 → 逐帧采集 → 纵向拼接 → 入库(docs/19)
     };
 
     Hotkeys(PanelWindow& panel, CoreBridge& core, QObject* parent = nullptr);

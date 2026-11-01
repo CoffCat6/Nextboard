@@ -96,15 +96,6 @@ Hotkeys::Hotkeys(PanelWindow& panel, CoreBridge& core, QObject* parent)
                 // 进入面板的翻译页;显示/切形态由 translatePrefill 的订阅方负责
                 CoreFacade::instance().openTranslate();
                 break;
-            case Action::CaptureTranslate:
-                // 截图翻译(F25):收起面板 → 框选 → 入库 → OCR → 翻译窗口预填并翻译。
-                hidePanelThenCapture(m_panel, nb::CaptureIntent::Region,
-                                     [](const QString& entryId) {
-                    if (!entryId.isEmpty())
-                        CoreFacade::instance().processCapture(entryId,
-                                                              QStringLiteral("translate"));
-                });
-                break;
             case Action::CaptureDelayed:
                 // 延时截图(F16):等 N 秒再框选(等待秒数取设置,与托盘入口同一取值口径)
                 m_panel.hide();
@@ -112,25 +103,8 @@ Hotkeys::Hotkeys(PanelWindow& panel, CoreBridge& core, QObject* parent)
                     startDelayedCapture(captureDelaySeconds(), CaptureIntent::Region);
                 });
                 break;
-            case Action::CaptureOcr:
-                // 截图取字入列表:框选 → OCR → 识别文本直接存为条目(source=ocr)
-                hidePanelThenCapture(m_panel, nb::CaptureIntent::Region,
-                                     [](const QString& entryId) {
-                    if (!entryId.isEmpty())
-                        CoreFacade::instance().processCapture(entryId,
-                                                              QStringLiteral("entry"));
-                });
-                break;
-            case Action::CaptureScrolling:
-                // 滚动长截图(docs/19):收起面板 → **长截图专用框选**。
-                //
-                // 用 CaptureIntent::Scrolling 而不是 Region:后者框完就按
-                // regionAutoConfirm 决定去向(默认直接入库),用户还得再点一次
-                // 浮条的「长截图」—— 而设了"松手即入库"的用户根本到不了那一步
-                // (浮条不出现)。专用意图让"框完即进长截图就绪态"成为唯一出口,
-                // 与那个设置项彻底解耦。
-                hidePanelThenCapture(m_panel, nb::CaptureIntent::Scrolling);
-                break;
+            // ⚠️ 截图翻译/截图取字/滚动长截图三 case 已移除(2026-11-01):
+            //    工具栏按钮承担这三项(OCR取字/翻译/长截图),全局热键一并退役。
             default:
                 qInfo() << "hotkey action" << static_cast<int>(m_registered.value(id));
                 break;
@@ -158,10 +132,7 @@ void Hotkeys::applyFromSettings() {
         {Action::CaptureFullscreen, "captureFullscreen"},
         {Action::PinLatest, "pinLatest"},
         {Action::OpenTranslate, "openTranslate"},
-        {Action::CaptureTranslate, "captureTranslate"},
         {Action::CaptureDelayed, "captureDelayed"},
-        {Action::CaptureOcr, "captureOcr"},
-        {Action::CaptureScrolling, "captureScrolling"},
     };
     for (auto it = names.constBegin(); it != names.constEnd(); ++it) {
         const QString combo = hotkeys.value(it.value()).toString();

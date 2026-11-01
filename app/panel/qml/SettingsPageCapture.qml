@@ -1,4 +1,4 @@
-// 设置页 · 截图分类:框选行为 / 延时 / 遮罩超时 / 滚动长截图参数(docs/19 §6)。
+// 设置页 · 截图分类:框选行为(恒浮工具栏)/ 延时 / 遮罩超时 / 滚动长截图参数(docs/19 §6)。
 // 页面协议(load/collect/view)见 SettingsView.qml 头注释。
 import QtQuick
 import QtQuick.Controls.Basic
@@ -13,12 +13,9 @@ Item {
 
     function load(s) {
         if (!s) return
-        // 单一出口(§18.4):由 regionAutoConfirm 推导 ——
-        //   true  = direct (松手即入库)
-        //   false = toolbar(浮出工具栏)
-        // 兼容旧配置:旧版 "skipEditor=false"(想进编辑器)的用户,其意图是"要编辑能力",
-        // 在新模型里对应 toolbar(浮条带标注),故只要 autoConfirm=false 就落 toolbar。
-        regionExitCombo.currentIndex = s.regionAutoConfirm === false ? 1 : 0
+        // 框选出口已简化(2026-11-01):恒为浮出工具栏,原 regionAutoConfirm
+        // 设置与「框选后」下拉一并移除 —— 直通下浮条不可达,工具栏的
+        // 取字/翻译/长截图就全够不到。
         // 智能框选(docs/23):缺失时按 core 默认 true —— 显示与实际行为必须同源。
         smartCaptureCheck.checked = s.smartCapture !== false
         rightClickCancelCheck.checked = s.regionRightClickCancel === true
@@ -50,9 +47,8 @@ Item {
     }
 
     function collect(s) {
-        // 单一出口 → 回写成 regionAutoConfirm(direct=true / toolbar=false)。
+        // 框选出口恒为工具栏(2026-11-01):不再写 regionAutoConfirm。
         // regionSkipEditor 已废弃(§18.5):不写它,让它保持读入时的原值(见 core 注释)。
-        s.regionAutoConfirm = regionExitCombo.currentIndex === 0
         s.smartCapture = smartCaptureCheck.checked
         s.regionRightClickCancel = rightClickCancelCheck.checked
         s.captureAllScreens = allScreensCheck.checked
@@ -80,26 +76,11 @@ Item {
             spacing: Theme.metrics.spacingXs
 
             SectionTitle { text: "框选截图" }
-            // 框选之后去哪儿(§18.4):**单一出口**取代原先两个复选框。
-            // 原先 autoConfirm × skipEditor 叠出四种组合,其中「松开即确认 + 进编辑器」
-            // 自相矛盾、无法向用户解释;且"框选进编辑器"这条出口已下线(§18.5)——
-            // 编辑器只保留唯一入口 = 右键编辑(主面板条目右键 / 贴图右键)。
-            FieldLabel { text: "框选后" }
-            ReadableComboBox {
-                id: regionExitCombo
-                objectName: "regionExitCombo"   // 验收钩子
-                Layout.fillWidth: true
-                /// 与 model 一一对应的标识:
-                ///   direct  —— 松手即入库 + 写剪贴板
-                ///   toolbar —— 选区保留并浮出工具栏(就地标注/OCR/贴图/保存/完成)
-                readonly property var exitCodes: ["direct", "toolbar"]
-                model: ["直接入库并复制(松手即完成)",
-                        "浮出工具栏(可标注 / OCR / 贴图 / 保存)"]
-                onActivated: view.scheduleSave()
-            }
+            // 「框选后」下拉已移除(2026-11-01):框选后**恒为浮出工具栏**,
+            // 原设"直接入库"的用户框完后在浮条上点「完成」即可 —— 一致的
+            // 两步出口换来工具栏全部功能(标注/取字/翻译/长截图)可达。
             // 智能框选(docs/23):鼠标移动即自动框住光标下的窗口,单击采纳。
-            // 排在与「框选后」相邻的位置 —— 它决定的是**怎么框**,与"框完去哪儿"
-            // 是同一件事的两半,分开摆用户对不上。
+            // 排在「框选截图」组首 —— 它决定的是**怎么框**。
             ReadableCheckBox {
                 id: smartCaptureCheck
                 objectName: "smartCaptureCheck"   // 验收钩子

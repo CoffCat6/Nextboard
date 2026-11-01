@@ -278,8 +278,7 @@ void runSmartCaptureFlow() {
         targetCand.level = 0;
         injected << targetCand;
 
-        auto* overlay = new OverlayWidget(frozen, 0, screen, /*autoConfirm=*/true,
-                                          /*rightClickCancel=*/true,
+        auto* overlay = new OverlayWidget(frozen, 0, screen, /*rightClickCancel=*/true,
                                           /*autoStartStitching=*/false, injected);
         overlay->setGeometry(screenGeo);
         overlay->show();
@@ -313,10 +312,10 @@ void runSmartCaptureFlow() {
         check(overlay->smartCandidate().isNull(),
               QStringLiteral("悬停到空白处预选清空"));
 
-        // B3. 回到 target 后**单击**(按下抬起同点)→ 采纳 + 直通确认。
+        // B3. 回到 target 后**单击**(按下抬起同点)→ 采纳 + 确认。
         //
-        // 直通模式(autoConfirm=true)下用户拍板的语义是"单击即确认"，
-        // 所以这里同时断言 regionConfirmed 真的发出去了、且矩形 == target。
+        // 2026-11-01 起框选恒为浮条模式(regionAutoConfirm 已删),但单击采纳的
+        // 确认语义未变:这里同时断言 regionConfirmed 真的发出去了、且矩形 == target。
         QRect confirmedRect;
         bool confirmed = false;
         QObject::connect(overlay, &OverlayWidget::regionConfirmed, overlay,
@@ -332,7 +331,7 @@ void runSmartCaptureFlow() {
 
         check(overlay->smartAcceptCount() == 1,
               QStringLiteral("单击采纳计数 = 1(得 %1)").arg(overlay->smartAcceptCount()));
-        check(confirmed, QStringLiteral("直通模式:单击即确认,regionConfirmed 已发出"));
+        check(confirmed, QStringLiteral("单击即确认,regionConfirmed 已发出"));
         // ⚠️ 期望值 = 目标窗口的**本屏相对**物理矩形(selectionPhysical 的契约
         //    口径),不是"绝对 * dpr"。主屏原点 (0,0) 时二者相等,曾掩盖了
         //    "采纳路径回传绝对坐标"的缺陷 —— 副屏上表现为裁剪完全越界、
@@ -350,8 +349,7 @@ void runSmartCaptureFlow() {
         overlay->close();
         overlay->deleteLater();
 
-        auto* overlay2 = new OverlayWidget(frozen, 0, screen, /*autoConfirm=*/false,
-                                           /*rightClickCancel=*/true,
+        auto* overlay2 = new OverlayWidget(frozen, 0, screen, /*rightClickCancel=*/true,
                                            /*autoStartStitching=*/false, injected);
         overlay2->setGeometry(screenGeo);
         overlay2->show();
@@ -372,8 +370,7 @@ void runSmartCaptureFlow() {
         overlay2->close();
         overlay2->deleteLater();
 
-        auto* overlay3 = new OverlayWidget(frozen, 0, screen, /*autoConfirm=*/false,
-                                           /*rightClickCancel=*/true,
+        auto* overlay3 = new OverlayWidget(frozen, 0, screen, /*rightClickCancel=*/true,
                                            /*autoStartStitching=*/false, injected);
         overlay3->setGeometry(screenGeo);
         overlay3->show();
@@ -419,8 +416,7 @@ void runSmartCaptureFlow() {
             elem.level = 1;
             layered << elem;
 
-            auto* overlay4 = new OverlayWidget(frozen, 0, screen, /*autoConfirm=*/true,
-                                               /*rightClickCancel=*/true,
+            auto* overlay4 = new OverlayWidget(frozen, 0, screen, /*rightClickCancel=*/true,
                                                /*autoStartStitching=*/false, layered);
             overlay4->setGeometry(screenGeo);
             overlay4->show();
@@ -505,8 +501,7 @@ void runSmartCaptureFlow() {
             bigElem.level = 1;
             mixed << bigElem;
 
-            auto* overlay5 = new OverlayWidget(frozen, 0, screen, /*autoConfirm=*/false,
-                                               /*rightClickCancel=*/true,
+            auto* overlay5 = new OverlayWidget(frozen, 0, screen, /*rightClickCancel=*/true,
                                                /*autoStartStitching=*/false, mixed);
             overlay5->setGeometry(screenGeo);
             overlay5->show();
@@ -534,8 +529,7 @@ void runSmartCaptureFlow() {
             // 会夹进窗口内,而选区就是整屏 —— 浮条会**压在内容上**并挡住用户视线。
             // 断言:浮条矩形完整落在窗口内(点得到),且选区 == 整屏(框对了)。
             {
-                auto* ovFull = new OverlayWidget(frozen, 0, screen, /*autoConfirm=*/false,
-                                                 /*rightClickCancel=*/true,
+                auto* ovFull = new OverlayWidget(frozen, 0, screen, /*rightClickCancel=*/true,
                                                  /*autoStartStitching=*/false, mixed);
                 ovFull->setGeometry(screenGeo);
                 ovFull->show();
@@ -633,7 +627,6 @@ void runSmartCaptureFlow() {
                 otherFrozen.fill(QColor(0x33, 0x44, 0x55));
 
                 auto* ovOther = new OverlayWidget(otherFrozen, 0, otherScreen,
-                                                  /*autoConfirm=*/true,
                                                   /*rightClickCancel=*/true,
                                                   /*autoStartStitching=*/false, otherList);
                 ovOther->setGeometry(otherGeo);
@@ -642,7 +635,7 @@ void runSmartCaptureFlow() {
 
                 QRect gotOther;
                 bool confirmedOther = false;
-                // ⚠️ connect 必须在 clickAt **之前**:直通模式下单击即确认,
+                // ⚠️ connect 必须在 clickAt **之前**:单击即确认,
                 //    信号发完遮罩就被收起,connect 晚了什么也收不到。
                 QObject::connect(ovOther, &OverlayWidget::regionConfirmed, ovOther,
                                  [&gotOther, &confirmedOther](const QRect& r) {
@@ -693,7 +686,6 @@ void runSmartCaptureFlow() {
                                    QImage::Format_ARGB32_Premultiplied);
                 lightFrozen.fill(QColor(0xF2, 0xF2, 0xF2));   // 浅底
                 auto* ovLight = new OverlayWidget(lightFrozen, 0, otherScreen,
-                                                  /*autoConfirm=*/true,
                                                   /*rightClickCancel=*/true,
                                                   /*autoStartStitching=*/false, otherList);
                 ovLight->setGeometry(otherGeo);
@@ -881,7 +873,7 @@ void runSmartLiveFlow() {
                       .arg(disagree));
         }
 
-        // 真起一次会话。autoConfirm 由设置决定,这里不关心出口,只看状态。
+        // 真起一次会话。框选恒为浮条模式(regionAutoConfirm 已删),只看状态。
         nb::startCaptureSession(nb::CaptureIntent::Region);
         QTimer::singleShot(1200, qApp, [raw] {
             // ⚠️ 必须收集**全部**可见遮罩:startCaptureSession 是"每屏一块"
@@ -1197,3 +1189,4 @@ void runSmartSettingsFlow(PanelWindow& panel) {
 }
 
 } // namespace nb
+

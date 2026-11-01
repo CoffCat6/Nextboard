@@ -360,19 +360,14 @@ void finishCapture(const QImage& image, const CaptureDone& done) {
     }
 }
 
-/// 框选之后去哪儿(§18.4):**单一出口**取代原先两个布尔量
-/// (regionSkipEditor × regionAutoConfirm)的四种组合 —— 其中两种自相矛盾
-/// (「松开即确认」与「进编辑器」不可能同时成立),且组合语义无法向用户解释。
+/// 框选之后去哪儿:2026-11-01 起只有**一种出口** —— 浮出工具栏。
+/// 原 regionAutoConfirm 开关("松手即入库"直通)已随设置项删除:直通模式下
+/// 浮条不可达,工具栏的取字/翻译/长截图就全够不到;三个功能的独立热键也一并
+/// 移除,工具栏按钮成为唯一入口(用户拍板的冗余功能收口)。
 ///
-/// ⚠️ 「进编辑器」这条出口**已下线**(§18.5):编辑器只保留唯一入口 = 右键编辑
+/// 「进编辑器」出口**已下线**(§18.5):编辑器只保留唯一入口 = 右键编辑
 /// (主面板条目右键 / 贴图右键)。框选链路的编辑能力由**浮条工具栏**承担。
-/// 故这里只剩两种:
-///   Direct  —— 松手即入库 + 写剪贴板(原 regionSkipEditor=true & autoConfirm=true)
-///   Toolbar —— 选区保留、浮出工具栏,就地标注/OCR/贴图/保存/完成/取消
-///              (原 regionSkipEditor=true & autoConfirm=false)
-enum class RegionExit { Direct, Toolbar };
-
-/// regionAutoConfirm(默认 true):松手即确认(Direct);false 则浮出工具栏(Toolbar)。
+///
 /// regionRightClickCancel(默认 true):框选时右键取消本次截图。
 } // namespace
 
@@ -454,10 +449,10 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured) {
 
     // 框选:每屏一块遮罩,各自拿本屏冻结底图。
     // 确认方式与右键取消都由设置决定,会话内只读一次。
+    // ⚠️ regionAutoConfirm 已删(2026-11-01):框选恒为浮条模式,不再读该设置。
     const QJsonObject settings = CoreBridge::instance().call("get_settings");
     const QJsonObject data =
         settings.value("ok").toBool() ? settings.value("data").toObject() : QJsonObject{};
-    const bool autoConfirm = data.value("regionAutoConfirm").toBool(true);
     const bool rightClickCancel = data.value("regionRightClickCancel").toBool(true);
     // 空闲超时(S6.1):遮罩持有整屏冻结底图(4K 约 33MB),用户触发后离开会无限期占着。
     // 0 = 不自动取消;会话内任何鼠标/键盘动作都会重置计时。
@@ -525,9 +520,8 @@ void startCaptureSession(CaptureIntent intent, CaptureDone onCaptured) {
                        << ")捕获失败,跳过该屏遮罩";
             continue;
         }
-        // 长截图意图下 autoConfirm 只剩"点空是否取消"的作用:松手不再直接入库,
-        // 否则设了 regionAutoConfirm=true 的用户永远进不了长截图(见构造函数注释)。
-        auto* overlay = new OverlayWidget(frozen, i, screen, autoConfirm, rightClickCancel,
+        // 浮条模式(唯一模式):选区保留,松手浮出工具栏;长截图意图则直接进就绪态。
+        auto* overlay = new OverlayWidget(frozen, i, screen, rightClickCancel,
                                           scrollingIntent, candidates);
         overlay->setBarAlpha(barAlpha);   // 会话内三档可调,初始取设置
         overlay->applyAnnotationPrefs(data);   // 标注偏好(颜色/粗细/字号)跨会话记忆
@@ -884,14 +878,13 @@ namespace {
 constexpr int kElementProbeDelayMs = 400;
 } // namespace
 
-OverlayWidget::OverlayWidget(QImage frozen, int screenIndex, QScreen* screen, bool autoConfirm,
+OverlayWidget::OverlayWidget(QImage frozen, int screenIndex, QScreen* screen,
                              bool rightClickCancel, bool autoStartStitching,
                              const QVector<smart::Candidate>& candidates, QWidget* parent)
     : QWidget(parent, Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool),
       m_frozen(std::move(frozen)),
       m_screenIndex(screenIndex),
       m_screen(screen),
-      m_autoConfirm(autoConfirm),
       m_rightClickCancel(rightClickCancel),
       m_autoStartStitching(autoStartStitching),
       m_candidates(candidates) {
@@ -1304,7 +1297,7 @@ void OverlayWidget::paintEvent(QPaintEvent*) {
         // 微调模式:画 8 个手柄(提示可拖动调整);有标注时不画(互斥)
         // ⚠️ 长截图态也**不画**手柄:选区已锁定为采集窗口,让用户以为还能拖
         //    就会拖出新尺寸,而各帧宽度不一致时拼接必然错位(docs/19 §3.3 I1)。
-        if (!m_autoConfirm && !m_engine && !stitchActive() && selectionUsable()) {
+        if (!m_engine && !stitchActive() && selectionUsable()) {
             painter.setPen(QPen(ui::themeTokens().accent, 1));
             painter.setBrush(QColor(255, 255, 255));
             for (const QPoint& point : handlePoints(sel)) {
@@ -1340,14 +1333,11 @@ void OverlayWidget::paintEvent(QPaintEvent*) {
         painter.setPen(QColor(255, 255, 255, 200));
         // 文案随能力变:有候选表时先说"移动鼠标自动框选"(那才是第一入口),
         // 手框作为第二选择;没有候选表(枚举失败/关闭设置)时退回原文案。
+        // ⚠️ 直通分支已删(2026-11-01):单击只采纳,确认交给浮条/Enter/双击。
         const bool smart = !m_candidates.isEmpty();
         const QString how = smart
-            ? (m_autoConfirm
-                   ? QStringLiteral("移动鼠标自动框选,单击即截图;也可拖拽手框,Esc 取消(屏 %1)")
-                   : QStringLiteral("移动鼠标自动框选,单击采纳;也可拖拽手框,滚轮切换重叠窗口,Esc 取消(屏 %1)"))
-            : (m_autoConfirm
-                   ? QStringLiteral("拖拽框选,Esc 取消(屏 %1)")
-                   : QStringLiteral("拖拽框选;可拖手柄微调,Enter/双击/完成按钮确认,Esc 取消(屏 %1)"));
+            ? QStringLiteral("移动鼠标自动框选,单击采纳;也可拖拽手框,滚轮切换重叠窗口,Esc 取消(屏 %1)")
+            : QStringLiteral("拖拽框选;可拖手柄微调,Enter/双击/完成按钮确认,Esc 取消(屏 %1)");
         painter.drawText(rect(), Qt::AlignHCenter | Qt::AlignTop, how.arg(m_screenIndex));
     }
 }
@@ -1492,7 +1482,7 @@ void OverlayWidget::mousePressEvent(QMouseEvent* e) {
     // 微调模式:已有选区时,按在手柄/内部上就进入调整,而不是重新框选。
     // ⚠️ 标注态**跳过**本段:Inside 命中会把"按下开始画画"吞成"整体拖动选区"
     // (实测症状:笔画不出现、选区跟着鼠标跑 = 整体偏移);手柄此时本就隐藏。
-    if (!m_autoConfirm && !m_engine && !m_selection.isNull()) {
+    if (!m_engine && !m_selection.isNull()) {
         const Handle handle = handleAt(e->pos());
         if (handle != Handle::None) {
             m_adjusting = true;
@@ -1586,7 +1576,7 @@ void OverlayWidget::mouseMoveEvent(QMouseEvent* e) {
         return;
     }
     // 悬停时给出光标反馈(仅微调模式有意义)
-    if (!m_autoConfirm && !m_selection.isNull()) {
+    if (!m_selection.isNull()) {
         setCursor(cursorForHandle(handleAt(e->pos())));
     }
 }
@@ -1622,10 +1612,9 @@ void OverlayWidget::mouseReleaseEvent(QMouseEvent* e) {
     //   b) 抬起时的位移在 startDragDistance 之内(用户没有在拖);
     //   c) 抬起点仍在候选内(手抖挪出候选边缘 = 用户想手框,让给拖拽逻辑)。
     //
-    // 采纳后的去向仍走**原有的三出口**,所以:
-    //   - 直通模式(autoConfirm=true)→ 直接确认入库(用户拍板的"单击即确认");
-    //   - 浮条模式          → 选区保留 + 浮出浮条,用户再点完成;
-    //   - 长截图意图        → 进长截图就绪态。
+    // 采纳后的去向只有两种(直通出口已随 regionAutoConfirm 移除,2026-11-01):
+    //   - 长截图意图        → 进长截图就绪态;
+    //   - 其余              → 选区保留 + 浮出浮条,用户再点完成。
     // 智能框选因此**不新增任何出口**,只改变"选区从哪来"。
     const bool clickLike =
         m_pressOnCandidate && m_candidate.contains(e->pos()) &&
@@ -1648,9 +1637,6 @@ void OverlayWidget::mouseReleaseEvent(QMouseEvent* e) {
         if (!picked.isEmpty()) {
             if (m_autoStartStitching) {
                 enterStitching();
-            } else if (m_autoConfirm) {
-                emit regionConfirmed(selectionPhysical());
-                return;   // 会话即将由 closeAllOverlays 收起,别再碰状态
             } else {
                 showToolbar();
             }
@@ -1664,7 +1650,6 @@ void OverlayWidget::mouseReleaseEvent(QMouseEvent* e) {
         // 误点(没拖出有效范围):清掉选区,等用户重新框
         m_selection = QRect();
         update();
-        if (m_autoConfirm) emit cancelled();   // 直通模式保持"点空即取消"的原有手感
         return;
     }
     // 来源应用(docs/25):选区**中心点**所在的窗口(用户拍板的中心点方案),
@@ -1684,17 +1669,13 @@ void OverlayWidget::mouseReleaseEvent(QMouseEvent* e) {
         if (hit != nullptr && !isSelfOverlay)
             g_sourceOwnerExe = hwndToExeName(hit);
     }
-    // 三种出口:
-    //   1) 长截图意图(热键 Ctrl+Shift+L)→ 直接进长截图就绪态;
-    //      与 regionAutoConfirm **无关** —— 用户已经明确要长截图了。
-    //   2) 直通模式 → 松手即确认入库;
-    //   3) 微调模式 → 保留选区 + 浮出工具栏(docs/14 §16)。
+    // 两种出口(直通已删,2026-11-01):
+    //   1) 长截图意图 → 直接进长截图就绪态(用户已明确要长截图);
+    //   2) 其余 → 保留选区 + 浮出工具栏(docs/14 §16),确认交给浮条/Enter/双击。
     if (m_autoStartStitching) {
         // ⚠️ 先 showToolbar() 再进长截图态?不要 —— 长截图态下 toolbarVisible()
         //    恒为 false,浮条根本不会显示;直接进即可。
         enterStitching();
-    } else if (m_autoConfirm) {
-        emit regionConfirmed(selectionPhysical());
     } else {
         showToolbar();
     }
@@ -1736,7 +1717,7 @@ void OverlayWidget::wheelEvent(QWheelEvent* e) {
 }
 
 void OverlayWidget::mouseDoubleClickEvent(QMouseEvent* e) {
-    if (m_autoConfirm || e->button() != Qt::LeftButton) return;
+    if (e->button() != Qt::LeftButton) return;
     if (!selectionUsable()) return;
     // 标注态双击 = 在画布上点两下,不该当成"确认"把标注丢掉
     if (m_engine) return;
@@ -1763,7 +1744,7 @@ void OverlayWidget::keyPressEvent(QKeyEvent* e) {
     }
     if (e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter) {
         if (stitchActive()) return;   // 长截图态用面板按钮,Enter 不做确认
-        if (!m_autoConfirm && selectionUsable()) confirmSelection();
+        if (selectionUsable()) confirmSelection();
         return;
     }
 
@@ -1791,7 +1772,7 @@ void OverlayWidget::keyPressEvent(QKeyEvent* e) {
     }
 }
 
-// ---- 框选后浮出工具栏(docs/14 §16;仅 autoConfirm=false 生效)----
+// ---- 框选后浮出工具栏(docs/14 §16;框选后的唯一出口)----
 
 namespace {
 
@@ -1842,7 +1823,7 @@ constexpr int kHoverTipDelayMs = 700;
 bool OverlayWidget::toolbarVisible() const {
     // 长截图态下浮条让位:两套面板叠在一起既挡内容又抢命中
     if (stitchActive()) return false;
-    return !m_autoConfirm && selectionUsable();
+    return selectionUsable();
 }
 
 QRect OverlayWidget::toolbarRect() const {

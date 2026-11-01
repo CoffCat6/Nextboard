@@ -886,12 +886,11 @@ void runStitchSettingsFlow() {
     };
 
     const QVariantMap before = core.call("get_settings").value("data").toMap();
-    const QVariantMap beforeHotkeys = before.value("hotkeys").toMap();
     qInfo() << "STITCH-SETTINGS STEP0 maxHeight:" << before.value("stitchMaxHeight").toInt()
-            << "overlap:" << before.value("stitchOverlapRatio").toInt()
-            << "hotkey:" << beforeHotkeys.value("captureScrolling").toString();
+            << "overlap:" << before.value("stitchOverlapRatio").toInt();
 
-    // ① 默认值:上限 30000、门槛 3、热键 Ctrl+Shift+L
+    // ① 默认值:上限 30000、门槛 3
+    // (captureScrolling 热键已随动作移除,2026-11-01:工具栏「长截图」承担入口)
     check(before.value("stitchMaxHeight").toInt() == 30000,
           "默认上限 = 30000px(docs/19 §9 Q4)");
     check(before.value("stitchOverlapRatio").toInt() == 3, "默认重叠门槛 = 3%");
@@ -900,8 +899,8 @@ void runStitchSettingsFlow() {
           "默认采样间隔 = 150ms(v2 从 500ms 收紧,直抓选区后单帧更便宜)");
     check(before.value("stitchMaxBytes").toLongLong() == 128LL * 1024 * 1024,
           "默认字节预算 = 128MB(v2:只按像素限高会让内存先爆)");
-    check(beforeHotkeys.value("captureScrolling").toString() == QStringLiteral("Ctrl+Shift+L"),
-          "默认热键 = Ctrl+Shift+L(Q3 要求预置)");
+    check(before.value("hotkeys").toMap().value("captureScrolling").toString().isEmpty(),
+          "captureScrolling 热键已移除,旧配置残留键读回为空/缺失");
 
     // ② 写入新值 → 读回(字段级合并必须认这些名字)
     const bool saved = core.call("save_settings", QVariantMap{
@@ -909,26 +908,21 @@ void runStitchSettingsFlow() {
         {"stitchOverlapRatio", 7},
         {"stitchSampleIntervalMs", 220},
         {"stitchMaxBytes", 64LL * 1024 * 1024},
-        {"hotkeys", QVariantMap{{"captureScrolling", QStringLiteral("Ctrl+Shift+U")}}},
     }).value("ok").toBool();
     const QVariantMap after = core.call("get_settings").value("data").toMap();
-    const QVariantMap afterHotkeys = after.value("hotkeys").toMap();
     qInfo() << "STITCH-SETTINGS STEP1 saved:" << saved
             << "maxHeight:" << after.value("stitchMaxHeight").toInt()
-            << "overlap:" << after.value("stitchOverlapRatio").toInt()
-            << "hotkey:" << afterHotkeys.value("captureScrolling").toString();
+            << "overlap:" << after.value("stitchOverlapRatio").toInt();
     check(saved, "save_settings 成功");
     check(after.value("stitchMaxHeight").toInt() == 45000, "上限读回 45000");
     check(after.value("stitchOverlapRatio").toInt() == 7, "门槛读回 7");
     check(after.value("stitchSampleIntervalMs").toInt() == 220, "采样间隔读回 220ms");
     check(after.value("stitchMaxBytes").toLongLong() == 64LL * 1024 * 1024,
           "字节预算读回 64MB");
-    check(afterHotkeys.value("captureScrolling").toString() == QStringLiteral("Ctrl+Shift+U"),
-          "热键读回 Ctrl+Shift+U");
     // 合并不能把同级其余快捷键清零
-    check(afterHotkeys.value("toggleMain").toString()
-              == beforeHotkeys.value("toggleMain").toString(),
-          "写长截图热键**没有**清掉其它快捷键(字段级合并生效)");
+    check(after.value("hotkeys").toMap().value("toggleMain").toString()
+              == before.value("hotkeys").toMap().value("toggleMain").toString(),
+          "写长截图设置**没有**清掉其它快捷键(字段级合并生效)");
 
     // ③ 非法值必须被拒(而不是静默存进去)
     const bool badHigh = core.call("save_settings",
@@ -956,8 +950,6 @@ void runStitchSettingsFlow() {
         {"stitchOverlapRatio", before.value("stitchOverlapRatio").toInt()},
         {"stitchSampleIntervalMs", before.value("stitchSampleIntervalMs").toInt()},
         {"stitchMaxBytes", before.value("stitchMaxBytes").toLongLong()},
-        {"hotkeys", QVariantMap{{"captureScrolling",
-                                 beforeHotkeys.value("captureScrolling").toString()}}},
     });
     qInfo() << "STITCH-SETTINGS DONE failures=" << failures;
     QApplication::quit();

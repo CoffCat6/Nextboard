@@ -112,13 +112,11 @@ pub struct Settings {
     /// - 开启：只要历史里存在图片就贴最近的图片，没有图片时才回退最近文本
     ///   （第一代 clipboard-plus F17 的口径，供"一键贴图 = 贴图"习惯的用户选用）。
     pub pin_prefer_image: bool,
-    /// 框选截图是否松开鼠标即自动确认（Phase 5 增强）：关闭时保留手柄微调 + Enter/双击确认。
-    /// 框选松开鼠标后：
-    ///   true（默认）= 直接入库 + 写剪贴板（快，一步到位）；
-    ///   false       = 选区保留并浮出工具栏，就地标注/OCR/贴图/保存/再确认。
-    /// 取代原先 `regionAutoConfirm` 与 `regionSkipEditor` 两个布尔量（§18.4）：
-    /// 两者叠加出四种组合，其中「松开即确认 + 进编辑器」自相矛盾，且无法向用户解释。
-    pub region_auto_confirm: bool,
+    /// 框选截图的出口(已简化,2026-11-01):**恒为浮出工具栏**。
+    /// 原先有 `region_auto_confirm` 开关(松手即入库/浮出工具栏),因"直接入库"
+    /// 出口下浮条上的取字/翻译/长截图全够不到,且用户要求移除冗余快捷键 ——
+    /// 已连同该设置项一并删除。字段不保留:Settings 反序列化用容器级 default
+    /// 容错(非 deny_unknown_fields),旧配置里的 regionAutoConfirm 键被静默忽略。
     /// 多屏截图是否为**每块屏**都建遮罩(默认 true = 历史行为)。关闭后只对
     /// **光标所在屏**建遮罩:多屏机器上省 N-1 次全屏抓取与 N-1 份整屏冻结底图
     /// 的会话期常驻(三屏 4K 约 100MB),适合"框选永远只在一块屏内"的用户。
@@ -481,32 +479,24 @@ pub enum HotkeyAction {
     PinLatest,
     /// 打开翻译窗口（Phase 7 F24）。
     OpenTranslate,
-    /// 截图翻译（Phase 7 T4）：框选 → OCR → 翻译。
-    CaptureTranslate,
     /// 延时截图（F16）：倒计时后再框选，用来截菜单/悬浮提示。
     CaptureDelayed,
-    /// 截图取字入列表（S5.1 同源）：框选 → OCR → 识别文本**直接存为条目**。
-    CaptureOcr,
-    /// 滚动长截图(docs/19):框选 → 逐帧采集 → 纵向拼接 → 入库。
-    ///
-    /// 与 CaptureDelayed / CaptureOcr 不同,本动作**默认预置组合键**:
-    /// 直通模式(regionAutoConfirm=true)下浮条不出现,没有热键就完全够不到该功能
-    /// (docs/19 §9 Q3 的用户裁定)。
-    CaptureScrolling,
+    // ⚠️ 已移除(2026-11-01):截图翻译(CaptureTranslate)/截图取字(CaptureOcr)/
+    // 滚动长截图(CaptureScrolling)三个热键动作及其 HotkeyMap 字段一并删除 ——
+    // 这三项已全部由截图工具栏按钮承担(OCR取字/翻译/长截图),不再需要全局热键。
+    // 旧配置里残留的 captureTranslate/captureOcr/captureScrolling 键被 serde
+    // 容错忽略(容器级 default,非 deny_unknown_fields),下次保存自然消失。
 }
 
 impl HotkeyAction {
     /// 全部动作，遍历注册用。
-    pub const ALL: [HotkeyAction; 9] = [
+    pub const ALL: [HotkeyAction; 6] = [
         HotkeyAction::ToggleMain,
         HotkeyAction::CaptureRegion,
         HotkeyAction::CaptureFullscreen,
         HotkeyAction::PinLatest,
         HotkeyAction::OpenTranslate,
-        HotkeyAction::CaptureTranslate,
         HotkeyAction::CaptureDelayed,
-        HotkeyAction::CaptureOcr,
-        HotkeyAction::CaptureScrolling,
     ];
 }
 
@@ -524,14 +514,10 @@ pub struct HotkeyMap {
     pub pin_latest: String,
     /// 打开翻译窗口（Phase 7）。
     pub open_translate: String,
-    /// 截图翻译（Phase 7 T4）：框选 → OCR → 翻译。
-    pub capture_translate: String,
     /// 延时截图（F16）。**默认留空**：这个动作属于"按需绑定"，由用户自己决定组合键。
     pub capture_delayed: String,
-    /// 截图取字入列表。**默认留空**，同上。
-    pub capture_ocr: String,
-    /// 滚动长截图(docs/19)。默认 Ctrl+Shift+L（L = Long）。
-    pub capture_scrolling: String,
+    // ⚠️ capture_translate / capture_ocr / capture_scrolling 已移除(2026-11-01):
+    // 三个动作由截图工具栏按钮承担,不再有全局热键。旧配置残留键被 serde 容错忽略。
 }
 
 impl Default for HotkeyMap {
@@ -543,13 +529,10 @@ impl Default for HotkeyMap {
             pin_latest: "Ctrl+Shift+P".into(),
             open_translate: "Ctrl+Shift+T".into(),
             // 与既有 5 个默认键均不冲突（V/A/Q/P/T）
-            capture_translate: "Ctrl+Shift+E".into(),
             // 新增动作不预置组合键：空串 = 不绑定，用户想用再自己录
             capture_delayed: String::new(),
-            capture_ocr: String::new(),
-            // 长截图是**独立入口**:直通模式下浮条不出现,不给默认键就等于没这个功能
-            // (docs/19 §9 Q3)。L = Long,与既有 V/A/Q/P/T/E 均不冲突。
-            capture_scrolling: "Ctrl+Shift+L".into(),
+            // ⚠️ capture_translate("Ctrl+Shift+E")/capture_ocr/capture_scrolling
+            // ("Ctrl+Shift+L")已随动作移除(2026-11-01):工具栏已承担这三项。
         }
     }
 }
@@ -563,10 +546,7 @@ impl HotkeyMap {
             HotkeyAction::CaptureFullscreen => &self.capture_fullscreen,
             HotkeyAction::PinLatest => &self.pin_latest,
             HotkeyAction::OpenTranslate => &self.open_translate,
-            HotkeyAction::CaptureTranslate => &self.capture_translate,
             HotkeyAction::CaptureDelayed => &self.capture_delayed,
-            HotkeyAction::CaptureOcr => &self.capture_ocr,
-            HotkeyAction::CaptureScrolling => &self.capture_scrolling,
         }
     }
 }
@@ -591,7 +571,6 @@ impl Default for Settings {
             pin_text_bg_opacity: 92,
             // 默认"最近复制优先"：复制文字后按热键即贴该文字（关闭第一代的"图片优先"）
             pin_prefer_image: false,
-            region_auto_confirm: true,
             capture_all_screens: true,
             region_right_click_cancel: true,
             capture_bar_alpha: 217,        // 半透档(docs/17 §17.5):默认不挡原图又看得清按钮
@@ -2014,12 +1993,9 @@ mod tests {
         assert_eq!(map.get(HotkeyAction::CaptureFullscreen), "Ctrl+Shift+Q");
         assert_eq!(map.get(HotkeyAction::PinLatest), "Ctrl+Shift+P");
         assert_eq!(map.get(HotkeyAction::OpenTranslate), "Ctrl+Shift+T");
-        assert_eq!(map.get(HotkeyAction::CaptureTranslate), "Ctrl+Shift+E");
         // 新增动作默认不绑定（由用户决定是否录）
         assert_eq!(map.get(HotkeyAction::CaptureDelayed), "");
-        assert_eq!(map.get(HotkeyAction::CaptureOcr), "");
-        // 长截图例外:**默认预置**(直通模式下浮条不出现,没键就够不到)
-        assert_eq!(map.get(HotkeyAction::CaptureScrolling), "Ctrl+Shift+L");
+        // 截图翻译/取字/长截图三动作已移除(2026-11-01):由截图工具栏按钮承担。
         // 已绑定的默认键必须两两不同（未绑定的空串不参与比较）
         let mut all: Vec<&str> = HotkeyAction::ALL
             .iter()
@@ -2028,7 +2004,7 @@ mod tests {
             .collect();
         all.sort_unstable();
         all.dedup();
-        assert_eq!(all.len(), 7, "7 个已绑定的默认快捷键不得重复");
+        assert_eq!(all.len(), 5, "5 个已绑定的默认快捷键不得重复");
     }
 
     #[test]
@@ -2041,7 +2017,9 @@ mod tests {
         .unwrap();
         assert_eq!(settings.hotkeys.toggle_main, "Alt+A");
         assert_eq!(settings.hotkeys.pin_latest, "Ctrl+Shift+P");
-        assert!(settings.region_auto_confirm, "默认框选即确认");
+        // regionAutoConfirm 已移除(2026-11-01):框选恒浮出工具栏。旧配置里的
+        // regionAutoConfirm 键被 serde 容错忽略,读入不报错 —— 这里隐式验证了这一点
+        // (若加了 deny_unknown_fields,本 from_value 会直接 Err)。
         // regionSkipEditor 已废弃(§18.5):字段仍在(兼容旧配置读入),但不再驱动行为。
         // 这里只断言"能正常读入默认值",不再断言其语义。
         assert!(settings.region_skip_editor, "已废弃字段仍可读入(默认 true)");
@@ -2075,7 +2053,6 @@ mod tests {
         assert_eq!(settings.proxy.mode, "system", "默认跟随系统代理");
         assert!(settings.proxy.manual.host.is_empty());
         assert_eq!(settings.hotkeys.open_translate, "Ctrl+Shift+T");
-        assert_eq!(settings.hotkeys.capture_translate, "Ctrl+Shift+E");
         assert_eq!(
             settings.translate_microsoft.endpoint, "https://edge.microsoft.com/translate",
             "默认中国版端点"
@@ -2108,20 +2085,11 @@ mod tests {
     }
 
     #[test]
-    fn validate_accepts_six_distinct_hotkeys() {
+    fn validate_accepts_five_distinct_hotkeys() {
         assert!(Settings::default().validate().is_ok(), "默认键互不重复");
         // 翻译相关动作与既有动作重复 → 拒绝
         let mut map = HotkeyMap::default();
         map.open_translate = map.toggle_main.clone();
-        assert!(Settings {
-            hotkeys: map,
-            ..Default::default()
-        }
-        .validate()
-        .is_err());
-
-        let mut map = HotkeyMap::default();
-        map.capture_translate = map.capture_region.clone();
         assert!(Settings {
             hotkeys: map,
             ..Default::default()
@@ -2624,10 +2592,6 @@ mod tests {
             defaults.hotkeys.capture_delayed.is_empty(),
             "延时截图默认不绑定"
         );
-        assert!(
-            defaults.hotkeys.capture_ocr.is_empty(),
-            "截图取字默认不绑定"
-        );
         assert!(defaults.validate().is_ok(), "含未绑定项也应通过校验");
 
         // 全部清空 = 一个键都不绑，仍应合法
@@ -2637,8 +2601,6 @@ mod tests {
         all.hotkeys.capture_fullscreen = String::new();
         all.hotkeys.pin_latest = String::new();
         all.hotkeys.open_translate = String::new();
-        all.hotkeys.capture_translate = String::new();
-        all.hotkeys.capture_scrolling = String::new();
         assert!(all.validate().is_ok(), "全部不绑定应合法");
 
         // 非空项仍须合法、且不得重复

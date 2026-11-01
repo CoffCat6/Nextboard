@@ -585,7 +585,7 @@ void runCaptureToolbarFlow() {
             fp.end();
         }
 
-        auto* overlay = new OverlayWidget(frozen, 0, screen, /*autoConfirm=*/false,
+        auto* overlay = new OverlayWidget(frozen, 0, screen,
                                           /*rightClickCancel=*/true,
                                           /*autoStartStitching=*/false);
         overlay->setGeometry(geo);
@@ -799,19 +799,15 @@ void runCaptureToolbarFlow() {
 
             // ---- 长截图**意图**(CaptureIntent::Scrolling):热键直达 ----
             //
-            // 关键点:必须与 regionAutoConfirm **解耦**。旧写法下
-            // "设了松手即入库" 的用户按 Ctrl+Shift+L 框完就直接入库了,
-            // 永远到不了长截图态 —— 功能对一半用户不可达。
+            // 2026-11-01 起框选恒为浮条模式(regionAutoConfirm 已删),"绕过直通"
+            // 的前提不再存在;保留这段验证的是意图语义本身:框完直接进长截图态。
             {
-                // 刻意造一个 autoConfirm=true 的遮罩 + 长截图意图:
-                // 松手后应当**进长截图态**,而**不是** regionConfirmed。
                 QImage dummy(geo.size() * 2, QImage::Format_ARGB32_Premultiplied);
                 dummy.fill(QColor(0x30, 0x30, 0x30));
                 // screen 不在本 lambda 的捕获列表里(外层 [overlay, geo] 只带了这两个);
                 // 从 overlay 自己的屏取,避免为了一个指针去放大捕获列表。
                 QScreen* scr = overlay->screen();
                 auto* scrollOverlay = new OverlayWidget(dummy, 0, scr,
-                                                        /*autoConfirm=*/true,
                                                         /*rightClickCancel=*/true,
                                                         /*autoStartStitching=*/true);
                 scrollOverlay->setGeometry(geo);
@@ -832,8 +828,7 @@ void runCaptureToolbarFlow() {
                 check(!capturing,
                       QStringLiteral("长截图意图:进入后处于就绪态,等用户点「开始」"));
                 check(!confirmedFired,
-                      QStringLiteral("长截图意图**绕过** regionAutoConfirm=true 的"
-                                     "(否则松手就入库,永远进不了长截图)"));
+                      QStringLiteral("长截图意图不走 regionConfirmed(松手不直接入库)"));
 
                 // Esc 应回到**普通框选**(而不是取消整次截图):选区还在,用户可改用浮条
                 QKeyEvent esc2(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
