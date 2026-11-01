@@ -29,6 +29,17 @@ Rectangle {
     /// 空串 = 无备注(整行不渲染,不给卡片留空位)。
     property string todoNote: ""
 
+    /// 来源应用 exe 名(docs/25):如 "chrome.exe";空串 = 未知(v9 前条目/
+    /// 采集失败/应用内部入库),元信息行不显示来源段。
+    required property string sourceOwner
+    /// 展示名:exe 去后缀,首字母大写以贴近应用普遍观感(不做厂商映射表)。
+    readonly property string sourceOwnerLabel: {
+        const n = sourceOwner
+        if (n === "") return ""
+        const stem = n.endsWith(".exe") ? n.slice(0, -4) : n
+        return stem.charAt(0).toUpperCase() + stem.slice(1)
+    }
+
     /// 文本条目是否展开显示全文(长文本默认折叠 4 行)。
     property bool textExpanded: false
 
@@ -445,6 +456,14 @@ Rectangle {
             // 元数据弱化(§40:12px / TextSecondary)
             Label { text: root.timeText; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
             Label { text: root.sizeText; color: Theme.colors.textSecondary; font.pixelSize: Theme.metrics.fontCaption }
+            // 来源应用(docs/25):「来自 Chrome」—— 回答"这段话从哪复制的";
+            // 空串(旧条目/未知)不渲染,不占位。
+            Label {
+                visible: root.sourceOwnerLabel !== ""
+                text: "来自 " + root.sourceOwnerLabel
+                color: Theme.colors.textTertiary
+                font.pixelSize: Theme.metrics.fontCaption
+            }
 
             // 内容类型(§38 图标 + 文字):一眼可辨文本/图片/文件/待办,
             // 不必再逐张读卡片正文才知道是什么类型。

@@ -1984,6 +1984,7 @@ Rectangle {
                 required property bool todoDone
                 required property bool todoOverdue
                 required property string todoNote
+                required property string sourceOwner
 
                 width: list.width
                 implicitHeight: groupLabel.visible
@@ -2076,6 +2077,7 @@ Rectangle {
                     todoDone: rowWrap.todoDone
                     todoOverdue: rowWrap.todoOverdue
                     todoNote: rowWrap.todoNote
+                    sourceOwner: rowWrap.sourceOwner
                     // 搜索命中高亮:绑防抖后的快照(改词 200ms 后重算,与列表刷新同节奏)
                     query: root.highlightQuery
                     // 键盘光标行:与"菜单打开"同用强调语言(两者都是"正在被操作的对象"),

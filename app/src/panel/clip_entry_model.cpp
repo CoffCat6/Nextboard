@@ -48,6 +48,7 @@ QVariant ClipEntryModel::data(const QModelIndex& index, int role) const {
         case TodoDoneRole: return r.todoDone;
         case TodoOverdueRole: return r.todoOverdue;
         case TodoNoteRole: return r.todoNote;
+        case SourceOwnerRole: return r.sourceOwner;
     }
     return {};
 }
@@ -61,7 +62,7 @@ QHash<int, QByteArray> ClipEntryModel::roleNames() const {
         {BlobPathRole, "blobPath"}, {TagsRole, "tags"},
         {TodoDueRole, "todoDueAt"}, {TodoRemindRole, "todoRemindAt"},
         {TodoDoneRole, "todoDone"}, {TodoOverdueRole, "todoOverdue"},
-        {TodoNoteRole, "todoNote"},
+        {TodoNoteRole, "todoNote"}, {SourceOwnerRole, "sourceOwner"},
     };
 }
 
@@ -627,6 +628,8 @@ void ClipEntryModel::applyPage(const QVariantMap& resp, bool append) {
         r.id = e.value("id").toString();
         r.kind = e.value("kind").toString();
         r.source = e.value("source").toString();
+        // 来源应用(docs/25):v9 起下发;旧条目/采集失败缺键 → 空串不显示
+        r.sourceOwner = e.value("sourceOwner").toString();
         r.pinned = e.value("pinned").toBool();
         r.lastUsedAt = static_cast<qint64>(e.value("lastUsedAt").toDouble());
         r.byteSize = static_cast<qint64>(e.value("byteSize").toDouble());

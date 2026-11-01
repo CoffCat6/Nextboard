@@ -572,6 +572,7 @@ mod tests {
             source: "clipboard".into(),
             tags: None,
             todo: None,
+            source_owner: None,
         };
         entry::insert(&conn, &clip).unwrap();
         assert!(save(&conn, "t1", &patch_full(0, 0, 200, 200)).is_err());

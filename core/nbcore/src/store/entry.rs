@@ -105,6 +105,11 @@ pub struct ClipEntry {
     /// 与 tags 同一兼容手法,旧宿主读到多余键也只是忽略。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub todo: Option<TodoBadge>,
+
+    /// 来源应用 exe 文件名(小写,如 "chrome.exe");v9 起采集,旧条目/采集失败
+    /// 为 None(序列化整键省略,旧宿主兼容 —— 与 todo 徽标同一手法)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_owner: Option<String>,
 }
 
 
@@ -146,6 +151,7 @@ impl ClipEntry {
             last_used_at: row.get("last_used_at")?,
             source: row.get("source").unwrap_or_else(|_| "clipboard".to_owned()),
             tags: row.get("tags").ok(),
+            source_owner: row.get("source_owner").ok(),
             // todo 条目即使 meta 缺行(脏数据)也按"有徽标但无时刻"处理,
             // 否则卡片会退化成普通文本卡(复选框消失),比丢时刻更难排查。
             todo: is_todo.then_some(TodoBadge {
@@ -215,8 +221,8 @@ pub fn insert(conn: &Connection, e: &ClipEntry) -> AppResult<()> {
     let file_paths_json = file_paths_to_json(&e.file_paths)?;
     conn.execute(
         "INSERT INTO clip_entries
-            (id, kind, text_content, blob_path, file_paths, width, height, hash, byte_size, preview, pinned, created_at, last_used_at, source, tags)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            (id, kind, text_content, blob_path, file_paths, width, height, hash, byte_size, preview, pinned, created_at, last_used_at, source, tags, source_owner)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             e.id,
             e.kind.as_str(),
@@ -233,6 +239,7 @@ pub fn insert(conn: &Connection, e: &ClipEntry) -> AppResult<()> {
             e.last_used_at,
             e.source,
             e.tags,
+            e.source_owner,
         ],
     )?;
     Ok(())
@@ -346,7 +353,7 @@ pub fn list(
                          ELSE e.text_content END AS text_content, \
                     e.blob_path, e.file_paths, e.width, e.height,
                     e.hash, e.byte_size, e.preview, e.pinned, e.created_at, e.last_used_at,
-                    e.source, e.tags,
+                    e.source, e.tags, e.source_owner,
                     m.due_at AS todo_due_at, m.done_at AS todo_done_at
              FROM clip_entries e
              LEFT JOIN todo_meta m ON m.id = e.id
@@ -1006,6 +1013,7 @@ mod tests {
             source: "clipboard".into(),
             tags: None,
             todo: None,
+            source_owner: None,
         }
     }
 

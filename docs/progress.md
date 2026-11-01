@@ -6125,3 +6125,16 @@ docs/24-quick-commands-plan.md(v1 设计稿:§3 数据模型/§4 注册表/§5 s
   缓存键用解析后目标路径(同目标多快捷方式共享)。
 - 端到端验证:自造 Notepad.lnk(本机无现成 exe 指向型 .lnk)→ 图标提取落盘 + 上栏 ✓。
 - 特殊目标(回收站 ::{})解析失败静默回退默认图标。
+
+## 2026-11-01(六)应用来源追踪(docs/25)
+
+- **v9 迁移**:clip_entries 加 source_owner 列(ALTER 加列,不重建;旧条目 NULL)。
+- **采集**:WM_CLIPBOARDUPDATE 时 GetClipboardOwner → GetWindowThreadProcessId →
+  OpenProcess(限权)→ QueryFullProcessImageNameW → 取 exe 文件名小写;
+  失败(属主退出/权限)按 NULL 诚实降级。只存文件名不存完整路径(隐私面)。
+- **下发**:ClipEntry.sourceOwner(缺省省略键,旧宿主兼容);模型 SourceOwnerRole
+  → EntryCard 元信息行「来自 Chrome」(exe 去后缀首字母大写;NULL 不渲染)。
+- **取舍**:去重 touch 不更新 owner(记录"首次来源"直觉;要"最近来源"再改)。
+- 单测:owner_app_name 路径提取;394 项全量绿。
+- 真机确认项(沙箱无法模拟第三方复制):从浏览器/聊天窗复制文本 → 卡片显示
+  对应应用名;UWP 应用属主为容器进程按 NULL 处理(不显示,不报错)。

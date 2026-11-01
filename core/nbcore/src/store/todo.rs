@@ -182,6 +182,8 @@ pub fn create(
                 .map(|t| serde_json::to_string(t).expect("tags 序列化不会失败(字符串数组)")),
             // 徽标只在联查查询里构造(见 ClipEntry::from_row);入库前恒为 None
             todo: None,
+            // 待办经面板创建,不经剪贴板属主查询(docs/25 §1.3:owner 只属于剪贴板通道)
+            source_owner: None,
         },
     )?;
     tx.execute(
@@ -656,6 +658,7 @@ mod tests {
             source: "clipboard".into(),
             tags: None,
             todo: None,
+            source_owner: None,
         }
     }
 

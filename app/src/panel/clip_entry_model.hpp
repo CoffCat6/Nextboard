@@ -53,6 +53,7 @@ public:
         TodoDoneRole,    // 待办:是否已完成(划线归档)
         TodoOverdueRole, // 待办:未完成且已过截止
     TodoNoteRole,    // 待办:备注(docs/21);无 = 空串
+    SourceOwnerRole, // 来源应用 exe 名(docs/25);空串 = 未知/不显示
     };
     Q_ENUM(Roles)
 
@@ -197,6 +198,7 @@ private:
         bool todoDone = false;
         bool todoOverdue = false;
         QString todoNote;         // 备注(docs/21);空串 = 无备注
+        QString sourceOwner;      // 来源应用 exe 名(docs/25);空串 = 未知
     };
     /// 就地修改一行并对其发 dataChanged(排序不受影响的字段变更用)。
     /// 整表 reset 会销毁全部委托(含复用池)、丢掉展开态与滚动位置;

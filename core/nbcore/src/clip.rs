@@ -116,6 +116,51 @@ fn monitor_thread() {
     }
 }
 
+/// 当前剪贴板属主的应用 exe 文件名(小写,如 "chrome.exe");失败返回 None。
+///
+/// 时序:WM_CLIPBOARDUPDATE 到达时属主已设置;属主进程恰好退出的竞态窗口极小,
+/// 失败按 None 存(展示层对 None 诚实降级为不显示)。只存文件名不存完整路径:
+/// 完整路径含用户名/安装目录,进库会扩大隐私面(备份包被带出去)——docs/25 §2.2。
+#[cfg(windows)]
+fn clipboard_owner_app() -> Option<String> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::DataExchange::GetClipboardOwner;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+
+    let owner = unsafe { GetClipboardOwner() }.ok()?;
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(owner, Some(&mut pid)) };
+    if pid == 0 {
+        return None;
+    }
+    let process = unsafe {
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+    }
+    .ok()?;
+    let mut buf = [0u16; 1024];
+    let mut len = buf.len() as u32;
+    let ok = unsafe {
+        QueryFullProcessImageNameW(process, PROCESS_NAME_FORMAT(0), windows::core::PWSTR(buf.as_mut_ptr()), &mut len)
+    };
+    unsafe { let _ = CloseHandle(process); };
+    if !ok.is_ok() || len == 0 {
+        return None;
+    }
+    let full = String::from_utf16_lossy(&buf[..len as usize]);
+    owner_app_name(&full)
+}
+
+/// 完整路径 → 应用文件名(小写)。独立纯函数便于单测(属主采集本身依赖
+/// 真实剪贴板状态,无法在单测里模拟)。
+fn owner_app_name(full: &str) -> Option<String> {
+    let name = full.rsplit(['\\', '/']).next()?.to_lowercase();
+    if name.is_empty() { None } else { Some(name) }
+}
+
 /// WM_CLIPBOARDUPDATE 处理:核心就绪且监听开启才消费。
 #[cfg(windows)]
 fn handle_clipboard_update() {
@@ -143,8 +188,10 @@ fn handle_clipboard_update() {
     let Some(item) = read_current() else {
         return;
     };
+    // 属主在读取内容前采集(文档 docs/25 §2.1):广播到达即查,不依赖内容类型
+    let owner = clipboard_owner_app();
     let hash = item.hash();
-    match process(core, item, &hash, &settings) {
+    match process(core, item, &hash, &settings, owner.as_deref()) {
         Ok(_) => notify_host(WM_APP_CLIP_CHANGED),
         Err(err) => warn!("剪贴板内容入库失败: {err}"),
     }
@@ -352,7 +399,13 @@ fn extract(b: u8, g: u8, r: u8, a: u8, b_mask: u32, r_mask: u32, g_mask: u32) ->
 /// 这把锁是进程唯一的,面板翻页/计数/待办调度全排在它后面 —— 锁内做重活等于
 /// 每复制一张大图全应用停摆一次。代价是两段锁之间可能出现同 hash 并发插入,
 /// 故第二段锁里再查一次,输了就清掉刚写的文件、复用已生效条目。
-fn process(core: &Core, item: ClipItem, hash: &str, settings: &Settings) -> AppResult<Option<ClipEntry>> {
+fn process(
+    core: &Core,
+    item: ClipItem,
+    hash: &str,
+    settings: &Settings,
+    owner: Option<&str>,
+) -> AppResult<Option<ClipEntry>> {
     if is_oversized(&item, settings) {
         debug!("剪贴板内容超过大小上限,已忽略");
         return Ok(None);
@@ -369,7 +422,7 @@ fn process(core: &Core, item: ClipItem, hash: &str, settings: &Settings) -> AppR
     }
 
     // ---- 锁外重活:PNG 编码 + 落盘 + 缩略图 ----
-    let new_entry = build_entry(&core.blobs_dir, item, hash, now, settings.max_image_mb)?;
+    let new_entry = build_entry(&core.blobs_dir, item, hash, now, settings.max_image_mb, owner)?;
     let Some(new_entry) = new_entry else {
         debug!("图片超过大小上限({}MB),未入库", settings.max_image_mb);
         return Ok(None);
@@ -410,7 +463,7 @@ pub fn ingest_image(
         height,
     };
     let hash = item.hash();
-    let mut stored = process(core, item, &hash, &settings)?;
+    let mut stored = process(core, item, &hash, &settings, None)?;
     if let Some(entry) = &mut stored {
         if entry.source != source {
             set_source(core, &entry.id, source)?;
@@ -429,7 +482,7 @@ pub fn ingest_text(core: &Core, text: &str, source: &str) -> AppResult<Option<Cl
     let settings = core.settings()?;
     let item = ClipItem::Text(text.to_owned());
     let hash = item.hash();
-    let mut stored = process(core, item, &hash, &settings)?;
+    let mut stored = process(core, item, &hash, &settings, None)?;
     if let Some(entry) = &mut stored {
         if entry.source != source {
             set_source(core, &entry.id, source)?;
@@ -487,6 +540,7 @@ fn build_entry(
     hash: &str,
     now: i64,
     max_image_mb: i64,
+    owner: Option<&str>,
 ) -> AppResult<Option<ClipEntry>> {
     let id = uuid::Uuid::now_v7().to_string();
     match item {
@@ -505,6 +559,7 @@ fn build_entry(
             created_at: now,
             last_used_at: now,
             source: "clipboard".into(),
+            source_owner: owner.map(|o| o.to_owned()),
             tags: None,
             todo: None,
         })),
@@ -546,6 +601,7 @@ fn build_entry(
                 source: "clipboard".into(),
                 tags: None,
                 todo: None,
+                source_owner: owner.map(|o| o.to_owned()),
             }))
         }
         ClipItem::File(paths) => {
@@ -571,6 +627,7 @@ fn build_entry(
                 source: "clipboard".into(),
                 tags: None,
                 todo: None,
+                source_owner: owner.map(|o| o.to_owned()),
             }))
         }
     }
@@ -945,6 +1002,21 @@ pub fn remove_blob(path: &Path) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn owner_app_name_extracts_and_lowercases() {
+        assert_eq!(
+            owner_app_name("C:\\Users\\me\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe"),
+            Some("chrome.exe".to_owned())
+        );
+        assert_eq!(
+            owner_app_name("D:/Soft/WeChat/WeChat.exe"),
+            Some("wechat.exe".to_owned())
+        );
+        // 容器路径(Unix 风格分隔符)与空段
+        assert_eq!(owner_app_name("/usr/bin/app"), Some("app".to_owned()));
+        assert_eq!(owner_app_name(""), None);
+    }
     use super::*;
 
     #[test]
