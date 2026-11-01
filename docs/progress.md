@@ -6014,3 +6014,58 @@ ui::themeTokens().accent)同一取色来源,深浅两套主题各自动跟随:
 16 条 flow 全量回归 0 失败(含 G2 浅底分支);构建仅剩既有 C4858 一条
 (capture_session.cpp:591,长截图 QtConcurrent 遗留,与本轮无关)。
 真机确认项:浮条采纳后再悬停别处,预览数字应即时变化。
+
+## 2026-11-01(六)快捷功能 I:主面板右侧栏(QuickRail)界面壳
+
+### 实现
+
+- 新增 `QuickRail.qml`(97 行):52px 固定窄栏,surfaceSecondary 底 + 左分隔线;
+  数据驱动(`actions` 数组 + Repeater),本期一个占位钮「添加快捷功能」
+  (dim 0.55 弱化,点击 toast);HeaderIcon 补 `plus` 图标(Outline 双臂圆头加号)。
+- Main.qml 列表页中部包进行内两列:主列(分类/筛选/列表/空状态)原样内移,
+  右侧挂 QuickRail;Header 与状态栏通宽;翻译/设置整窗形态不带侧栏。
+  toast 在列表形态右移 68px 避开侧栏。
+- C++/Rust 零改动。
+
+### 验证
+
+`--todo-flow`/`--settings-flow`/`--todo-layout-flow` 全过;真机呼出确认
+布局与占位钮 toast。提交 a21ce35。
+
+## 2026-11-01(六)快捷功能 II:设置页「快捷功能」分类与显示开关
+
+### 实现
+
+- settings.rs 加 `quick_rail: bool`(默认 true;serde 容器 default 模式同
+  smart_capture —— 纯 QML 存不住,core merge 会丢未知字段)。
+- PanelWindow 加 `showQuickRail` Q_PROPERTY(setter + 通知;构造从启动快照回填),
+  设置页开关直写属性 → 列表页 QuickRail visible 绑定**即时生效**。
+- 新增 `SettingsPageQuick.qml`:显示开关 + 二期「栏内按钮管理」预告区;
+  SettingsView 注册分类(「快捷键」后,原 4~8 号顺移 5~9)。
+
+### 验证
+
+cargo release + ninja 全过;`--settings-flow` 新增 STEP16(导航进入/初值读设置/
+真实点击落库翻转/属性联动/复原往返)全过。中途修两处 `QVariant::toBool(bool)`
+编译错误(QVariantMap 取值无带参 fallback 重载)。
+
+## 2026-11-01(六)快捷功能 III:指令类型体系设计(docs/24)
+
+### 决策
+
+- 三类型起步:`app`(ShellExecute 打开程序/文件夹,带参数/工作目录)、
+  `system`(精选目录 12 项:环境变量/服务/网络/防火墙等,target 存键名;
+  手填仅放行 ms-settings: 前缀)、`internal`(软件内部动作,经 CoreFacade
+  **动作注册表**分发,首批 6 个全复用现有链路)。
+- 配置层:settings 加 `quick_rail_commands: Vec<QuickCommand>`(数组顺序即显示序,
+  上限 12;id 用时间戳+随机,与顺序解耦)。
+- 可扩展性:type 开放字符串 + "未知类型不渲染不执行"的前向兼容契约;
+  dispatcher 按 type 注册 handler;catalog 预留 available 字段 ——
+  四处接缝即未来插件入口的底座(子进程 JSON 协议为候选形态,Q3 调研)。
+- 安全边界:nbcore 永不执行进程;app 不做 shell 包装(cmd / && / | 无效)。
+
+### 产出
+
+docs/24-quick-commands-plan.md(v1 设计稿:§3 数据模型/§4 注册表/§5 system 目录/
+§6 UI/§7 扩展与安全/§8 分期 Q1–Q3/§10 `--quick-commands-flow` 7 项验收设计);
+18-next-steps.md 加 backlog 3.15。Q1 待实施。
