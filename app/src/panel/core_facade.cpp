@@ -868,34 +868,34 @@ void CoreFacade::openEntry(const QString& id) {
 QVariantList CoreFacade::quickActionCatalog() const {
     QVariantList out;
     if (m_quickCommands)
-        QMetaObject::invokeMethod(m_quickCommands, "quickActionCatalog",
+        QMetaObject::invokeMethod(m_quickCommands.data(), "quickActionCatalog",
                                   Q_RETURN_ARG(QVariantList, out));
     return out;
 }
 QVariantList CoreFacade::quickSystemCatalog() const {
     QVariantList out;
     if (m_quickCommands)
-        QMetaObject::invokeMethod(m_quickCommands, "quickSystemCatalog",
+        QMetaObject::invokeMethod(m_quickCommands.data(), "quickSystemCatalog",
                                   Q_RETURN_ARG(QVariantList, out));
     return out;
 }
 QString CoreFacade::quickSystemResolve(const QString& key) const {
     QString out;
     if (m_quickCommands)
-        QMetaObject::invokeMethod(m_quickCommands, "quickSystemResolve",
+        QMetaObject::invokeMethod(m_quickCommands.data(), "quickSystemResolve",
                                   Q_RETURN_ARG(QString, out),
                                   Q_ARG(QString, key));
     return out;
 }
 void CoreFacade::runQuickCommand(const QVariantMap& cmd) {
     if (m_quickCommands)
-        QMetaObject::invokeMethod(m_quickCommands, "runCommand",
+        QMetaObject::invokeMethod(m_quickCommands.data(), "runCommand",
                                   Q_ARG(QVariantMap, cmd));
 }
 bool CoreFacade::runQuickAction(const QString& actionId) {
     bool ok = false;
     if (m_quickCommands)
-        QMetaObject::invokeMethod(m_quickCommands, "runQuickAction",
+        QMetaObject::invokeMethod(m_quickCommands.data(), "runQuickAction",
                                   Q_RETURN_ARG(bool, ok),
                                   Q_ARG(QString, actionId));
     return ok;
@@ -904,7 +904,7 @@ bool CoreFacade::runQuickAction(const QString& actionId) {
 bool CoreFacade::quickAppTargetValid(const QString& target) {
     bool ok = false;
     if (m_quickCommands)
-        QMetaObject::invokeMethod(m_quickCommands, "appTargetValid",
+        QMetaObject::invokeMethod(m_quickCommands.data(), "appTargetValid",
                                   Q_RETURN_ARG(bool, ok),
                                   Q_ARG(QString, target));
     return ok;
@@ -913,7 +913,7 @@ bool CoreFacade::quickAppTargetValid(const QString& target) {
 QString CoreFacade::appIconUrl(const QString& target) {
     QString out;
     if (m_quickCommands)
-        QMetaObject::invokeMethod(m_quickCommands, "appIconUrl",
+        QMetaObject::invokeMethod(m_quickCommands.data(), "appIconUrl",
                                   Q_RETURN_ARG(QString, out),
                                   Q_ARG(QString, target));
     return out;

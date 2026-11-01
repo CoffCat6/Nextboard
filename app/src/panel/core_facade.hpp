@@ -10,6 +10,7 @@
 #pragma once
 
 #include <QObject>
+#include <QPointer>
 #include <QString>
 #include <QVariantMap>
 #include <functional>
@@ -262,7 +263,11 @@ private:
     QString m_themeMode = QStringLiteral("system");
     bool m_darkTheme = true;
     /// 快捷指令分发器(main.cpp 装配后注入;不拥有所有权,栈对象在 main)。
-    QObject* m_quickCommands = nullptr;
+    /// ⚠️ 必须 QPointer:main 里它是**后于 panel 构造**的栈对象,先于 panel
+    /// 析构 —— 退出时 QML 引擎销毁可能再触发 rail 的 FFI 调用(refresh 等),
+    /// 悬垂裸指针会在 nbcore shutdown 后调 nb_call 而崩(实测退出期 0xc0000005,
+    /// 固定落在 nbcore)。QPointer 在目标析构时自动置空,转发函数判空即安全。
+    QPointer<QObject> m_quickCommands;
 };
 
 /// 把一张**已合成**的图片贴成置顶窗口(截图编辑器「贴图」用)。
