@@ -58,12 +58,26 @@ bool isAllowedSystemTarget(const QString& target) {
     return false;
 }
 
+/// 清理用户粘贴的目标:Windows "复制文件地址" 自带**首尾引号**;另有零宽
+/// 字符与首尾空白。不去引号的话,粘贴路径永远过不了扩展名检查(实测反馈:
+/// 删除后重新添加同一 exe 报"路径无效")。
+QString cleanTarget(const QString& target) {
+    QString t = target.trimmed();
+    while (t.startsWith('"') && t.endsWith('"') && t.length() >= 2)
+        t = t.mid(1, t.length() - 2).trimmed();
+    // 去零宽与 BOM 类字符
+    static const QRegularExpression invisible(
+        QStringLiteral("[\u200B\u200C\u200D\uFEFF]"));
+    t.remove(invisible);
+    return t;
+}
+
 /// app 类型允许的目标形态:可执行扩展名或已存在目录(目录 = 资源管理器打开)。
 bool isValidAppTarget(const QString& target) {
     static const QRegularExpression ext(
         QStringLiteral("\\.(exe|lnk|bat|cmd)$"),
         QRegularExpression::CaseInsensitiveOption);
-    const QString t = target.trimmed();
+    const QString t = cleanTarget(target);
     if (ext.match(t).hasMatch()) return true;
     return QFileInfo::exists(t) && QFileInfo(t).isDir();
 }
@@ -326,7 +340,8 @@ bool QuickCommands::shellOpen(const QString& target, const QString& args,
 }
 
 bool QuickCommands::runApp(const QVariantMap& cmd) {
-    const QString target = cmd.value("target").toString();
+    // 执行时同样剥引号:校验与执行必须同一清洗口径,否则"校验过却启动失败"
+    const QString target = cleanTarget(cmd.value("target").toString());
     const QString label = cmd.value("label").toString();
     if (!isValidAppTarget(target)) {
         CoreFacade::instance().showToast(

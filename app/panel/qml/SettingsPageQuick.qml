@@ -99,8 +99,12 @@ Item {
             target = editorAppPath.text.trim()
             if (target === "") { editorError.text = "请填写应用路径"; return }
             // 就地预检(docs/24 Q2):路径无效立即报,不等到执行时 toast
-            if (!Core.quickAppTargetValid(target)) {
-                editorError.text = "路径无效:需 .exe/.lnk/.bat/.cmd 或已存在的文件夹"
+            // 预检走 C++ 转发;旧宿主(热升级前驻留进程)无此方法 → typeof 守卫
+            // 跳过预检,执行时仍有同规则校验兜底。
+            if (typeof Core.quickAppTargetValid === "function"
+                && !Core.quickAppTargetValid(target)) {
+                editorError.text = "路径无效:应指向 .exe / .lnk / .bat / .cmd 文件,"
+                                   + "或一个已存在的文件夹(该文件夹必须真实存在)"
                 return
             }
         } else if (type === "system") {
