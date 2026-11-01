@@ -444,7 +444,11 @@ Item {
                     tip: "用名称首字"
                     selected: page.editingIcon === ""
                               || page.editingIcon.indexOf("@") === 0
-                    onPicked: page.editingIcon = "@" + page.firstCharOf(editorLabel.text)
+                    onPicked: {
+                        // 空串 = "按类型自动分配"的编码;从首字态再点 = 取消选择
+                        page.editingIcon = (page.editingIcon.indexOf("@") === 0)
+                                           ? "" : "@" + page.firstCharOf(editorLabel.text)
+                    }
                 }
                 Repeater {
                     model: page.iconChoices
@@ -453,12 +457,17 @@ Item {
                         kind: modelData.kind
                         tip: modelData.tip
                         selected: page.editingIcon === modelData.kind
-                        onPicked: page.editingIcon = modelData.kind
+                        // 再点已选中的格 = 取消,回到"按类型自动分配"
+                        // (app 类型自动 = 真实提取的 exe 图标)
+                        onPicked: page.editingIcon =
+                                  (page.editingIcon === modelData.kind) ? "" : modelData.kind
                     }
                 }
             }
             HintLabel {
-                text: "「首字」随名称变化;不选则按指令类型自动分配。"
+                text: "应用类指令不选图标时,自动提取目标程序的真实图标;"
+                      + "再点一次已选中的图标可取消,回到自动分配。"
+                      + "「首字」随名称变化。"
             }
 
             // ---- app 表单 ----

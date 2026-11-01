@@ -488,6 +488,10 @@ int main(int argc, char* argv[]) {
     // 但 QML 侧只在 rail 渲染/设置页打开时才调 catalog,此刻注入已完成。
     nb::QuickCommands quickCommands(panel, core);
     nb::CoreFacade::instance().setQuickCommands(&quickCommands);
+    // 注入完成后广播一次:rail 的首次 refresh 发生在面板构造期(Component.onCompleted),
+    // 早于本注入 —— app 图标提取(appIconUrl 转发)那时拿不到 dispatcher,永远空。
+    // 这条广播让 rail 再刷一次,真实图标才能上栏。
+    nb::CoreFacade::instance().notifySettingsChanged();
     // 设置里改完快捷键后重新注册(信号由 CoreFacade 发出,避免它依赖 Hotkeys 实例)
     QObject::connect(&nb::CoreFacade::instance(), &nb::CoreFacade::hotkeysChanged,
                      &hotkeys, &nb::Hotkeys::applyFromSettings);
