@@ -268,7 +268,7 @@ Rectangle {
                 HeaderIcon {
                     anchors.centerIn: parent
                     visible: !railButton.modelData.isChar
-                             && railButton.modelData.iconUrl === ""
+                             && !railButton.modelData.iconUrl
                     kind: railButton.modelData.iconKind
                     size: 20
                     color: railMa.containsMouse ? Theme.colors.textPrimary
@@ -277,8 +277,8 @@ Rectangle {
                 // app 真实图标(SHGetFileInfo 提取,落盘缓存)
                 Image {
                     anchors.centerIn: parent
-                    visible: railButton.modelData.iconUrl !== ""
-                    source: railButton.modelData.iconUrl
+                    visible: !!railButton.modelData.iconUrl
+                    source: railButton.modelData.iconUrl || ""
                     sourceSize: Qt.size(20, 20)
                     smooth: true
                     fillMode: Image.PreserveAspectFit
