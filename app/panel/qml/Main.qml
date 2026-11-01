@@ -2208,6 +2208,12 @@ Rectangle {
                 // 这里绑定即即时生效。
                 visible: panelWindow.showQuickRail
                 Layout.fillHeight: true
+                // 右键「编辑…」→ 设置页快捷分类并打开该指令的编辑卡片
+                onEditRequested: function(commandId) {
+                    panelWindow.showSettings()
+                    if (settingsPage.item)
+                        settingsPage.item.openQuickEditor(commandId)
+                }
                 onActionTriggered: function(actionId, cmd) {
                     if (actionId === "addQuick") {
                         // 添加/管理 → 设置页快捷功能分类(占位 toast 退役)

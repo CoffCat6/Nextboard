@@ -48,6 +48,13 @@ public:
     /// system 键 → 执行串(验收断言用,不真执行;未知键返回空串)。
     Q_INVOKABLE QString quickSystemResolve(const QString& key) const;
 
+    /// app 目标的真实图标(docs/24 Q2):SHGetFileInfo 取图标 → 存数据目录
+    /// quick-icons/<md5>.png,返回 "file:///..." URL;失败/非 exe 返回空串
+    /// (QML 回退类型默认图标)。结果按 target 缓存,同一应用只提取一次。
+    Q_INVOKABLE QString appIconUrl(const QString& target);
+    /// app 目标有效性(.exe/.lnk/.bat/.cmd 或存在目录;编辑卡片就地预检)。
+    Q_INVOKABLE bool appTargetValid(const QString& target) const;
+
     /// 执行一条指令(QuickRail 点击的统一入口)。cmd 是 settings 里的单条
     /// 命令对象(id/type/label/target/args/workdir)。未知 type 静默忽略
     /// (前向兼容契约:高版本配置在低版本宿主上不炸)。

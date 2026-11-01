@@ -1,11 +1,14 @@
 #include "quick_commands.hpp"
 
+#include "app_paths.hpp"
 #include "capture/capture_session.hpp"
 #include "panel/core_facade.hpp"
 #include "panel/panel_window.hpp"
 
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFileInfo>
+#include <QImage>
 #include <QHash>
 #include <QTimer>
 #include <QRegularExpression>
@@ -34,6 +37,13 @@ const SystemEntry kSystemEntries[] = {
     {"sound",          "声音设置",    "mmsys.cpl"},
     {"power",          "电源和睡眠",  "ms-settings:powersleep"},
     {"windows-update", "Windows 更新", "ms-settings:windowsupdate"},
+    {"bluetooth",      "蓝牙设备",    "ms-settings:bluetooth"},
+    {"apps-features",  "应用与功能",  "ms-settings:appsfeatures"},
+    {"storage",        "存储",        "ms-settings:storagesense"},
+    {"mouse",          "鼠标设置",    "main.cpl"},
+    {"datetime",       "日期和时间",  "timedate.cpl"},
+    {"credman",        "凭据管理器",  "control.exe keymgr.dll,KRShowKeyMgr"},
+    {"cleanmgr",       "磁盘清理",    "cleanmgr.exe"},
 };
 
 /// ms-settings: 手填的白名单前缀(docs/24 §3.2:不开放任意 URI,
@@ -54,6 +64,65 @@ bool isValidAppTarget(const QString& target) {
     const QString t = target.trimmed();
     if (ext.match(t).hasMatch()) return true;
     return QFileInfo::exists(t) && QFileInfo(t).isDir();
+}
+
+/// HICON → QImage(Qt6 无 QtWinExtras;ICONINFO + GetDIBits 手动转换)。
+/// alpha 预乘:PNG 保存需要非预乘;GetDIBits 的 32bpp 顶层位图在带 alpha 的
+/// 现代图标上已是预乘 ARGB —— 逐像素除回 alpha(未带 alpha 的旧图标 mask 全 1,
+/// 除法退化为原值,安全)。
+QImage hIconToImage(HICON icon) {
+    ICONINFO info = {};
+    if (!::GetIconInfo(icon, &info)) return QImage();
+    BITMAP bmp = {};
+    if (!::GetObjectW(info.hbmColor, sizeof(bmp), &bmp)) {
+        ::DeleteObject(info.hbmColor); ::DeleteObject(info.hbmMask);
+        return QImage();
+    }
+    const int w = bmp.bmWidth, h = bmp.bmHeight;
+    QImage color(w, h, QImage::Format_ARGB32_Premultiplied);
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = w;
+    bmi.bmiHeader.biHeight = -h;   // top-down
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    HDC dc = ::GetDC(nullptr);
+    const int got = ::GetDIBits(dc, info.hbmColor, 0, h,
+                                color.bits(), &bmi, DIB_RGB_COLORS);
+    ::ReleaseDC(nullptr, dc);
+    QImage out;
+    if (got == h) {
+        // mask 检查:全 0 透明区?简化:若 color 有非零 alpha 视为带 alpha;
+        // 否则用 mask 合成(老图标)。
+        bool hasAlpha = false;
+        for (int y = 0; y < h && !hasAlpha; ++y) {
+            const QRgb* row = reinterpret_cast<const QRgb*>(color.constScanLine(y));
+            for (int x = 0; x < w; ++x)
+                if (qAlpha(row[x]) != 0) { hasAlpha = true; break; }
+        }
+        out = color.convertToFormat(QImage::Format_ARGB32);
+        if (!hasAlpha) {
+            // 用 mask 填 alpha:mask 1bpp,0 = 不透明
+            QImage mask(w, h, QImage::Format_Mono);
+            BITMAPINFO mbmi = bmi;
+            mbmi.bmiHeader.biBitCount = 1;
+            HDC dc2 = ::GetDC(nullptr);
+            ::GetDIBits(dc2, info.hbmMask, 0, h, mask.bits(), &mbmi, DIB_RGB_COLORS);
+            ::ReleaseDC(nullptr, dc2);
+            for (int y = 0; y < h; ++y) {
+                QRgb* row = reinterpret_cast<QRgb*>(out.scanLine(y));
+                const uchar* mrow = mask.constScanLine(y);
+                for (int x = 0; x < w; ++x) {
+                    const bool transparent = (mrow[x / 8] >> (7 - (x % 8))) & 1;
+                    if (transparent) row[x] = 0;
+                }
+            }
+        }
+    }
+    ::DeleteObject(info.hbmColor);
+    ::DeleteObject(info.hbmMask);
+    return out;
 }
 
 } // namespace
@@ -162,6 +231,39 @@ QString QuickCommands::quickSystemResolve(const QString& key) const {
     for (const auto& e : kSystemEntries)
         if (key == QLatin1String(e.key)) return QLatin1String(e.exec);
     return QString();
+}
+
+bool QuickCommands::appTargetValid(const QString& target) const {
+    return isValidAppTarget(target);
+}
+
+QString QuickCommands::appIconUrl(const QString& target) {
+    // 只对 .exe 提取(.lnk 要解 IShellLink,docs/24 §9 留后续;失败回退默认图标)
+    if (!target.endsWith(QLatin1String(".exe"), Qt::CaseInsensitive))
+        return QString();
+    const QString t = QDir::toNativeSeparators(target.trimmed());
+    if (!QFileInfo::exists(t)) return QString();
+    // 缓存键 = 路径 md5:同路径只提取一次;应用更新后路径不变图标一般也不变
+    const QString cacheName = QStringLiteral("quick-icons/%1.png")
+                                  .arg(QString::fromLatin1(
+                                      QCryptographicHash::hash(
+                                          t.toUtf8(), QCryptographicHash::Md5).toHex()));
+    const QString cachePath = nb::appDataFile(cacheName);
+    if (QFileInfo::exists(cachePath))
+        return QUrl::fromLocalFile(cachePath).toString();
+
+    SHFILEINFOW sfi = {};
+    // SHGFI_LARGEICON = 32x32 系统档;QML Image smooth 缩到 20px
+    if (!::SHGetFileInfoW(reinterpret_cast<const wchar_t*>(t.constData()), 0,
+                          &sfi, sizeof(sfi),
+                          SHGFI_ICON | SHGFI_LARGEICON) || !sfi.hIcon)
+        return QString();
+    const QImage img = hIconToImage(sfi.hIcon);
+    ::DestroyIcon(sfi.hIcon);
+    if (img.isNull()) return QString();
+    QDir().mkpath(QFileInfo(cachePath).absolutePath());
+    if (!img.save(cachePath, "PNG")) return QString();
+    return QUrl::fromLocalFile(cachePath).toString();
 }
 
 bool QuickCommands::shellOpen(const QString& target, const QString& args,

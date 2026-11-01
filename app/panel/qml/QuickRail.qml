@@ -43,14 +43,24 @@ Rectangle {
         for (let i = 0; i < list.length; ++i) {
             const it = list[i]
             if (it.enabled === false) continue
+            // 图标三层:用户指定(@首字 / HeaderIcon 词汇)> app 真实图标(提取
+            // 失败/非 exe 回退)> 类型默认。iconUrl 仅 app 且未指定时才调
+            // (SHGetFileInfo 首轮有磁盘开销,结果落盘缓存后为零)。
+            let iconKind = it.icon || defaultIconFor(it.type)
+            let isChar = (it.icon || "").indexOf("@") === 0
+            let ch = isChar ? firstCharOf(it.icon.length > 1 ? it.icon.slice(1)
+                                                             : it.label) : ""
+            let iconUrl = ""
+            if (!it.icon && it.type === "app") {
+                iconUrl = Core.appIconUrl(it.target || "")
+                if (iconUrl !== "") { iconKind = ""; isChar = false }
+            }
             out.push({
                 id: it.id,
-                // 图标解码:"@X"/"@" = 首字字母块(isChar),否则 HeaderIcon kind
-                iconKind: it.icon || defaultIconFor(it.type),
-                isChar: (it.icon || "").indexOf("@") === 0,
-                char: (it.icon || "").indexOf("@") === 0
-                      ? firstCharOf(it.icon.length > 1 ? it.icon.slice(1) : it.label)
-                      : "",
+                iconKind: iconKind,
+                isChar: isChar,
+                char: ch,
+                iconUrl: iconUrl,
                 label: it.label,
                 // tooltip 第二行:类型摘要(system/internal 附目标,app 附文件名)
                 typeText: typeTextFor(it.type, it.target),
@@ -82,6 +92,46 @@ Rectangle {
         }
         return type
     }
+    // ---- 右键快捷管理(docs/24 Q2):读改写 quickRailCommands + save + refresh ----
+    // rail 自改后直接 refresh() 不发 settingsChanged 广播:设置页每次打开 load()
+    // 都重拉,不存在陈旧读;广播反而要 CoreFacade 加无谓通道。
+    function saveCommands(list) {
+        const resp = Core.call("get_settings")
+        if (!resp.ok) return
+        const s = resp.data
+        s.quickRailCommands = list
+        Core.call("save_settings", s)
+        refresh()
+    }
+    function allCommands() {
+        const resp = Core.call("get_settings")
+        return resp.ok && resp.data ? resp.data.quickRailCommands || [] : []
+    }
+    /// 置顶(移到列表首位 = 栏内最上)。
+    function moveCommandTop(id) {
+        const all = allCommands()
+        const idx = all.findIndex(function(x) { return x.id === id })
+        if (idx <= 0) return
+        const it = all.splice(idx, 1)[0]
+        all.unshift(it)
+        saveCommands(all)
+    }
+    function toggleCommand(id) {
+        const all = allCommands()
+        for (let i = 0; i < all.length; ++i) {
+            if (all[i].id === id) {
+                const it = Object.assign({}, all[i])
+                it.enabled = !(it.enabled !== false)
+                all[i] = it
+                break
+            }
+        }
+        saveCommands(all)
+    }
+    function removeCommand(id) {
+        saveCommands(allCommands().filter(function(x) { return x.id !== id }))
+    }
+
     /// Repeater 的最终模型(指令 + 固定添加钮)。
     readonly property var actions: commands.concat([
         { id: "addQuick", iconKind: "plus", label: "添加 / 管理快捷功能",
@@ -146,6 +196,38 @@ Rectangle {
     /// 执行由使用方(Main.qml)接线 —— 本组件只管"长什么样"。
     signal actionTriggered(string actionId, var cmd)
 
+    /// 右键管理菜单(编辑上抛给 Main —— 编辑在设置页卡片里做)
+    signal editRequested(string commandId)
+    function openCommandMenu(cmd) {
+        commandMenu.targetId = cmd.id
+        commandMenu.targetEnabled = cmd.enabled !== false
+        commandMenu.popup()
+    }
+    ThemedMenu {
+        id: commandMenu
+        minWidth: 120
+        property string targetId: ""
+        property bool targetEnabled: false
+        ThemedMenuItem {
+            text: "置顶"
+            onTriggered: root.moveCommandTop(commandMenu.targetId)
+        }
+        ThemedMenuItem {
+            text: commandMenu.targetEnabled ? "停用" : "启用"
+            onTriggered: root.toggleCommand(commandMenu.targetId)
+        }
+        ThemedMenuItem {
+            text: "编辑…"
+            onTriggered: root.editRequested(commandMenu.targetId)
+        }
+        ThemedMenuSeparator {}
+        ThemedMenuItem {
+            text: "删除"
+            danger: true
+            onTriggered: root.removeCommand(commandMenu.targetId)
+        }
+    }
+
     // 左侧分隔线:与状态栏同一"框架色"语言,把内容区与快捷栏分开
     Rectangle {
         anchors.left: parent.left
@@ -186,10 +268,20 @@ Rectangle {
                 HeaderIcon {
                     anchors.centerIn: parent
                     visible: !railButton.modelData.isChar
+                             && railButton.modelData.iconUrl === ""
                     kind: railButton.modelData.iconKind
                     size: 20
                     color: railMa.containsMouse ? Theme.colors.textPrimary
                                                 : Theme.colors.textSecondary
+                }
+                // app 真实图标(SHGetFileInfo 提取,落盘缓存)
+                Image {
+                    anchors.centerIn: parent
+                    visible: railButton.modelData.iconUrl !== ""
+                    source: railButton.modelData.iconUrl
+                    sourceSize: Qt.size(20, 20)
+                    smooth: true
+                    fillMode: Image.PreserveAspectFit
                 }
                 // 首字图标(icon = "@"):字母块,天然逐条可辨
                 Rectangle {
@@ -216,8 +308,17 @@ Rectangle {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: root.actionTriggered(
-                        railButton.modelData.id, railButton.modelData.cmd ?? null)
+                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                    onClicked: function(mouse) {
+                        if (mouse.button === Qt.RightButton) {
+                            // 右键管理菜单(仅真实指令;添加钮走左键进设置页)
+                            if (railButton.modelData.id !== "addQuick")
+                                root.openCommandMenu(railButton.modelData)
+                            return
+                        }
+                        root.actionTriggered(
+                            railButton.modelData.id, railButton.modelData.cmd ?? null)
+                    }
                     // 悬停提示走**栏级共享实例**(root 的 ToolTip):逐按钮声明
                     // attached ToolTip 在兄弟间共享 overlay 实例,visible 绑定互相
                     // 干扰导致不弹(实测);集中一处由 hover 驱动,文本切换即可。

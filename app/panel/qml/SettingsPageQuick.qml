@@ -67,6 +67,14 @@ Item {
         railCommands = arr
         view.scheduleSave()
     }
+    /// rail 右键「编辑…」入口(SettingsView 转发):按 id 找指令并打开编辑卡片。
+    /// 页面未实例化时 railCommands 是 load() 时的快照 —— 打开设置页必然重走 load,
+    /// 故直接在工作副本里找。
+    function openEditorById(commandId) {
+        const cmd = railCommands.find(function(x) { return x.id === commandId })
+        if (cmd) openEditor(cmd, false)
+    }
+
     function openEditor(cmd, isNew) {
         editingCmd = cmd ? Object.assign({}, cmd, {
             target: cmd.target || "", args: cmd.args || "", workdir: cmd.workdir || ""
@@ -90,6 +98,11 @@ Item {
         if (type === "app") {
             target = editorAppPath.text.trim()
             if (target === "") { editorError.text = "请填写应用路径"; return }
+            // 就地预检(docs/24 Q2):路径无效立即报,不等到执行时 toast
+            if (!Core.quickAppTargetValid(target)) {
+                editorError.text = "路径无效:需 .exe/.lnk/.bat/.cmd 或已存在的文件夹"
+                return
+            }
         } else if (type === "system") {
             target = systemFromList ? editorSystemCombo.currentValue
                                     : editorSystemUri.text.trim()

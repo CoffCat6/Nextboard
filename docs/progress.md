@@ -6103,3 +6103,17 @@ docs/24-quick-commands-plan.md(v1 设计稿:§3 数据模型/§4 注册表/§5 s
 
 - system 类型实际打开 msc/cpl 页面(flow 只断言映射);编辑卡片三类型
   添加→rail 点击执行;悬停提示弹出时序(数据链路已被 flow 覆盖)。
+
+## 2026-11-01(六)快捷功能 V:Q2 打磨(docs/24 §8)
+
+- **rail 右键快捷管理**:置顶/停用启用/编辑/删除(自改自存 quickRailCommands,
+  不发广播 —— 设置页打开必重拉);「编辑…」经 Main→SettingsView 转发打开
+  对应指令的编辑卡片。
+- **app 真实图标**:SHGetFileInfo 提取(ICONINFO+GetDIBits 转 QImage,
+  Qt6 无 QtWinExtras),md5 路径缓存落盘 quick-icons/,rail Image 渲染;
+  .lnk 解引用留后续(回退默认图标)。
+- **编辑卡片路径就地预检**:quickAppTargetValid(.exe/.lnk/.bat/.cmd 或存在
+  文件夹),保存时立即报错而非执行时 toast。
+- **system 目录 12 → 20 项**:蓝牙/应用与功能/存储/鼠标/日期时间/凭据管理器/磁盘清理。
+- 验收截图确认:悬停提示双行排版正确弹出;记事本真实图标上栏。
+  --quick-commands-flow / --settings-flow 回归 exit 0。

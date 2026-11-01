@@ -212,6 +212,10 @@ public:
     Q_INVOKABLE void runQuickCommand(const QVariantMap& cmd);
     /// 执行 internal 动作(设置页试运行/验收)。
     Q_INVOKABLE bool runQuickAction(const QString& actionId);
+    /// app 目标的真实图标 URL(提取失败返回空串,QML 回退类型默认图标)。
+    Q_INVOKABLE QString appIconUrl(const QString& target);
+    /// app 目标有效性(编辑卡片就地预检)。
+    Q_INVOKABLE bool quickAppTargetValid(const QString& target);
 
 signals:
     /// nbcore 通知(剪贴板/设置变化)→ QML Connections 订阅。

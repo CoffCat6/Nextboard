@@ -901,6 +901,24 @@ bool CoreFacade::runQuickAction(const QString& actionId) {
     return ok;
 }
 
+bool CoreFacade::quickAppTargetValid(const QString& target) {
+    bool ok = false;
+    if (m_quickCommands)
+        QMetaObject::invokeMethod(m_quickCommands, "appTargetValid",
+                                  Q_RETURN_ARG(bool, ok),
+                                  Q_ARG(QString, target));
+    return ok;
+}
+
+QString CoreFacade::appIconUrl(const QString& target) {
+    QString out;
+    if (m_quickCommands)
+        QMetaObject::invokeMethod(m_quickCommands, "appIconUrl",
+                                  Q_RETURN_ARG(QString, out),
+                                  Q_ARG(QString, target));
+    return out;
+}
+
 
 void CoreFacade::openTodoNote(const QString& id) {
     // 注册表负责"已开则前置 / 未开则建窗 / 上限拒绝"全部判断(避免两处各判一遍)

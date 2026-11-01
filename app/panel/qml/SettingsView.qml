@@ -184,6 +184,12 @@ Item {
     function openQuickCategory() {
         selectCategory(root.catQuick)
     }
+    /// QuickRail 右键「编辑…」:切到快捷功能分类并打开指定指令的编辑卡片。
+    function openQuickEditor(commandId) {
+        selectCategory(root.catQuick)
+        if (categoryLoader.item)
+            categoryLoader.item.openEditorById(commandId)
+    }
 
     /// 切分类:先把挂起的改动落盘(此刻旧页还活着,collect 才收得到),再换页。
     function selectCategory(idx) {
