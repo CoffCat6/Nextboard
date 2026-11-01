@@ -141,6 +141,10 @@ pub struct Settings {
     /// 界面壳先行:栏内目前只有「添加快捷功能」占位钮,二期接入动作
     /// 注册表与用户自定义命令后,本开关继续承担"要不要这条栏"。
     pub quick_rail: bool,
+    /// 主面板快捷指令条的用户配置(docs/24 §3)。数组顺序即显示顺序。
+    /// id/label/类型白名单等语法校验在 validate();语义校验(动作 id 是否
+    /// 存在、路径是否可执行)归宿主 —— core 不知道宿主有哪些动作。
+    pub quick_rail_commands: Vec<QuickCommand>,
     /// ⚠️ **已废弃**（§18.5）：编辑器只保留唯一入口 = 右键编辑，框选链路不再有
     /// "进编辑器"这条出口（编辑能力由浮条工具栏承担）。此字段**保留仅为兼容旧配置**
     /// —— 删掉它会让旧 app_config.json 的该键变成未知字段而告警。
@@ -417,6 +421,53 @@ impl Default for CustomProvider {
     }
 }
 
+/// 快捷指令条单条命令(docs/24 §3)。
+///
+/// kind 是**开放字符串**:内置 "app" | "system" | "internal";未来的插件类型
+/// 也是字符串 —— 反序列化不设限,校验只对内置类型做白名单检查,未知类型
+/// 放行存储、由宿主"不渲染不执行"(前向兼容:新版配置回滚旧版不炸校验)。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct QuickCommand {
+    /// 稳定 id(qc-<unix_ms>-<4位hex>,宿主生成;编辑/排序不改 id)。
+    pub id: String,
+    /// 指令类型(见上)。
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// 显示名(按钮 tooltip;≤ 24 字符)。
+    pub label: String,
+    /// 图标:HeaderIcon 词汇;空 = 宿主按类型给默认。
+    pub icon: String,
+    /// 类型相关载荷(平铺,见 QuickPayload)。
+    #[serde(flatten)]
+    pub payload: QuickPayload,
+    /// 启用开关(false = 保留配置但不渲染)。
+    pub enabled: bool,
+}
+
+/// 载荷字段平铺进 QuickCommand(QML 编辑卡片按字段直接映射,免嵌套解包)。
+/// app 用 target/args/workdir;system/internal 只用 target。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct QuickPayload {
+    /// app:可执行路径(.exe/.lnk/.bat/.cmd)或文件夹;system:目录键或
+    /// ms-settings: URI;internal:动作注册表 id。
+    pub target: String,
+    /// app 专有:启动参数(原样传 ShellExecute,不做 shell 展开)。
+    pub args: String,
+    /// app 专有:工作目录(空 = 继承 target 所在目录)。
+    pub workdir: String,
+}
+
+impl QuickCommand {
+    /// 内置类型常量(与宿主 CommandDispatcher 的 handler 注册对齐)。
+    pub const KIND_APP: &'static str = "app";
+    pub const KIND_SYSTEM: &'static str = "system";
+    pub const KIND_INTERNAL: &'static str = "internal";
+    /// 栏容量上限(40px 钮在 380px 最小高面板放 8 颗、600px 放 12 颗)。
+    pub const MAX_COMMANDS: usize = 12;
+}
+
 /// 快捷键动作：与 `HotkeyMap` 字段一一对应的固定枚举（Phase 5 F15）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HotkeyAction {
@@ -558,6 +609,7 @@ impl Default for Settings {
             // 快捷栏默认显示:功能入口只有被看见才有人用;不想要的用户
             // 在设置里关掉即可(与智能框选同一取舍)。
             quick_rail: true,
+            quick_rail_commands: Vec::new(),
             // 长截图上限 30000px(用户 2026-10-17 拍板,docs/19 §9 Q4)。
             // 30000px 已能覆盖"长网页/长聊天记录",再高会让 PNG 撞 max_image_mb。
             stitch_max_height: 30_000,
@@ -666,6 +718,64 @@ impl Settings {
                 crate::settings::MIN_STITCH_SAMPLE_MS,
                 crate::settings::MAX_STITCH_SAMPLE_MS
             )));
+        }
+        // 快捷指令条(docs/24 §3.2):语法校验归 core,语义校验(动作 id 是否
+        // 存在、路径是否可执行)归宿主。未知 type 放行(前向兼容契约),
+        // 宿主对未知类型不渲染不执行。
+        if self.quick_rail_commands.len() > QuickCommand::MAX_COMMANDS {
+            return Err(AppError::InvalidInput(format!(
+                "快捷指令最多 {} 条",
+                QuickCommand::MAX_COMMANDS
+            )));
+        }
+        let mut seen_qc: Vec<&str> = Vec::new();
+        for cmd in &self.quick_rail_commands {
+            if cmd.id.trim().is_empty() {
+                return Err(AppError::InvalidInput("快捷指令缺少 id".into()));
+            }
+            if seen_qc.contains(&cmd.id.as_str()) {
+                return Err(AppError::InvalidInput(format!(
+                    "快捷指令 id 重复: {}",
+                    cmd.id
+                )));
+            }
+            seen_qc.push(cmd.id.as_str());
+            let label = cmd.label.trim();
+            if label.is_empty() || label.chars().count() > 24 {
+                return Err(AppError::InvalidInput(
+                    "快捷指令名称须为 1 ~ 24 个字符".into(),
+                ));
+            }
+            match cmd.kind.as_str() {
+                QuickCommand::KIND_APP => {
+                    if cmd.payload.target.trim().is_empty() {
+                        return Err(AppError::InvalidInput(
+                            "应用指令缺少目标路径".into(),
+                        ));
+                    }
+                    if cmd.payload.args.chars().count() > 512 {
+                        return Err(AppError::InvalidInput(
+                            "应用指令启动参数过长(> 512 字符)".into(),
+                        ));
+                    }
+                }
+                QuickCommand::KIND_SYSTEM => {
+                    if cmd.payload.target.trim().is_empty() {
+                        return Err(AppError::InvalidInput(
+                            "系统指令缺少目标键".into(),
+                        ));
+                    }
+                }
+                QuickCommand::KIND_INTERNAL => {
+                    if cmd.payload.target.trim().is_empty() {
+                        return Err(AppError::InvalidInput(
+                            "内部动作指令缺少动作 id".into(),
+                        ));
+                    }
+                }
+                // 未知类型:只要求 id/label 合法(上面已查),其余放行存储。
+                _ => {}
+            }
         }
         // 快捷键：**允许留空**（空 = 不绑定该动作，用户可只绑自己需要的几个）；
         // 非空项仍需合法，且两两不重复（相同组合键不能绑定多个动作）。
@@ -1479,6 +1589,75 @@ mod tests {
         let mut settings = Settings::default();
         settings.hotkeys.capture_region = settings.hotkeys.toggle_main.clone();
         assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn validate_checks_quick_rail_commands() {
+        let mut s = Settings::default();
+        // 合法 internal 指令:通过
+        s.quick_rail_commands = vec![QuickCommand {
+            id: "qc-1".into(),
+            kind: QuickCommand::KIND_INTERNAL.into(),
+            label: "智能截屏".into(),
+            icon: String::new(),
+            payload: QuickPayload {
+                target: "capture.region".into(),
+                args: String::new(),
+                workdir: String::new(),
+            },
+            enabled: true,
+        }];
+        assert!(s.validate().is_ok());
+        // id 重复:拒绝
+        s.quick_rail_commands.push(QuickCommand {
+            id: "qc-1".into(),
+            kind: QuickCommand::KIND_APP.into(),
+            label: "VS Code".into(),
+            icon: String::new(),
+            payload: QuickPayload {
+                target: "C:\\tools\\code.exe".into(),
+                args: String::new(),
+                workdir: String::new(),
+            },
+            enabled: true,
+        });
+        assert!(s.validate().is_err());
+        // app 缺 target:拒绝
+        s.quick_rail_commands = vec![QuickCommand {
+            id: "qc-2".into(),
+            kind: QuickCommand::KIND_APP.into(),
+            label: "坏指令".into(),
+            icon: String::new(),
+            payload: QuickPayload::default(),
+            enabled: true,
+        }];
+        assert!(s.validate().is_err());
+        // 空 label / 超 24 字:拒绝
+        s.quick_rail_commands[0].payload.target = "C:\\x.exe".into();
+        s.quick_rail_commands[0].label = String::new();
+        assert!(s.validate().is_err());
+        s.quick_rail_commands[0].label = "x".repeat(25);
+        assert!(s.validate().is_err());
+        // 未知 type:放行(前向兼容契约)
+        s.quick_rail_commands[0].label = "未来类型".into();
+        s.quick_rail_commands[0].kind = "future-thing".into();
+        assert!(s.validate().is_ok());
+        // 超 12 条:拒绝
+        s.quick_rail_commands = (0..13)
+            .map(|i| QuickCommand {
+                id: format!("qc-{i}"),
+                kind: QuickCommand::KIND_INTERNAL.into(),
+                label: format!("动作{i}"),
+                icon: String::new(),
+                payload: QuickPayload {
+                    target: format!("act.{i}"),
+                    args: String::new(),
+                    workdir: String::new(),
+                },
+                enabled: true,
+            })
+            .collect();
+        assert!(s.validate().is_err());
     }
 
     /// 构造旧格式配置并跑迁移（Phase 8 代理迁移用例共用）。

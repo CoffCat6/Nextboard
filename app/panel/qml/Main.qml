@@ -82,6 +82,16 @@ Rectangle {
         Entries.refreshNow()
     }
 
+    /// 验收(--quick-commands-flow):直调 QuickRail 的属性驱动悬停提示,
+    /// 截图断言 tooltip 文本/位置/两行排版(hover 触发链路是标准 containsMouse 惯用法)。
+    function acceptanceShowRailTip() {
+        quickRail.refresh()   // demo 配置经 FFI 写入,不经 SettingsView,手动刷
+        quickRail.tipLabel = "演示服务"
+        quickRail.tipTypeText = "系统 · services"
+        quickRail.tipButtonY = 96
+        quickRail.showTip()
+    }
+
     /// 验收:打开筛选浮层(读回其内容与几何)。
     function acceptanceOpenFilter() {
         openFilterPopup()
@@ -262,7 +272,9 @@ Rectangle {
         // 页签可见性(0 个未完成待办时「待办」页签必须仍在)。
         todoTabVisible: tabRepeater.itemAt(4) ? tabRepeater.itemAt(4).visible : false,
         // 快捷功能页(--settings-flow STEP16):panelWindow.showQuickRail 联动读回。
-        showQuickRail: panelWindow.showQuickRail
+        showQuickRail: panelWindow.showQuickRail,
+        // --quick-commands-flow:悬停提示可见性(acceptanceShowRailTip 置位后读回)。
+        railTipShown: quickRail.tipShown
     }) : null
 
     // ---- 右键菜单:全面板**唯一实例** ----
@@ -2193,15 +2205,18 @@ Rectangle {
             QuickRail {
                 id: quickRail
                 // 设置页「快捷功能」分类的显示开关直写 panelWindow(showQuickRail),
-                // 这里绑定即即时生效;占位期不隐藏整栏的"空栏"顾虑不存在 ——
-                // 关掉的用户就是不要这条栏,占位钮也无须保留。
+                // 这里绑定即即时生效。
                 visible: panelWindow.showQuickRail
                 Layout.fillHeight: true
-                onActionTriggered: function(actionId) {
-                    // 本期唯一占位动作:诚实提示"还没做",好过静默无响应;
-                    // 二期动作注册表落地后,这里按 id 分发到真实功能。
-                    if (actionId === "addQuick")
-                        Core.showToast("快捷功能自定义开发中,敬请期待")
+                onActionTriggered: function(actionId, cmd) {
+                    if (actionId === "addQuick") {
+                        // 添加/管理 → 设置页快捷功能分类(占位 toast 退役)
+                        panelWindow.showSettings()
+                        if (settingsPage.item) settingsPage.item.openQuickCategory()
+                    } else if (cmd) {
+                        // 真实指令:统一进分发器(app/system/internal 都在 C++ 侧)
+                        Core.runQuickCommand(cmd)
+                    }
                 }
             }
         } // 中部内容区 RowLayout 结束

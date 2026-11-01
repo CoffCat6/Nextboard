@@ -39,6 +39,8 @@ add_executable(nextboard WIN32
     src/host/image_save.cpp
     src/host/tray.cpp
     src/host/hotkeys.cpp
+    src/host/quick_commands.cpp
+    src/host/quick_commands_flow.cpp
     src/host/acceptance.cpp
     src/host/note_flow.cpp
     src/host/capture_toolbar_flow.cpp

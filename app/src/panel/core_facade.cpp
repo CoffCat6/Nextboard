@@ -1,4 +1,5 @@
 #include "core_facade.hpp"
+#include "../host/quick_commands.hpp"
 
 #include "../ui_theme.hpp"
 
@@ -383,6 +384,13 @@ QString CoreFacade::openFileDialog(const QString& caption, const QString& filter
     return QFileDialog::getOpenFileName(
         nullptr, caption,
         QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation), filter);
+}
+
+QString CoreFacade::openDirectoryDialog(const QString& caption) {
+    return QFileDialog::getExistingDirectory(
+        nullptr, caption,
+        QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation),
+        QFileDialog::ShowDirsOnly);
 }
 
 void CoreFacade::autoPasteIfEnabled() {
@@ -852,6 +860,45 @@ void CoreFacade::openEntry(const QString& id) {
         }
     }
     emit toastMessage(QStringLiteral("已用系统默认程序打开"));
+}
+
+// ---- 快捷指令(docs/24):转发到 QuickCommands(main.cpp 装配) ----
+// 经 QMetaObject::invokeMethod 调用:本处只有 QObject*,不引 quick_commands.hpp
+// (避免 panel→host 反向包含);方法都是 Q_INVOKABLE,签名在 hpp 声明。
+QVariantList CoreFacade::quickActionCatalog() const {
+    QVariantList out;
+    if (m_quickCommands)
+        QMetaObject::invokeMethod(m_quickCommands, "quickActionCatalog",
+                                  Q_RETURN_ARG(QVariantList, out));
+    return out;
+}
+QVariantList CoreFacade::quickSystemCatalog() const {
+    QVariantList out;
+    if (m_quickCommands)
+        QMetaObject::invokeMethod(m_quickCommands, "quickSystemCatalog",
+                                  Q_RETURN_ARG(QVariantList, out));
+    return out;
+}
+QString CoreFacade::quickSystemResolve(const QString& key) const {
+    QString out;
+    if (m_quickCommands)
+        QMetaObject::invokeMethod(m_quickCommands, "quickSystemResolve",
+                                  Q_RETURN_ARG(QString, out),
+                                  Q_ARG(QString, key));
+    return out;
+}
+void CoreFacade::runQuickCommand(const QVariantMap& cmd) {
+    if (m_quickCommands)
+        QMetaObject::invokeMethod(m_quickCommands, "runCommand",
+                                  Q_ARG(QVariantMap, cmd));
+}
+bool CoreFacade::runQuickAction(const QString& actionId) {
+    bool ok = false;
+    if (m_quickCommands)
+        QMetaObject::invokeMethod(m_quickCommands, "runQuickAction",
+                                  Q_RETURN_ARG(bool, ok),
+                                  Q_ARG(QString, actionId));
+    return ok;
 }
 
 

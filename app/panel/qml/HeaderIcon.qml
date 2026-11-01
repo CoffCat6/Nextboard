@@ -67,6 +67,9 @@ Item {
         "network": networkComp,
         "info": infoComp,
         "plus": plusComp,
+        "app": appComp,
+        "pause": pauseComp,
+        "theme": themeComp,
     }
 
     implicitWidth: size
@@ -735,6 +738,83 @@ Item {
             anchors.centerIn: parent
             width: 1.8 * root.unit; height: 10 * root.unit
             radius: width / 2
+            color: root.color
+        }
+        }
+    }
+
+    // ---- 应用:窗口(圆角方框 + 顶栏,QuickRail app 类型默认图标) ----
+    // 封闭边框 + 内部横线,与 "file"(折角文档)区分;16px 视口。
+    // (组件化)kind = app:只被 Loader 按需实例化
+    Component {
+        id: appComp
+        Item {
+        anchors.fill: parent
+
+        Rectangle {   // 外框
+            anchors.centerIn: parent
+            width: 13 * root.unit; height: 12 * root.unit
+            radius: 2 * root.unit
+            color: "transparent"
+            border.width: root.stroke * root.unit
+            border.color: root.color
+        }
+        Rectangle {   // 顶栏(窗口标题条)
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.top: parent.top
+            anchors.topMargin: 2.6 * root.unit
+            width: 13 * root.unit; height: root.stroke * root.unit
+            color: root.color
+        }
+        }
+    }
+
+    // ---- 暂停:双竖杠(监听暂停;播放器语义通用) ----
+    // (组件化)kind = pause:只被 Loader 按需实例化
+    Component {
+        id: pauseComp
+        Item {
+        anchors.fill: parent
+
+        Rectangle {
+            anchors.centerIn: parent
+            anchors.horizontalCenterOffset: -2.4 * root.unit
+            width: 2.6 * root.unit; height: 11 * root.unit
+            radius: width / 2
+            color: root.color
+        }
+        Rectangle {
+            anchors.centerIn: parent
+            anchors.horizontalCenterOffset: 2.4 * root.unit
+            width: 2.6 * root.unit; height: 11 * root.unit
+            radius: width / 2
+            color: root.color
+        }
+        }
+    }
+
+    // ---- 主题:对半圆(左亮右暗的明暗对分,一键切换的隐喻) ----
+    // 圆环 + 右半实心:实心侧 = "当前是暗的";切到暗色时按钮可再切回。
+    // (组件化)kind = theme:只被 Loader 按需实例化
+    Component {
+        id: themeComp
+        Item {
+        anchors.fill: parent
+
+        Rectangle {   // 外环
+            anchors.centerIn: parent
+            width: 13 * root.unit; height: 13 * root.unit
+            radius: width / 2
+            color: "transparent"
+            border.width: root.stroke * root.unit
+            border.color: root.color
+        }
+        Rectangle {   // 左半实心(亮侧):中心线 → 左缘
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.horizontalCenterOffset: -3.25 * root.unit
+            width: 6.5 * root.unit; height: 11 * root.unit
+            radius: 2 * root.unit
             color: root.color
         }
         }

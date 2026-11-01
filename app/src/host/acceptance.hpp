@@ -90,6 +90,12 @@ void runSmartLiveFlow();
 /// → 读回设置断言翻转并落盘 → 再点一次复原。会写 settings,必须配 --data-dir。
 void runSmartSettingsFlow(PanelWindow& panel);
 
+/// 快捷指令验收(--quick-commands-flow,docs/24 §10):目录完备 / internal 真实执行
+/// (theme.toggle 翻转并复原)/ app 执行与无效路径拒绝 / system 白名单 /
+/// 配置往返 / 未知 type 前向兼容 / 12 条上限。写 settings,配 --data-dir;
+/// 结束前清空验收指令。
+void runQuickCommandsFlow(PanelWindow& panel);
+
 /// 编辑器裁剪/旋转验收(--editor-flow):A 段引擎级直测(标注图元跟随变换、
 /// 撤销重做绝对还原、马赛克纹理随底图重建、compose 不含裁剪覆盖层),
 /// B 段真窗口端到端(真点画笔按钮 + R/C/Enter/Esc 键位 + committed 收图)。

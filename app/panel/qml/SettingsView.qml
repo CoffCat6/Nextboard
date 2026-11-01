@@ -174,6 +174,15 @@ Item {
             root.hotkeysDirty = false
         }
         Entries.refreshNow()
+        // 广播给设置页之外的 settings 消费方(QuickRail 的指令列表、
+        // 托盘菜单文案等):没有这条信号,它们只能靠轮询或重启感知变化。
+        Core.notifySettingsChanged()
+    }
+
+    /// QuickRail「添加/管理」钮的直达入口:开设置页并切到快捷功能分类。
+    /// (Rail 侧不能引 catQuick 索引 —— 跨文件魔法数字会随分类增删漂移。)
+    function openQuickCategory() {
+        selectCategory(root.catQuick)
     }
 
     /// 切分类:先把挂起的改动落盘(此刻旧页还活着,collect 才收得到),再换页。

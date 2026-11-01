@@ -16,6 +16,8 @@
 
 namespace nb {
 
+class QuickCommands;
+
 class CoreFacade : public QObject {
     Q_OBJECT
     /// 分类计数(all/text/image/file/pinned)。QML 直接绑定 `Core.counts[viewId]`,
@@ -123,6 +125,9 @@ public:
                                        const QString& defaultName);
     /// 打开文件对话框(原生;选备份 zip 等)。返回选中路径,取消为空串。
     Q_INVOKABLE QString openFileDialog(const QString& caption, const QString& filter);
+    /// 打开目录对话框(原生)。返回选中目录,取消为空串(快捷指令的
+    /// app 类型支持直接指向文件夹,与文件共用一个「浏览」入口)。
+    Q_INVOKABLE QString openDirectoryDialog(const QString& caption);
 
     /// 把当前剪贴板内容**自动粘贴**到前台窗口(仅当设置 copyAutoPaste 开启)。
     /// 调用时机:复制条目成功、面板已 hide() 之后(见 Main.qml 的 copyEntryAndAutoPaste)。
@@ -189,6 +194,24 @@ public:
     /// 请求重新注册全局快捷键(设置里改完热键后调用)。
     /// 本类不认识 Hotkeys 实例,故只发信号,由 main.cpp 接线。
     Q_INVOKABLE void reloadHotkeys() { emit hotkeysChanged(); }
+    /// 设置保存完成后的全局通知(SettingsView.save 成功尾部调用):
+    /// QuickRail 等非设置页的 settings 消费方据此重读配置。
+    Q_INVOKABLE void notifySettingsChanged() { emit settingsChanged(); }
+
+    // ---- 快捷指令(docs/24)----
+    /// 指令分发器由 main.cpp 装配后注入(main 装配 QuickCommands 时调用);
+    /// 未注入时(极早期调用)catalog 返回空、执行为 no-op。
+    void setQuickCommands(QObject* dispatcher) { m_quickCommands = dispatcher; }
+    /// internal 动作目录:[{id, label, iconKind, available}]。
+    Q_INVOKABLE QVariantList quickActionCatalog() const;
+    /// system 精选目录:[{key, label}]。
+    Q_INVOKABLE QVariantList quickSystemCatalog() const;
+    /// system 键 → 执行串(验收断言用,不真执行)。
+    Q_INVOKABLE QString quickSystemResolve(const QString& key) const;
+    /// 执行一条指令(settings 单条命令对象)。
+    Q_INVOKABLE void runQuickCommand(const QVariantMap& cmd);
+    /// 执行 internal 动作(设置页试运行/验收)。
+    Q_INVOKABLE bool runQuickAction(const QString& actionId);
 
 signals:
     /// nbcore 通知(剪贴板/设置变化)→ QML Connections 订阅。
@@ -220,6 +243,8 @@ signals:
     /// 请求弹面板、切待办视图并定位高亮指定条目(托盘今日待办子菜单)。
     void todoOpenRequested(QString id);
     void themeChanged();
+    /// 设置已保存(见 notifySettingsChanged)。
+    void settingsChanged();
 
 public:
     /// PanelWindow::nativeEvent 转发 nbcore WM_APP 通知(刷新去抖由模型侧负责)。
@@ -232,6 +257,8 @@ private:
     QVariantMap m_counts;
     QString m_themeMode = QStringLiteral("system");
     bool m_darkTheme = true;
+    /// 快捷指令分发器(main.cpp 装配后注入;不拥有所有权,栈对象在 main)。
+    QObject* m_quickCommands = nullptr;
 };
 
 /// 把一张**已合成**的图片贴成置顶窗口(截图编辑器「贴图」用)。

@@ -47,6 +47,7 @@ static void fileMessageHandler(QtMsgType type, const QMessageLogContext& ctx, co
 #include "host/tray.hpp"
 #include "note/note_registry.hpp"
 #include "host/hotkeys.hpp"
+#include "host/quick_commands.hpp"
 #include "host/acceptance.hpp"
 #include "host/auto_start.hpp"
 #include "panel/core_facade.hpp"
@@ -156,6 +157,7 @@ int main(int argc, char* argv[]) {
                 || arg == QLatin1String("--smart-live-flow")
                 || arg == QLatin1String("--smart-uia-flow")
                 || arg == QLatin1String("--smart-settings-flow")
+                || arg == QLatin1String("--quick-commands-flow")
                 || arg == QLatin1String("--editor-flow")
                 || arg == QLatin1String("--autostart-flow")
                 || arg == QLatin1String("--stitch-flow")
@@ -306,6 +308,7 @@ int main(int argc, char* argv[]) {
     bool smartLiveFlow = false;
     bool smartUiaFlow = false;
     bool smartSettingsFlow = false;
+    bool quickCommandsFlow = false;
     bool editorFlow = false;
     bool autoStartFlow = false;
     bool stitchFlow = false;
@@ -365,6 +368,8 @@ int main(int argc, char* argv[]) {
             smartUiaFlow = true;
         else if (arg == QLatin1String("--smart-settings-flow"))
             smartSettingsFlow = true;
+        else if (arg == QLatin1String("--quick-commands-flow"))
+            quickCommandsFlow = true;
         else if (arg == QLatin1String("--editor-flow"))
             editorFlow = true;
         // 自启形态验收:真实读写 Run 键,断言应用内开关写的命令行带 --hidden
@@ -415,6 +420,7 @@ int main(int argc, char* argv[]) {
     if (smartLiveFlow) runFlow([] { nb::runSmartLiveFlow(); });
     if (smartUiaFlow) runFlow([] { nb::runSmartUiaFlow(); });
     if (smartSettingsFlow) runFlow([&panel] { nb::runSmartSettingsFlow(panel); });
+    if (quickCommandsFlow) runFlow([&panel] { nb::runQuickCommandsFlow(panel); });
     if (editorFlow) runFlow([] { nb::runEditorFlow(); });
     if (autoStartFlow) runFlow([] { nb::runAutoStartFlow(); });
     if (stitchFlow) runFlow([] { nb::runStitchFlow(); });
@@ -477,6 +483,11 @@ int main(int argc, char* argv[]) {
     // 3. 托盘与热键
     nb::Tray tray(panel, core);
     nb::Hotkeys hotkeys(panel, core);
+    // 快捷指令分发器(docs/24):Rail 按钮与设置页经 CoreFacade 转发到这里。
+    // 注入必须在 QML 首次调用前 —— 面板构建(QML 装配)在 main 更早处,
+    // 但 QML 侧只在 rail 渲染/设置页打开时才调 catalog,此刻注入已完成。
+    nb::QuickCommands quickCommands(panel, core);
+    nb::CoreFacade::instance().setQuickCommands(&quickCommands);
     // 设置里改完快捷键后重新注册(信号由 CoreFacade 发出,避免它依赖 Hotkeys 实例)
     QObject::connect(&nb::CoreFacade::instance(), &nb::CoreFacade::hotkeysChanged,
                      &hotkeys, &nb::Hotkeys::applyFromSettings);
