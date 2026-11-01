@@ -16,6 +16,8 @@
 #include <QVector>
 #include <windows.h>
 #include <shellapi.h>
+#include <shobjidl.h>
+#include <objbase.h>
 
 namespace nb {
 namespace {
@@ -122,6 +124,37 @@ QImage hIconToImage(HICON icon) {
     }
     ::DeleteObject(info.hbmColor);
     ::DeleteObject(info.hbmMask);
+    return out;
+}
+
+/// .lnk 解引用:IShellLinkW 读目标路径(docs/24 Q2 收尾)。
+/// 返回目标绝对路径(lnk 指向文件夹时为文件夹路径);失败返回空串。
+/// COM 初始化:Qt 主线程通常已初始化(托盘/对话框);此处用 Ensure 级别兜底。
+QString resolveLnkTarget(const QString& lnkPath) {
+    // COM 就绪兜底:Qt 不自动初始化;已初始化时返回 S_FALSE/RPC_E_CHANGED_MODE,
+    // 均不重复 Uninitialize(引用计数模型,此处自增无副作用)。
+    ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const QString native = QDir::toNativeSeparators(lnkPath);
+    IShellLinkW* link = nullptr;
+    const HRESULT hrCreate = ::CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
+                                                IID_IShellLinkW,
+                                                reinterpret_cast<void**>(&link));
+    if (FAILED(hrCreate) || !link) return QString();
+    QString out;
+    IPersistFile* file = nullptr;
+    if (SUCCEEDED(link->QueryInterface(IID_IPersistFile,
+                                       reinterpret_cast<void**>(&file))) && file) {
+        if (SUCCEEDED(file->Load(reinterpret_cast<const wchar_t*>(native.constData()),
+                                 STGM_READ))) {
+            wchar_t path[MAX_PATH] = {};
+            if (SUCCEEDED(link->GetPath(path, MAX_PATH, nullptr, SLGP_RAWPATH))
+                    && path[0] != L'\0') {
+                out = QString::fromWCharArray(path);
+            }
+        }
+        file->Release();
+    }
+    link->Release();
     return out;
 }
 
@@ -238,12 +271,19 @@ bool QuickCommands::appTargetValid(const QString& target) const {
 }
 
 QString QuickCommands::appIconUrl(const QString& target) {
-    // 只对 .exe 提取(.lnk 要解 IShellLink,docs/24 §9 留后续;失败回退默认图标)
-    if (!target.endsWith(QLatin1String(".exe"), Qt::CaseInsensitive))
+    // .lnk 先解引用到目标(IShellLink),之后与 .exe 同一条提取链;
+    // 解析失败(目标已删/非文件系统目标)回退默认图标。
+    QString t = QDir::toNativeSeparators(target.trimmed());
+    if (t.endsWith(QLatin1String(".lnk"), Qt::CaseInsensitive)) {
+        if (!QFileInfo::exists(t)) return QString();
+        const QString resolved = resolveLnkTarget(t);
+        if (resolved.isEmpty()) return QString();
+        t = QDir::toNativeSeparators(resolved);
+    }
+    if (!t.endsWith(QLatin1String(".exe"), Qt::CaseInsensitive))
         return QString();
-    const QString t = QDir::toNativeSeparators(target.trimmed());
     if (!QFileInfo::exists(t)) return QString();
-    // 缓存键 = 路径 md5:同路径只提取一次;应用更新后路径不变图标一般也不变
+    // 缓存键 = 图标源路径 md5(lnk 场景是解析后的目标路径,目标不变则复用)
     const QString cacheName = QStringLiteral("quick-icons/%1.png")
                                   .arg(QString::fromLatin1(
                                       QCryptographicHash::hash(

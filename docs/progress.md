@@ -6117,3 +6117,11 @@ docs/24-quick-commands-plan.md(v1 设计稿:§3 数据模型/§4 注册表/§5 s
 - **system 目录 12 → 20 项**:蓝牙/应用与功能/存储/鼠标/日期时间/凭据管理器/磁盘清理。
 - 验收截图确认:悬停提示双行排版正确弹出;记事本真实图标上栏。
   --quick-commands-flow / --settings-flow 回归 exit 0。
+
+## 2026-11-01(六)快捷功能 VI:.lnk 图标解引用(Q2 收尾)
+
+- resolveLnkTarget:IShellLinkW + IPersistFile 读目标路径(CoInitializeEx 幂等兜底,
+  Qt 不自动初始化 COM);appIconUrl 对 .lnk 先解引用再走既有 SHGetFileInfo 链,
+  缓存键用解析后目标路径(同目标多快捷方式共享)。
+- 端到端验证:自造 Notepad.lnk(本机无现成 exe 指向型 .lnk)→ 图标提取落盘 + 上栏 ✓。
+- 特殊目标(回收站 ::{})解析失败静默回退默认图标。
