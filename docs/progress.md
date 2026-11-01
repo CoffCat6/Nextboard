@@ -6153,3 +6153,41 @@ docs/24-quick-commands-plan.md(v1 设计稿:§3 数据模型/§4 注册表/§5 s
 - 编辑器/贴图链路的入库(编辑器产物,非框选)传空 owner(卡片不显示来源段)。
 - --quick-commands-flow / --settings-flow / --capture-toolbar-flow 回归 exit 0。
 - 真机确认项:浏览器上智能框选截图 → 卡片「来自 Chrome」。
+
+## 2026-11-01(六)qmllint 内存爆满排查(Qt 6.9.0 解析器 bug)
+
+- **现象**:一跑 qmllint(直接跑或 CMake `nextboard_qmllint` 目标)内存 4 秒
+  冲破 2GB,系统卡死。非每次必现:Main.qml 恰有语法错误时分析提前中止,
+  内存正常 —— 语法错误"保护"了它。
+- **根因**(bisect 定位):EntryCard.qml `highlightedRichText` 里的
+  `term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")` —— qmllint(Qt 6.9.0)解析
+  **实参位置含 `\]` 转义字符类的正则字面量**发生指数级回溯。删掉正则字面量
+  或换成 `new RegExp("a","gi")` 内存立回 ~60MB;git HEAD 版本同样引爆(既有 bug)。
+- **修复**:改用字符串拼 alternation 逐字符转义(语义等价,注释里记了原因)。
+  修复后全量 lint(40 文件 + qrc)0.7s / 峰值 69MB。
+- **排查基建**:`.buildtmp/qmllint_probe.ps1` 看门狗(300ms 采样私有内存,
+  >2GB 或超时即杀),以后 lint 前先过探针;其余 QML 的正则字面量均无
+  `\]` 字符类特征,安全。
+- 顺带发现:qmldir `prefer :/qt/qml/...` + `--resource` 会让 lint 读到**上次构建
+  打进 qrc 的旧 QML**(本次表现为"新信号 no matching signal"假警报)——
+  lint 报信号缺失时先增量构建刷新 qrc 再下结论。
+
+## 2026-11-01(六)列表交互:单击复制改双击复制(Main.qml / EntryCard.qml)
+
+- **动机**:主面板历史卡片**单击即复制并收起面板**,用户"点开看一眼正文/
+  拖窗口/误碰"都会触发复制+自动粘贴,误触率高(用户反馈)。
+- **新交互**(普通模式;选择模式语义不变):
+  - **单击 = 选中当前行**:与键盘 ↑↓ 写同一个 `kbIndex`(高亮复用
+    "当前操作对象"语言),`locateKeyboardCursor()` 落位 + Contain 滚动到可见;
+    浮层/菜单/选择模式打开时不落光标(`listKeysUsable()` 闸门)。
+  - **双击 = 复制并收起面板**:文本/图片/待办统一走 `copyRowAndHide()`;
+    **文件条目双击保持"打开"**(不复制,复制路径走右键菜单)。
+  - 待办单击不再是无动作:单击同样只选中,完成态入口仍是复选框/右键菜单。
+- **实现**:EntryCard 新增 `row` 注入属性 + `clickSelected(row)` /
+  `doubleClickedCopy()` 两信号,Main 委托层接线;删除 `fileCopyTimer`
+  (300ms 延迟复制机制随单击复制一并退役),`ListView.onReused` 相应少复位一项。
+- **提示**:状态栏 KeyCap 提示改为「单击 选中 · 双击 复制 · ↑↓/Enter 选择行并复制」。
+- ⚠️ 影响面:键盘 Enter 语义未变(复制光标行);右键菜单/Ctrl+1..9 未变;
+  双击文件打开未变。唯一行为变化 = 普通模式左键单击/双击(见上)。
+- 待真机确认:双击图片卡、展开态 TextEdit 上双击(交互项,不应触发卡片复制)、
+  双击间隔手感。

@@ -64,24 +64,34 @@ Rectangle {
     ///    `<` `&` 之类,转义后位置与长度都变了,匹配会错位甚至切碎实体。
     /// ⚠️ 用 RegExp 而不是 indexOf 循环:大小写不敏感(FTS 口径)靠 `gi` 一次拿到,
     ///    免得自己做 toLowerCase 映射时踩"某些字符转小写后长度变化"的偏移错位。
+    /// ⚠️ 转义用**字符串拼出的 alternation**而不是 `/[...]/g` 正则字面量:
+    ///    qmllint(Qt 6.9.0)对"实参位置含 `\]` 转义字符类的正则字面量"解析发生
+    ///    指数回溯,内存 4 秒冲破 2GB 直接拖死系统(2026-11-01 实测,bisect
+    ///    定位到本行)。元字符集全是单字符,逐个加反斜杠再用 `|` 连接,与原
+    ///    字符类替换语义完全等价。
     function highlightedRichText(s) {
         const raw = s.length > 4000 ? s.slice(0, 4000) : s
         const term = query.trim()
         if (term.length === 0) return Theme.escapeHtml(raw)
         // 搜索词转义成字面量(否则 `.` `*` 会被当通配)
-        const re = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi")
+        const escaped = '.*+?^${}()|[]\\'.split("").map(function(ch) {
+            return "\\" + ch
+        }).join("|")
+        const re = new RegExp(escaped, "gi")
+        const out0 = term.replace(re, "\\$&")
+        const pattern = new RegExp(out0, "gi")
         const open = '<span style="background-color:' + Theme.colors.accentSoft
                    + ';color:' + Theme.colors.textPrimary + '">'
         let out = ""
         let last = 0
         let guard = 0
-        let m = re.exec(raw)
+        let m = pattern.exec(raw)
         while (m !== null && guard++ < 500) {
             if (m.index > last) out += Theme.escapeHtml(raw.slice(last, m.index))
             out += open + Theme.escapeHtml(m[0]) + '</span>'
             last = m.index + m[0].length
-            if (m[0].length === 0) re.lastIndex++    // 零长匹配防死循环
-            m = re.exec(raw)
+            if (m[0].length === 0) pattern.lastIndex++   // 零长匹配防死循环
+            m = pattern.exec(raw)
         }
         out += Theme.escapeHtml(raw.slice(last))
         return out
@@ -122,14 +132,23 @@ Rectangle {
     /// 单击上抛:参数是 Shift 键状态,父级据此做范围选择。
     signal toggleSelected(bool shiftHeld)
 
+    // ---- 单击选中 / 双击复制(docs/progress.md 2026-11-01 交互变更) ----
+    /// 普通模式下单击 = 选中当前行(键盘光标落位 + "当前操作对象"高亮),
+    /// 不再复制并收起面板 —— 原单击复制误触率过高(点卡片只想看内容/拖选)。
+    /// 上抛行号由父级统一定位键盘光标(与 ↑↓ 导航同一状态,高亮/Enter 复用)。
+    /// 行号由父级注入(EntryCard 不在 ListView 委托根上,拿不到 index)。
+    property int row: -1
+    signal clickSelected(int row)
+
+    /// 双击 = 复制本条并收起面板(替代原单击复制;保留双击文件 = 打开)。
+    signal doubleClickedCopy()
+
     /// ⚠️ 列表开了 `reuseItems`(见 Main.qml):委托被回收进池、之后**复用**到别的行,
     /// 而不是销毁重建。模型角色(entryId/kind/text…)会在复用时被 ListView 自动刷新,
     /// 但委托里的**内部状态不会**。不重置就会串味:上一条文本卡的"展开"状态会被带进
-    /// 复用的下一条(截图/长文时最明显);挂起的双击判定计时器也可能残留并误触发复制。
-    /// 这里在复用回池/取出时把这两项显式复位。
+    /// 复用的下一条(截图/长文时最明显)。这里在复用回池/取出时把它显式复位。
     ListView.onReused: {
         root.textExpanded = false
-        fileCopyTimer.stop()
     }
 
     /// 卡片右下角的操作按钮,三种形态:
@@ -315,13 +334,8 @@ Rectangle {
         else Core.showToast("删除失败:" + (resp.error ? resp.error.message : ""))
     }
 
-    // 文件条目单击复制的延迟器:双击的第一击同样会触发 onClicked,若不延迟一拍,
-    // 双击会先执行一次复制(还隐藏面板)。300ms 内来了第二击则取消复制、改为打开。
-    Timer {
-        id: fileCopyTimer
-        interval: 300
-        onTriggered: root.copyEntryAndHide()
-    }
+    // 文件条目双击打开不经计时器:单击已不再复制(见 MouseArea 注释),
+    // 双击作为独立手势直接处理,无需"延迟一拍防误复制"的旧机制。
 
     MouseArea {
         id: ma
@@ -332,13 +346,6 @@ Rectangle {
         // (Sciter 时代需宿主手动转发滚轮进引擎;QML 化后由场景图直接派发,
         //  此处仅固定语义、防后续给卡片加 onWheel 时误吞滚动。)
         onWheel: function(wheel) { wheel.accepted = false }
-        onDoubleClicked: function(mouse) {
-            // 双击文件 = 用系统默认程序打开;取消挂起的单击复制
-            if (mouse.button === Qt.LeftButton && root.kind === "file") {
-                fileCopyTimer.stop()
-                Core.openEntry(root.entryId)
-            }
-        }
         onClicked: function(mouse) {
             // 有右键菜单打开时:这一次点击只用于关闭菜单,不触发卡片动作
             if (root.menuOpenElsewhere) {
@@ -360,14 +367,23 @@ Rectangle {
                 // ⚠️ 选择模式内单击 = 切换选中,**不复制**(复制会收起面板,
                 //    多选根本没法连续点)。右键菜单在模式内仍可用(右键不受影响)。
                 root.toggleSelected(mouse.modifiers & Qt.ShiftModifier)
-            } else if (root.kind === "todo") {
-                // 待办单击 = 无动作:首版单击切换完成态,结果"点一下卡片看正文"
-                // 就把任务勾掉了(误触率过高)。完成态入口 = 左侧复选框 / 右键菜单。
-            } else if (root.kind === "file") {
-                // 单击 = 复制(经 fileCopyTimer 延迟一拍);双击 = 打开文件
-                fileCopyTimer.restart()
             } else {
-                root.copyEntryAndHide()
+                // 普通模式单击 = 选中当前行(不复制、不收面板):
+                // 与键盘 ↑↓ 落位同一状态,Enter/双击才复制 ——
+                // 原单击即复制在"点开看一眼正文/拖窗口"时极易误触(用户反馈)。
+                root.clickSelected(root.row)
+            }
+        }
+        onDoubleClicked: function(mouse) {
+            if (mouse.button !== Qt.LeftButton) return
+            if (root.selectMode || root.menuOpenElsewhere) return
+            if (root.kind === "file") {
+                // 双击文件 = 用系统默认程序打开(保持原语义,不复制)
+                Core.openEntry(root.entryId)
+            } else {
+                // 文本/图片/待办:双击 = 复制并收起面板(替代原单击复制)。
+                // 待办也统一双击复制:右键菜单/快捷按钮已覆盖完成态等操作。
+                root.doubleClickedCopy()
             }
         }
     }

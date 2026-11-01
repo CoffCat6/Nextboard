@@ -485,6 +485,16 @@ Rectangle {
         if (kbIndex >= list.count) kbIndex = list.count - 1
     }
 
+    /// 鼠标单击选中 = 键盘光标落到该行(与 ↑↓ 同一状态)。
+    /// 与 moveKeyboardCursor 的差别:不做"从 -1 起步"的推断 —— 单击行号是明确的;
+    /// 浮层/选择模式打开时不落光标(选中高亮会与菜单目标/复选高亮打架)。
+    function locateKeyboardCursor(row) {
+        if (!listKeysUsable()) return
+        if (row < 0 || row >= list.count) return
+        kbIndex = row
+        list.positionViewAtIndex(row, ListView.Contain)
+    }
+
     /// 移动键盘光标并保证该行可见。
     function moveKeyboardCursor(delta) {
         if (list.count === 0) return
@@ -506,7 +516,7 @@ Rectangle {
         list.positionViewAtIndex(kbIndex, ListView.Contain)
     }
 
-    /// 复制第 row 行并收起面板(N1 + N2 的公共出口)。
+    /// 复制第 row 行并收起面板(双击卡片 / 键盘 Enter 的公共出口)。
     /// 收起后按设置决定是否自动粘贴 —— 判断在 C++(autoPasteIfEnabled 现读设置),
     /// 这里无条件调一次即可。
     function copyRowAndHide(row) {
@@ -1152,7 +1162,7 @@ Rectangle {
             if (noMods && event.key === Qt.Key_End && root.kbIndex >= 0) {
                 root.jumpKeyboardCursor(true); event.accepted = true; return
             }
-            // Enter = 复制光标行并收起(与单击卡片同语义:不走多选、不改卡片状态)
+            // Enter = 复制光标行并收起(与双击卡片同语义:不走多选、不改卡片状态)
             if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
                     && root.kbIndex >= 0) {
                 root.copyRowAndHide(root.kbIndex)
@@ -2078,10 +2088,13 @@ Rectangle {
                     todoOverdue: rowWrap.todoOverdue
                     todoNote: rowWrap.todoNote
                     sourceOwner: rowWrap.sourceOwner
+                    // 行号注入:单击选中上抛用(EntryCard 内部拿不到委托 index)
+                    row: rowWrap.index
                     // 搜索命中高亮:绑防抖后的快照(改词 200ms 后重算,与列表刷新同节奏)
                     query: root.highlightQuery
                     // 键盘光标行:与"菜单打开"同用强调语言(两者都是"正在被操作的对象"),
                     // 但键盘光标只在无浮层时出现 —— 有菜单时焦点语义归菜单。
+                    // 鼠标单击选中与 ↑↓ 落位写同一个 kbIndex,高亮语义自然一致。
                     menuOpen: (root.menuTarget !== null
                                && root.menuTarget.entryId === rowWrap.entryId)
                               || root.highlightTodoId === rowWrap.entryId
@@ -2097,6 +2110,9 @@ Rectangle {
                     onToggleSelected: function(shiftHeld) {
                         root.toggleSelectedIndex(index, shiftHeld)
                     }
+                    // 单击选中 = 定位键盘光标(高亮该行;Enter/双击再复制)。
+                    onClickSelected: function(row) { root.locateKeyboardCursor(row) }
+                    onDoubleClickedCopy: root.copyRowAndHide(rowWrap.index)
                     onContextMenuRequested: function(entry) { root.openEntryMenu(entry) }
                     onMenuDismissRequested: root.closeEntryMenu()
                     onTodoEditRequested: function(entry) { root.openTodoComposer(entry) }
@@ -2266,12 +2282,28 @@ Rectangle {
                     font.family: Theme.fontFamily
                     font.pixelSize: Theme.metrics.fontMicro
                 }
-                // ↑↓ / Enter 是键盘导航(N1)的唯一提示位:没有它用户不会想到
-                // 可以用键盘选条 —— 提示成本低于在每张卡片上画序号。
+                // ↑↓ / Enter 与"单击选中、双击复制"是同一套键盘/鼠标语言:
+                // 单击=选中,↑↓=换选中行,Enter/双击=复制 —— 提示成本低于逐卡标注。
+                KeyCap { label: "单击" }
+                Text {
+                    text: "选中"
+                    color: Theme.colors.textSecondary
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.metrics.fontMicro
+                    Layout.rightMargin: Theme.metrics.spacingSm
+                }
+                KeyCap { label: "双击" }
+                Text {
+                    text: "复制"
+                    color: Theme.colors.textSecondary
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.metrics.fontMicro
+                    Layout.rightMargin: Theme.metrics.spacingSm
+                }
                 KeyCap { label: "↑↓" }
                 KeyCap { label: "Enter" }
                 Text {
-                    text: "选中并复制"
+                    text: "选择行并复制"
                     color: Theme.colors.textSecondary
                     font.family: Theme.fontFamily
                     font.pixelSize: Theme.metrics.fontMicro
