@@ -57,6 +57,9 @@ PanelWindow::PanelWindow(CoreBridge& core, const QJsonObject& startupSettings,
     : QWidget(parent, Qt::FramelessWindowHint | Qt::Tool), m_core(core),
       m_startupSettings(startupSettings) {
     setWindowTitle("Nextboard");
+    // 快捷栏显示初值:启动快照里读一次(快照在 preferredPanelSize 首次调用时清空,
+    // 必须先于它消费 —— 此处就是首次读,顺序安全)。
+    m_showQuickRail = m_startupSettings.value("quickRail").toBool(true);
     applyModeSize(Mode::List);   // 起始形态=列表(内含初始 resize 与最小尺寸)
     setupUi();
 
@@ -374,6 +377,12 @@ void PanelWindow::setPinned(bool pinned) {
     // 一旦被其它窗口盖住就没有入口找回,所以固定期间同步置顶。
     applyTopmost();
     emit pinnedChanged();
+}
+
+void PanelWindow::setShowQuickRail(bool on) {
+    if (m_showQuickRail == on) return;
+    m_showQuickRail = on;
+    emit showQuickRailChanged();
 }
 
 void PanelWindow::applySearchText(const QString& text) {

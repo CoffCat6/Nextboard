@@ -589,7 +589,65 @@ void runSettingsFlow(PanelWindow& panel) {
                                                                                 .toBool() &&
                                                                             probeRapid.value("ok")
                                                                                 .toBool());
-                                                                QApplication::quit();
+                                                                // ---- E. 快捷功能页(quick_rail 开关) ----
+                                                                // 判据四条:
+                                                                //   ① 侧栏真实点击能切到「快捷功能」分类(导航链路);
+                                                                //   ② 开关初值 = 设置里的 quickRail(默认 true);
+                                                                //   ③ 真实点击开关 → 落库翻转(save_settings 链路);
+                                                                //   ④ panelWindow.showQuickRail 属性联动翻转(即时生效链路)。
+                                                                // 断言后**复原为 true**,不污染后续流程与用户配置。
+                                                                const bool clickedNavQuick =
+                                                                    panel.clickByObjectName(
+                                                                        QStringLiteral("settingsNavQuick"));
+                                                                qInfo() << "SETTINGS STEP16 clickedNavQuick:"
+                                                                        << clickedNavQuick;
+                                                                QTimer::singleShot(700, &panel, [&panel] {
+                                                                    const QVariantMap sq =
+                                                                        CoreFacade::instance().call("get_settings");
+                                                                    const QVariant beforeVal =
+                                                                        sq.value("data").toMap()
+                                                                            .value("quickRail");
+                                                                    const bool beforeRail =
+                                                                        beforeVal.isValid() ? beforeVal.toBool() : true;
+                                                                    qInfo() << "SETTINGS STEP16 quickRail(before):"
+                                                                            << beforeRail;
+                                                                    const bool clickedChk =
+                                                                        panel.clickByObjectName(
+                                                                            QStringLiteral("quickRailCheck"));
+                                                                    qInfo() << "SETTINGS STEP16 clickedCheck:" << clickedChk;
+                                                                    QTimer::singleShot(900, &panel, [&panel, beforeRail] {
+                                                                        const QVariantMap sa =
+                                                                            CoreFacade::instance().call("get_settings");
+                                                                        const bool afterRail =
+                                                                            sa.value("data").toMap()
+                                                                                .value("quickRail").isValid()
+                                                                                ? sa.value("data").toMap()
+                                                                                      .value("quickRail").toBool()
+                                                                                : !beforeRail;
+                                                                        const QVariant propRail =
+                                                                            panel.rootProperty("acceptanceShowQuickRail");
+                                                                        qInfo() << "SETTINGS STEP16 quickRail(after):"
+                                                                                << afterRail
+                                                                                << "changed:" << (afterRail != beforeRail)
+                                                                                << "showQuickRailProp:" << propRail.toBool()
+                                                                                << "propMatches:" << (propRail.toBool() == afterRail);
+                                                                        // 复原:再点一次回到初值(相同链路,顺带验证往返)
+                                                                        panel.clickByObjectName(
+                                                                            QStringLiteral("quickRailCheck"));
+                                                                        QTimer::singleShot(900, &panel, [&panel, beforeRail] {
+                                                                            const QVariantMap sr =
+                                                                                CoreFacade::instance().call("get_settings");
+                                                                            const bool restored =
+                                                                                (sr.value("data").toMap()
+                                                                                     .value("quickRail").isValid()
+                                                                                     ? sr.value("data").toMap()
+                                                                                           .value("quickRail").toBool()
+                                                                                     : true) == beforeRail;
+                                                                            qInfo() << "SETTINGS STEP16 restored:" << restored;
+                                                                            QApplication::quit();
+                                                                        });
+                                                                    });
+                                                                });
                                                             });
                                                         });
                                                     });

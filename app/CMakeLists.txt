@@ -102,6 +102,7 @@ qt_add_qml_module(nextboard
         panel/qml/SettingsPageCapture.qml
         panel/qml/SettingsPagePin.qml
         panel/qml/SettingsPageHotkeys.qml
+        panel/qml/SettingsPageQuick.qml
         panel/qml/SettingsPageOcr.qml
         panel/qml/SettingsPageTranslate.qml
         panel/qml/SettingsPageNetwork.qml

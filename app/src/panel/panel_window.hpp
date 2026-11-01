@@ -25,9 +25,15 @@ class PanelWindow : public QWidget {
     /// 每次模型 reset 白跑一串 IIFE(绑定依赖按实际求值追踪,关掉的分支
     /// 不会建立依赖)。
     Q_PROPERTY(bool acceptanceMode READ acceptanceMode CONSTANT)
+    /// 列表页是否显示右侧「快捷功能栏」。设置页开关直写本属性(QML 绑定
+    /// 即时生效,无需重启);初值由构造函数从启动设置快照读。
+    Q_PROPERTY(bool showQuickRail READ showQuickRail WRITE setShowQuickRail
+               NOTIFY showQuickRailChanged)
 public:
     /// 是否处于验收模式(main.cpp 解析到任一 --*-flow 时置位,QML 构建前)。
     bool acceptanceMode() const { return m_acceptanceMode; }
+    bool showQuickRail() const { return m_showQuickRail; }
+    void setShowQuickRail(bool on);
     static void setAcceptanceModeForNextInstance()
     { s_acceptanceMode = true; }
     /// 窗口的三种形态。合并翻译页之后,同一个窗口要同时服务"呼出即用的历史列表"、
@@ -187,6 +193,8 @@ signals:
     void todoDue();
     /// "固定"状态变化(QML 按钮选中态)。
     void pinnedChanged();
+    /// 快捷栏显示开关变化(QML 侧栏可见性绑定)。
+    void showQuickRailChanged();
     /// 面板被收起:QML 侧据此收掉瞬时 UI(右键菜单等),避免下次呼出时残留。
     void panelHidden();
     /// 形态切换(list ⇄ translate):列表模型据此决定释放/重拉。
@@ -241,6 +249,8 @@ private:
     bool m_everFocused = false;
     /// 是否固定(失焦不隐藏 + 置顶)。
     bool m_pinned = false;
+    /// 列表页快捷栏显示开关(设置 quick_rail;设置页直写,构造时回填初值)。
+    bool m_showQuickRail = true;
     /// 翻译/设置页期间为真:只**抑制失焦隐藏**(输入长文或填 API Key 时切走
     /// 焦点不该消失),但不动用户的固定状态、也不置顶 —— 与 `m_pinned` 是两件事。
     bool m_holdOpen = false;

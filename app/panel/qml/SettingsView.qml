@@ -28,11 +28,12 @@ Item {
     readonly property int catCapture: 1
     readonly property int catPin: 2
     readonly property int catHotkeys: 3
-    readonly property int catOcr: 4
-    readonly property int catTranslate: 5
-    readonly property int catNetwork: 6
-    readonly property int catData: 7
-    readonly property int catAbout: 8
+    readonly property int catQuick: 4
+    readonly property int catOcr: 5
+    readonly property int catTranslate: 6
+    readonly property int catNetwork: 7
+    readonly property int catData: 8
+    readonly property int catAbout: 9
 
     /// 侧栏分类:label 显示文案,icon 是 HeaderIcon 的 kind,
     /// nav 是验收钩子 objectName(--settings-flow 等真实点击用)。
@@ -41,6 +42,7 @@ Item {
         { label: "截图",       icon: "capture",   nav: "settingsNavCapture" },
         { label: "贴图",       icon: "pin",       nav: "settingsNavPin" },
         { label: "快捷键",     icon: "keyboard",  nav: "settingsNavHotkeys" },
+        { label: "快捷功能",   icon: "plus",      nav: "settingsNavQuick" },
         { label: "文字识别",   icon: "text",      nav: "settingsNavOcr" },
         { label: "翻译服务",   icon: "translate", nav: "settingsNavTranslate" },
         { label: "网络与代理", icon: "network",   nav: "settingsNavNetwork" },
@@ -309,13 +311,14 @@ Item {
     Component { id: pageCapture;  SettingsPageCapture {} }
     Component { id: pagePin;      SettingsPagePin {} }
     Component { id: pageHotkeys;  SettingsPageHotkeys {} }
+    Component { id: pageQuick;    SettingsPageQuick {} }
     Component { id: pageOcr;      SettingsPageOcr {} }
     Component { id: pageTranslate; SettingsPageTranslate {} }
     Component { id: pageNetwork;  SettingsPageNetwork {} }
     Component { id: pageData;     SettingsPageData {} }
     Component { id: pageAbout;    SettingsPageAbout {} }
     readonly property var pageComponents: [
-        pageGeneral, pageCapture, pagePin, pageHotkeys, pageOcr,
+        pageGeneral, pageCapture, pagePin, pageHotkeys, pageQuick, pageOcr,
         pageTranslate, pageNetwork, pageData, pageAbout,
     ]
 

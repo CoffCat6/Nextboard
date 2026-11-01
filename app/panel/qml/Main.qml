@@ -260,7 +260,9 @@ Rectangle {
         updateNoteVisible: settingsPage.item
                            ? settingsPage.item.acceptanceUpdateNoteVisible : false,
         // 页签可见性(0 个未完成待办时「待办」页签必须仍在)。
-        todoTabVisible: tabRepeater.itemAt(4) ? tabRepeater.itemAt(4).visible : false
+        todoTabVisible: tabRepeater.itemAt(4) ? tabRepeater.itemAt(4).visible : false,
+        // 快捷功能页(--settings-flow STEP16):panelWindow.showQuickRail 联动读回。
+        showQuickRail: panelWindow.showQuickRail
     }) : null
 
     // ---- 右键菜单:全面板**唯一实例** ----
@@ -2190,6 +2192,10 @@ Rectangle {
             // 右侧快捷栏:固定窄条,占位钮见 actions;动作接线在下方 onActionTriggered
             QuickRail {
                 id: quickRail
+                // 设置页「快捷功能」分类的显示开关直写 panelWindow(showQuickRail),
+                // 这里绑定即即时生效;占位期不隐藏整栏的"空栏"顾虑不存在 ——
+                // 关掉的用户就是不要这条栏,占位钮也无须保留。
+                visible: panelWindow.showQuickRail
                 Layout.fillHeight: true
                 onActionTriggered: function(actionId) {
                     // 本期唯一占位动作:诚实提示"还没做",好过静默无响应;
