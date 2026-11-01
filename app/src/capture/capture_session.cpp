@@ -147,7 +147,9 @@ void closeAllOverlays(std::function<void()> after = {}) {
     const QList<QPointer<OverlayWidget>> overlays = g_overlays;
     g_overlays.clear();
     g_onCaptured = {};
-    g_sourceOwnerExe.clear();
+    // ⚠️ 不在这里清 g_sourceOwnerExe:after 回调(裁剪/入库)在**本函数返回后**
+    // 才跑,采纳/松手路径刚在 mouseReleaseEvent 里赋的值会被这行清掉(实测
+    // 截图条目永远没有来源)。会话重置由 startCaptureSession 入口承担。
     // 长截图会话核在核心侧持有整张结果图,会话结束必须显式丢弃 ——
     // 否则用户中途 Esc / 空闲超时后,那几百 MB 会一直挂在核心的表里。
     abortStitchSession();
