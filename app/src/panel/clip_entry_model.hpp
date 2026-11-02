@@ -91,6 +91,14 @@ public:
     Q_INVOKABLE void setSource(const QString& source);
     /// 覆盖设置条目的标签(S5.2);成功后重拉列表与标签统计。
     Q_INVOKABLE void saveTags(const QString& id, const QStringList& tags);
+    /// 原地改写文本条目的正文(3.1)。
+    ///
+    /// 与 saveTags 同一"就地更新 → 必要时重拉"策略:id 不变,只换正文,故
+    /// 卡片可以只更新该行而不整表 reset(整表 reset 会丢滚动位置与选择集)。
+    /// 但**搜索词非空时必须重拉** —— 改后的正文可能不再匹配当前筛选,
+    /// 就地更新会留下一条"看不到原因"的行。
+    /// 返回 { ok, message }:失败(空正文/类型不符/条目不存在)时 message 为可读原因。
+    Q_INVOKABLE QVariantMap updateEntryText(const QString& id, const QString& text);
     /// 重命名标签(S5.2):所有带该标签的条目就地替换,单事务完成。
     /// to 为空 = 删除该标签;返回 { ok, changed };成功后重拉并刷新标签统计。
     Q_INVOKABLE QVariantMap renameTag(const QString& from, const QString& to);

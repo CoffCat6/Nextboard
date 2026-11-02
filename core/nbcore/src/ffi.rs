@@ -1059,6 +1059,22 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
             entry::set_tags(&db, &id, &tags)?;
             Ok(serde_json::Value::Null)
         }
+        // 文本条目「编辑正文」(3.1):原地改写同一条目(id/标签/固定/来源全保留),
+        // 同步刷新 byte_size / preview / last_used_at;FTS 由触发器跟随。
+        // 只接 text 条目 —— 待办有自己的 todo_update,图片/文件没有可编辑正文。
+        "update_entry_text" => {
+            let core = crate::core::Core::get()?;
+            let id = str_req(req, "id")?;
+            let text = str_req(req, "text")?;
+            {
+                let db = core.db.lock()?;
+                entry::update_text(&db, &id, &text, crate::now_ms())?;
+            }
+            // 通知宿主列表刷新:正文变了,卡片显示与搜索结果都要跟着变。
+            notify_host(WM_APP_CLIP_CHANGED);
+            Ok(serde_json::json!({ "id": id }))
+        }
+
         // 重命名标签(S5.2):所有带该标签的条目就地替换,单事务完成。
         // to 为空 = 删除该标签;返回 { changed } 供宿主提示"已更新 N 条"。
         "rename_tag" => {

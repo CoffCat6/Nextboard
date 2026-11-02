@@ -716,6 +716,57 @@ pub fn list_sources(conn: &Connection) -> AppResult<Vec<SourceCount>> {
     Ok(rows)
 }
 
+/// 原地改写文本条目的正文(id 不变,标签/固定/来源全部保留)。
+///
+/// 为什么需要(3.1):复制来的文本有笔误或多条空行时,此前只能删掉重抄 ——
+/// 「素材库」语义下这是明显缺口。图片条目已有编辑器,文本条目没有对应入口。
+///
+/// 语义与约束:
+/// - **只允许 text / todo 两类**:image/file 的正文不是用户可编辑的字符串,
+///   静默改写会让"图片条目文本变成了别的"这种怪状态,故明确报错。
+///   待办走自己的 `todo::update`(带时刻/标签/备注),本函数不越权 ——
+///   只处理 text。
+/// - 正文去首尾空白后**不得为空**:空文本条目在列表里是一张空卡片,
+///   且 preview 为空会让卡片高度塌陷。要"删掉内容"请用删除。
+/// - `byte_size` 与 `preview` 必须跟着正文一起改:前者参与历史容量统计,
+///   后者是列表卡片显示的折叠摘要 —— 漏掉任一个都会出现"列表显示旧内容、
+///   搜索却命中新内容"的错位。
+/// - `last_used_at` 一并刷新:编辑是"用过"的一种,自然上浮(与 touch 同语义)。
+/// - FTS 由 v8 的 `AFTER UPDATE OF text_content` 触发器维护,这里不必手动同步
+///   (entry.rs 的 `fts_index_stays_in_sync_after_insert_delete_update` 已验证)。
+pub fn update_text(conn: &Connection, id: &str, text: &str, now: i64) -> AppResult<()> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::InvalidInput("正文不能为空".into()));
+    }
+    // 先确认条目存在且类型允许 —— 分开查是为了给出**能看懂**的错误,
+    // 而不是让 UPDATE 影响 0 行后回一句"条目不存在"(类型不对时那更误导)。
+    let kind: Option<String> = conn
+        .query_row(
+            "SELECT kind FROM clip_entries WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(kind) = kind else {
+        return Err(AppError::InvalidInput(format!("条目不存在: {id}")));
+    };
+    if kind != EntryKind::Text.as_str() {
+        let reason = match kind.as_str() {
+            "todo" => "待办请用待办编辑入口修改",
+            "image" => "图片条目不支持文本编辑",
+            _ => "该条目类型不支持文本编辑",
+        };
+        return Err(AppError::InvalidInput(reason.into()));
+    }
+    conn.execute(
+        "UPDATE clip_entries SET text_content = ?1, byte_size = ?2, preview = ?3, \
+         last_used_at = ?4 WHERE id = ?5",
+        params![trimmed, trimmed.len() as i64, make_preview(trimmed), now, id],
+    )?;
+    Ok(())
+}
+
 /// 覆盖设置条目的标签；id 不存在时报错。
 ///
 /// 归一化：去首尾空白、丢弃空串、按出现顺序去重；全空则写 NULL。
@@ -2071,5 +2122,78 @@ mod tests {
         assert!(!get(&conn, "a").unwrap().unwrap().pinned);
         // 空入参
         assert_eq!(set_pinned_bulk(&conn, &[], true).unwrap(), 0);
+    }
+
+    // ---- 文本编辑(3.1) ----
+
+    /// 原地改写:text_content / byte_size / preview / last_used_at 四项同步,
+    /// 且 id、标签、固定态、来源**一个都不动**(否则编辑一次就丢元数据)。
+    #[test]
+    fn update_text_rewrites_body_and_keeps_metadata() {
+        let conn = crate::store::memory();
+        let mut e = entry("a", "h-a", "original body", false, 100);
+        e.tags = Some(r#"["keep"]"#.to_string());
+        e.pinned = true;
+        e.source = "translate".into();
+        insert(&conn, &e).unwrap();
+
+        update_text(&conn, "a", "  revised body  ", 999).unwrap();
+
+        let got = get(&conn, "a").unwrap().unwrap();
+        assert_eq!(got.text_content.as_deref(), Some("revised body"), "首尾空白被裁掉");
+        assert_eq!(got.byte_size, "revised body".len() as i64, "byte_size 跟随正文");
+        assert_eq!(got.preview, "revised body", "preview 跟随正文(卡片摘要)");
+        assert_eq!(got.last_used_at, 999, "编辑算一次使用,自然上浮");
+        assert!(got.pinned, "固定态保留");
+        assert_eq!(got.source, "translate", "来源保留");
+        assert_eq!(got.tags.as_deref(), Some(r#"["keep"]"#), "标签保留");
+    }
+
+    /// 空/纯空白正文必须被拒 —— 空文本条目是一张空卡片,preview 为空还会让
+    /// 列表行高塌陷。要清空内容应当用删除,而不是把它编辑成空。
+    #[test]
+    fn update_text_rejects_blank_body() {
+        let conn = crate::store::memory();
+        insert(&conn, &entry("a", "h-a", "body", false, 1)).unwrap();
+        assert!(update_text(&conn, "a", "", 2).is_err(), "空串被拒");
+        assert!(update_text(&conn, "a", "   \n\t ", 2).is_err(), "纯空白被拒");
+        assert_eq!(
+            get(&conn, "a").unwrap().unwrap().text_content.as_deref(),
+            Some("body"),
+            "被拒后原内容不变"
+        );
+    }
+
+    /// 只有 text 条目能走这条路:图片/文件/待办各自有不同的编辑渠道,
+    /// 静默改写会让"图片条目正文变成了陌生字符串"这种怪状态成立。
+    #[test]
+    fn update_text_rejects_non_text_kinds() {
+        let conn = crate::store::memory();
+        let mut img = entry("img", "h-img", "", false, 1);
+        img.kind = EntryKind::Image;
+        insert(&conn, &img).unwrap();
+        let mut todo = entry("td", "h-td", "task", false, 1);
+        todo.kind = EntryKind::Todo;
+        insert(&conn, &todo).unwrap();
+
+        assert!(update_text(&conn, "img", "x", 2).is_err(), "图片条目被拒");
+        assert!(update_text(&conn, "td", "x", 2).is_err(), "待办被拒(走 todo 入口)");
+        assert!(update_text(&conn, "ghost", "x", 2).is_err(), "不存在的条目被拒");
+    }
+
+    /// 改完正文后**搜索必须命中新内容、旧内容不再命中** —— FTS 由
+    /// v8 的 `AFTER UPDATE OF text_content` 触发器维护,这里锁住该契约,
+    /// 防止将来有人把触发器删掉/改成手动同步却漏了这条路径。
+    #[test]
+    fn update_text_is_searchable_after_edit() {
+        let conn = crate::store::memory();
+        insert(&conn, &entry("a", "h-a", "alpha original", false, 100)).unwrap();
+        update_text(&conn, "a", "bravo revised", 200).unwrap();
+
+        let (hit, _) = list(&conn, Some("bravo"), None, None, None, None, 10, 0).unwrap();
+        assert_eq!(hit.len(), 1, "新内容应可被搜到");
+        assert_eq!(hit[0].id, "a", "命中的仍是同一条目(id 未变)");
+        let (old, _) = list(&conn, Some("alpha"), None, None, None, None, 10, 0).unwrap();
+        assert_eq!(old.len(), 0, "旧内容不应再命中");
     }
 }

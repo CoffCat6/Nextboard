@@ -114,6 +114,11 @@ Rectangle {
     /// 待办的"编辑待办"按钮上抛(带正文/标签快照;时刻由 Main 侧走 todo_get 拉)。
     signal todoEditRequested(var entry)
 
+    /// 文本条目的"编辑正文"按钮上抛(3.1):带正文快照 —— 由 Main 侧开内联卡片。
+    /// ⚠️ 必须带**快照**而不是让 Main 按 id 回查:条目被翻页/筛掉时回查拿到空串,
+    /// 一保存就把正文清空了(标签编辑卡片踩过同一坑)。
+    signal textEditRequested(var entry)
+
     /// 本条目的右键菜单是否已打开(父级注入):驱动"当前操作对象"高亮。
     property bool menuOpen: false
 
@@ -603,6 +608,17 @@ Rectangle {
                 iconName: "pencil"
                 label: "编辑"
                 onTriggered: root.editEntryAfterHide()
+            }
+            // 文本专属:编辑正文(3.1)。与右键菜单「编辑正文…」同一语义 ——
+            // 面板内联卡片,原地改写同一条目(不动标签/固定/来源)。
+            CardAction {
+                Layout.alignment: Qt.AlignVCenter
+                visible: root.kind === "text"
+                iconName: "pencil"
+                label: "编辑正文"
+                onTriggered: root.textEditRequested({
+                    entryId: root.entryId, kind: root.kind, text: root.text
+                })
             }
             // 待办专属:编辑(复用新建卡片做编辑,整卡预填)。
             // 与右键菜单「编辑待办…」同一语义;普通「编辑」按钮只对 image 有意义。

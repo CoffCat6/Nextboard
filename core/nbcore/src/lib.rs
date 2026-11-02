@@ -26,31 +26,78 @@ pub mod todo;
 pub mod translate;
 pub mod update;
 
+/// 单份日志的大小上限(字节)。与宿主侧 `app/src/host/log_rotate.hpp` 的
+/// `kLogRotateBytes` 取同一数值:两个文件都是排障用的,不该一个 2MB 一个 40MB。
+pub const LOG_ROTATE_BYTES: u64 = 2 * 1024 * 1024;   // 2MB
+
 /// 初始化日志(log crate → 数据目录 nbcore.log)。
 /// 必须在任何日志调用前执行(nb_init 首行);多次调用无害。
+///
+/// 单代滚动(与宿主 nextboard.log 同一套语义):打开前若已超阈值,先
+/// `nbcore.log` → `nbcore.log.1`(覆盖旧归档)再新建。托盘常驻程序一开几周,
+/// FTS/OCR/剪贴板事件源源不断,不设上限会把用户磁盘写满。
 pub fn init_logging(data_dir: &std::path::Path) {
     let file_path = data_dir.join("nbcore.log");
+    rotate_log_if_needed(&file_path, LOG_ROTATE_BYTES);
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&file_path);
     if let Ok(file) = file {
+        // 已有大小作为累计起点(见 LoggerState::written 注释)。
+        let written = file.metadata().map(|m| m.len()).unwrap_or(0);
         let _ = log::set_boxed_logger(Box::new(SimpleFileLogger {
-            file: std::sync::Mutex::new(std::io::BufWriter::with_capacity(
-                LOG_BUF_BYTES,
-                file,
-            )),
+            file: std::sync::Mutex::new(LoggerState {
+                writer: Some(std::io::BufWriter::with_capacity(LOG_BUF_BYTES, file)),
+                written,
+                path: file_path.clone(),
+            }),
         }));
         log::set_max_level(log::LevelFilter::Info);
     }
 }
 
-/// 极简文件日志器(单文件追加;排障用,不追求轮转)。
+/// 若 `path` 已达/超过 `limit` 字节,把它改名为 `<path>.1`(覆盖旧归档)。
+///
+/// 返回是否滚动成功;不存在 / 未超限 / 改名失败都返回 false —— **滚动失败
+/// 不影响写日志**,下次再试,不让排障工具本身变成故障源。
+pub fn rotate_log_if_needed(path: &std::path::Path, limit: u64) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if meta.len() < limit {
+        return false;
+    }
+    let mut target = path.as_os_str().to_owned();
+    target.push(".1");
+    let target = std::path::PathBuf::from(target);
+    // 先删旧归档:Windows 上 rename 到已存在目标会失败;删不掉(被占用)则
+    // 本次放弃滚动,保留现状继续写 —— 宁可日志大一点,也不能丢诊断能力。
+    let _ = std::fs::remove_file(&target);
+    std::fs::rename(path, &target).is_ok()
+}
+
+/// 极简文件日志器(单文件追加 + 单代滚动;排障用,不追求多代保留)。
 ///
 /// 带 8KB BufWriter:Info 级日志(剪贴板事件/待办 tick)不再每条一次 write
 /// 系统调用;Warn 及以上立即 flush,崩溃时诊断信息不丢。
+///
+/// 滚动:累计已写字节数,跨过 `LOG_ROTATE_BYTES` 时把当前文件改名归档并新建
+/// 一个空文件继续写。**先写后滚**:那条让文件越线的日志先落盘,再换文件 ——
+/// 崩溃前的最后一条不会因为滚动而丢。
 struct SimpleFileLogger {
-    file: std::sync::Mutex<std::io::BufWriter<std::fs::File>>,
+    file: std::sync::Mutex<LoggerState>,
+}
+
+struct LoggerState {
+    /// `None` = 文件句柄已被主动释放(滚动改名期间)。取 `Option` 而不是裸
+    /// BufWriter,是因为**Windows 上被本进程打开着的文件 rename 会静默失败** ——
+    /// 必须先 drop 掉持有它的 writer 才能把 `x.log` 改名成 `x.log.1`。
+    writer: Option<std::io::BufWriter<std::fs::File>>,
+    /// 当前文件已写字节数(打开时从文件实际大小起算,而不是 0 —— 否则
+    /// 上次攒下的接近上限的日志要等到本次再写满一个阈值才会滚动)。
+    written: u64,
+    path: std::path::PathBuf,
 }
 
 const LOG_BUF_BYTES: usize = 8 * 1024;
@@ -65,24 +112,52 @@ impl log::Log for SimpleFileLogger {
             return;
         }
         use std::io::Write;
-        if let Ok(mut f) = self.file.lock() {
-            let _ = writeln!(
-                f,
-                "[{}] [{}] {}",
-                chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
-                record.level(),
-                record.args()
-            );
-            if record.level() <= log::Level::Warn {
-                let _ = f.flush();
+        let Ok(mut state) = self.file.lock() else {
+            return;
+        };
+        let line = format!(
+            "[{}] [{}] {}\n",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+            record.level(),
+            record.args()
+        );
+        if let Some(writer) = state.writer.as_mut() {
+            let _ = writer.write_all(line.as_bytes());
+        }
+        state.written += line.len() as u64;
+        if record.level() <= log::Level::Warn {
+            if let Some(writer) = state.writer.as_mut() {
+                let _ = writer.flush();
+            }
+        }
+        // 跨阈值:先 flush(缓冲里还有数据,不刷会跟着旧句柄进归档位),
+        // 再 **drop 掉 writer 释放句柄**,才做 rename,最后打开新文件继续写。
+        // 顺序错了的表现是"阈值到了却永远不滚动"(Windows 静默失败,2026-11-02 实测)。
+        if state.written >= LOG_ROTATE_BYTES && state.writer.is_some() {
+            if let Some(mut writer) = state.writer.take() {
+                let _ = writer.flush();
+            }
+            if rotate_log_if_needed(&state.path, LOG_ROTATE_BYTES) {
+                state.written = 0;
+            }
+            // 无论滚动成功与否都要重新打开:成功 = 新空文件;失败(被占用)= 原文件续写。
+            // 失败时 written 保持原值,下一行会再试一次。
+            if let Ok(file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&state.path)
+            {
+                state.writer = Some(std::io::BufWriter::with_capacity(LOG_BUF_BYTES, file));
             }
         }
     }
 
     fn flush(&self) {
         use std::io::Write;
-        if let Ok(mut f) = self.file.lock() {
-            let _ = f.flush();
+        if let Ok(mut state) = self.file.lock() {
+            if let Some(writer) = state.writer.as_mut() {
+                let _ = writer.flush();
+            }
         }
     }
 }
@@ -93,4 +168,72 @@ pub fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rotate_log_if_needed;
+
+    /// 临时目录:放 `<manifest>/target/tmp` —— 受限环境(%TEMP% 不可写)下也能跑,
+    /// 与 settings.rs 的 tmp_dir 同一做法。
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("tmp");
+        let _ = std::fs::create_dir_all(&base);
+        let dir = base.join(format!("nb_logrotate_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn rotate_skips_when_under_limit() {
+        let dir = tmp_dir("under");
+        let path = dir.join("x.log");
+        std::fs::write(&path, b"hello").unwrap();
+        assert!(!rotate_log_if_needed(&path, 1024), "未达阈值不滚动");
+        assert!(path.exists(), "原文件仍在");
+        assert!(!dir.join("x.log.1").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rotate_skips_when_missing() {
+        let dir = tmp_dir("missing");
+        let path = dir.join("nope.log");
+        assert!(!rotate_log_if_needed(&path, 0), "文件不存在返回 false 而非 panic");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rotate_moves_file_to_single_generation() {
+        let dir = tmp_dir("move");
+        let path = dir.join("x.log");
+        std::fs::write(&path, b"0123456789").unwrap();
+        assert!(rotate_log_if_needed(&path, 5), "超限应滚动");
+        assert!(!path.exists(), "原文件已改名");
+        assert_eq!(
+            std::fs::read(dir.join("x.log.1")).unwrap(),
+            b"0123456789",
+            "内容进归档位"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rotate_overwrites_previous_generation() {
+        let dir = tmp_dir("overwrite");
+        let path = dir.join("x.log");
+        std::fs::write(dir.join("x.log.1"), b"OLD").unwrap();
+        std::fs::write(&path, b"NEW").unwrap();
+        assert!(rotate_log_if_needed(&path, 1));
+        assert_eq!(
+            std::fs::read(dir.join("x.log.1")).unwrap(),
+            b"NEW",
+            "旧归档被覆盖,单代不累积(.log.2 之类永远不会出现)"
+        );
+        assert!(!dir.join("x.log.2").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

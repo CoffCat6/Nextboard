@@ -276,6 +276,42 @@ void ClipEntryModel::saveTags(const QString& id, const QStringList& tags) {
     reload(m_limit);   // applyPage 内会一并刷新标签统计
 }
 
+QVariantMap ClipEntryModel::updateEntryText(const QString& id, const QString& text) {
+    const QString trimmed = text.trimmed();
+    if (trimmed.isEmpty()) {
+        // 前置拦一道:core 也会拒,但让用户点保存立刻看到原因,不必等一次往返
+        return {{"ok", false}, {"message", QStringLiteral("正文不能为空")}};
+    }
+    const QVariantMap resp =
+        CoreFacade::instance().call("update_entry_text", {{"id", id}, {"text", trimmed}});
+    if (!resp.value("ok").toBool()) {
+        return {{"ok", false},
+                {"message", resp.value("error").toMap().value("message").toString()}};
+    }
+    // 搜索词非空时**必须重拉**:改后的正文可能不再匹配当前筛选,
+    // 就地更新会留下一条"看起来不该在这儿"的行(用户会以为是臭虫)。
+    if (!m_query.isEmpty()) {
+        reload(m_limit);
+        return {{"ok", true}};
+    }
+    // 无筛选:就地更新该行,不整表 reset(保住滚动位置与选择集)。
+    // ⚠️ 只改**存储字段**(text/preview/byteSize/lastUsedAt);显示用的
+    //    timeText/sizeText 由 data() 从这些字段现算,不要去赋值。
+    const qint64 bytes = trimmed.toUtf8().size();
+    const QString preview = trimmed.left(80);
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (updateRowById(id, [&](Row& r) {
+            r.text = trimmed;
+            r.preview = preview;
+            r.byteSize = bytes;
+            r.lastUsedAt = now;
+        })) {
+        return {{"ok", true}};
+    }
+    reload(m_limit);   // 该行不在当前页(已翻页/被筛掉):退回重拉
+    return {{"ok", true}};
+}
+
 void ClipEntryModel::refreshTags() {
     const QVariantMap resp = CoreFacade::instance().call("list_tags");
     if (!resp.value("ok").toBool()) return;

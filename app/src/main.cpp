@@ -24,20 +24,44 @@
 
 // 数据/日志目录(exe 同级 data/)的单一来源;下面的日志处理器要用,故先于代码段引入
 #include "host/app_paths.hpp"
+#include "host/log_rotate.hpp"
 
-// S2 阶段:qDebug/qInfo 全量落文件(发布期移除);WIN32 子程序无控制台,这是唯一可观测手段。
+// S2 阶段:qDebug/qInfo 全量落文件;WIN32 子程序无控制台,这是唯一可观测手段。
 // 日志与数据同处:`<exe 同级>\data\nextboard.log`(便携式布局,见 host/app_paths.hpp)
+//
+// 单代滚动(host/log_rotate):托盘常驻程序一开几周,Info 级日志源源不断,
+// 不设上限会把用户磁盘写满。语义见该模块头注释 —— 阈值 2MB,保留 `void .log.1`。
 static void fileMessageHandler(QtMsgType type, const QMessageLogContext& ctx, const QString& msg) {
-    static QFile log(nb::appDataFile(QStringLiteral("nextboard.log")));
-    if (!log.isOpen()) log.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
+    static const QString path = nb::appDataFile(QStringLiteral("nextboard.log"));
+    static QFile log;
+    static qint64 written = -1;   // -1 = 尚未打开;打开时置为现有大小
+    if (!log.isOpen()) {
+        if (!nb::openLogFileAppend(log, path)) return;
+        // 打开后把**已有大小**作为累计起点:否则本次运行会从 0 重新计数,
+        // 上次攒下的 1.9MB 要等到本次再写 2MB 才会滚动(长期超限)。
+        written = log.size();
+    }
     const char* level = type == QtDebugMsg ? "DEBUG" : type == QtInfoMsg ? "INFO"
         : type == QtWarningMsg ? "WARN" : type == QtCriticalMsg || type == QtFatalMsg ? "CRIT" : "?";
-    if (log.isOpen()) {
-        log.write(QStringLiteral("[%1] %2\n").arg(level, msg).toUtf8());
-        // 仅 Warning 及以上才强制刷盘(flush 含 _commit 同步盘);Debug/Info 交给
-        // OS 页缓存。注意 QtMsgType 枚举序(Info=4 排在 Warning 之后),不可用 >= 比较。
-        // Info/Debug 不刷盘的代价:进程被强杀时尾部普通日志可能丢,崩溃诊断(WARN+)不受影响。
-        if (type == QtWarningMsg || type == QtCriticalMsg || type == QtFatalMsg) log.flush();
+    const QByteArray line = QStringLiteral("[%1] %2\n").arg(level, msg).toUtf8();
+    log.write(line);
+    written += line.size();
+    // 仅 Warning 及以上才强制刷盘(flush 含 _commit 同步盘);Debug/Info 交给
+    // OS 页缓存。注意 QtMsgType 枚举序(Info=4 排在 Warning 之后),不可用 >= 比较。
+    // Info/Debug 不刷盘的代价:进程被强杀时尾部普通日志可能丢,崩溃诊断(WARN+)不受影响。
+    if (type == QtWarningMsg || type == QtCriticalMsg || type == QtFatalMsg) log.flush();
+    // 跨过阈值:**先写完这条**再滚动(滚动会把整份文件挪走,先写保证这条不丢)。
+    // ⚠️ 必须先 close 再改名:Windows 上被本进程打开着的文件 rename 会**静默失败**,
+    //    表现为"阈值到了却永远不滚动"(实测踩过:文件长到 2050KB 仍无 .log.1)。
+    if (written >= nb::kLogRotateBytes) {
+        log.close();
+        if (nb::rotateLogIfNeeded(path, written)) {
+            written = -1;   // 下次进入本函数时重建新文件并重置计数
+        } else {
+            // 轮转失败(被别的进程/杀软占用):重新打开继续写,不让日志断流;
+            // 计数保持原值,下一行再试。
+            nb::openLogFileAppend(log, path);
+        }
     }
 }
 
@@ -63,8 +87,9 @@ static void fileMessageHandler(QtMsgType type, const QMessageLogContext& ctx, co
 namespace {
 
 void appendCrashLog(const QString& text) {
-    QFile log(nb::appDataFile(QStringLiteral("nextboard.log")));
-    if (log.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
+    QFile log;
+    // 崩溃路径同样走轮转:判一次大小即可,失败也无所谓(写不进去就是写不进去)。
+    if (nb::openLogFileAppend(log, nb::appDataFile(QStringLiteral("nextboard.log"))))
         log.write(QStringLiteral("[CRASH] %1\n").arg(text).toUtf8());
 }
 
@@ -164,7 +189,9 @@ int main(int argc, char* argv[]) {
                 || arg == QLatin1String("--stitch-settings-flow")
                 || arg == QLatin1String("--stitch-live-flow")
                 || arg == QLatin1String("--note-flow")
-                || arg == QLatin1String("--todo-layout-flow")) {
+                || arg == QLatin1String("--todo-layout-flow")
+                || arg == QLatin1String("--log-rotate-flow")
+                || arg == QLatin1String("--text-edit-flow")) {
                 const QString dir = QDir(QCoreApplication::applicationDirPath())
                                         .filePath(QStringLiteral("acceptance-data"));
                 const bool created = QDir().mkpath(dir);
@@ -316,6 +343,8 @@ int main(int argc, char* argv[]) {
     bool stitchLiveFlow = false;
     bool noteFlow = false;
     bool todoLayoutFlow = false;
+    bool logRotateFlow = false;
+    bool textEditFlow = false;
     for (int i = 1; i < argc; ++i) {
         const QString arg = QString::fromLocal8Bit(argv[i]);
         if (arg == QLatin1String("--screenshot") && i + 1 < argc)
@@ -392,6 +421,14 @@ int main(int argc, char* argv[]) {
         // 编辑卡片字段顺序验收(docs/21):纯读回,不写库
         else if (arg == QLatin1String("--todo-layout-flow"))
             todoLayoutFlow = true;
+        // 日志轮转验收:临时目录里造文件逼出滚动,断言单代语义与不丢最后一条。
+        // 纯文件操作,不写库、不碰真实日志。
+        else if (arg == QLatin1String("--log-rotate-flow"))
+            logRotateFlow = true;
+        // 文本条目编辑验收(3.1):原地改写正文,断言 preview/byte_size/FTS/
+        // 标签固定来源全部跟随或保留。会写库,故进 --data-dir 门禁。
+        else if (arg == QLatin1String("--text-edit-flow"))
+            textEditFlow = true;
     }
     // 待办交互验收(--todo-flow):真实点击驱动整条链路,逻辑见 host/acceptance.cpp
     //
@@ -428,6 +465,8 @@ int main(int argc, char* argv[]) {
     if (stitchLiveFlow) runFlow([] { nb::runStitchLiveFlow(); });
     if (noteFlow) runFlow([] { nb::runNoteAcceptanceFlow(); });
     if (todoLayoutFlow) runFlow([&panel] { nb::runTodoLayoutFlow(panel); });
+    if (logRotateFlow) runFlow([] { nb::runLogRotateFlow(); });
+    if (textEditFlow) runFlow([] { nb::runTextEditFlow(); });
     // 贴图 DPI 探针(--pin-probe <path>):以四角色块的测试图建一枚贴图,渲染
     // 稳定后 grab() 存档再退出。回归件:2026-10-26 缩放缓存误用 DPR 画布,
     // 高分屏上贴图内容放大 1/d² 且裁边 —— 本探针在任何缩放比下都可断言

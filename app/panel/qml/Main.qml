@@ -475,6 +475,7 @@ Rectangle {
             && !tagEditorCard.visible && !tagRenameCard.visible
             && !todoComposerCard.visible && !bulkDeleteCard.visible
             && !bulkTagCard.visible && !clearDoneCard.visible
+            && !textEditCard.visible   // 正文编辑卡片:内部 TextArea 要吃掉方向键
     }
 
     /// 行数变化后把光标夹回有效范围(条目被删/筛选变化后行号会失效)。
@@ -736,6 +737,8 @@ Rectangle {
         if (root.tagEditId !== "") root.tagEditId = ""
         // 标签重命名卡片同理(新增时容易漏,漏了它会残留在翻译页上)
         if (tagRenameCard.visible) tagRenameCard.visible = false
+        // 正文编辑卡片(3.1):同样不能残留到翻译/设置页
+        if (textEditCard.visible) { textEditCard.visible = false; root.textEditId = "" }
         // 筛选浮层(Popup)渲染在 overlay 层,不清会浮在翻译页上
         if (root.filterPopupOpen) root.closeFilterPopup()
     }
@@ -809,6 +812,43 @@ Rectangle {
         }
         Core.showToast(to === "" ? "标签已删除"
                                  : "已重命名为「" + to + "」(" + resp.changed + " 条)")
+    }
+
+    // ---- 文本条目编辑(3.1) ----
+    /// 正在编辑的条目 id(空 = 卡片未打开)。
+    /// 用 id 而不是行号:编辑期间列表可能因 applyPage 变化,行号会失效。
+    property string textEditId: ""
+
+    /// 打开正文编辑卡片(右键菜单「编辑正文…」)。
+    /// 正文用**快照**(右键菜单上抛的 entry.text):按 id 回查只保证当前页,
+    /// 条目被翻页/筛掉时会拿到空串,一保存就把正文清空了(标签编辑同一教训)。
+    function openTextEditor(entry) {
+        if (!entry || entry.kind !== "text") return
+        textEditId = entry.entryId
+        textEditArea.text = entry.text || ""
+        textEditError.text = ""
+        textEditCard.visible = true
+        textEditArea.forceActiveFocus()
+        // 光标落在末尾而非全选:多数情况是"接着改",全选会让下一次按键清空全文
+        textEditArea.cursorPosition = textEditArea.text.length
+    }
+
+    /// 提交正文编辑。失败(空正文/类型变了/条目已删)**保留卡片与输入**,
+    /// 只把原因写到错误行 —— 与标签重命名卡片同一口径。
+    function commitTextEditor() {
+        const body = textEditArea.text
+        if (body.trim() === "") {
+            textEditError.text = "正文不能为空"
+            return
+        }
+        const resp = Entries.updateEntryText(textEditId, body)
+        if (resp.ok !== true) {
+            textEditError.text = resp.message ? resp.message : "保存失败"
+            return
+        }
+        textEditCard.visible = false
+        textEditId = ""
+        Core.showToast("已保存修改")
     }
 
     // ---- 待办(docs/05-todo.md §6) ----
@@ -2116,6 +2156,7 @@ Rectangle {
                     onContextMenuRequested: function(entry) { root.openEntryMenu(entry) }
                     onMenuDismissRequested: root.closeEntryMenu()
                     onTodoEditRequested: function(entry) { root.openTodoComposer(entry) }
+                    onTextEditRequested: function(entry) { root.openTextEditor(entry) }
                 }
             }
         }
@@ -2471,6 +2512,9 @@ Rectangle {
                 addAction("识别文字", function() { Core.ocrEntry(entry.entryId) })
                 addAction("翻译", function() { root.translateEntry(entry) })
             } else if (entry.kind !== "todo") {
+                // 文本条目:原地编辑正文(3.1)。图片走独立编辑器窗口,
+                // 待办走「编辑待办…」(组 0),这里只覆盖纯文本。
+                addAction("编辑正文…", function() { root.openTextEditor(entry) })
                 addAction("翻译", function() { root.translateEntry(entry) })
             }
             addSep()
@@ -2539,6 +2583,127 @@ Rectangle {
         enabled: visible
         acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
         onClicked: root.closeEntryMenu()
+    }
+
+    // ---- 文本正文编辑卡片(3.1) ----
+    // 与标签编辑卡片同一"屏障 + 居中卡片"模式。用 TextArea 而非 TextField:
+    // 文本条目常是多行(代码片段/多段笔记),单行编辑框放不下也看不到换行。
+    MouseArea {
+        id: textEditBarrier
+        anchors.fill: parent
+        z: 950
+        visible: textEditCard.visible
+        enabled: visible
+        acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+        onClicked: textEditCard.visible = false
+    }
+
+    Rectangle {
+        id: textEditCard
+        z: 960
+        visible: false
+        anchors.centerIn: parent
+        width: Math.min(520, root.width - 48)
+        height: Math.min(textEditLayout.implicitHeight + 2 * Theme.metrics.spacingMd,
+                         root.height - 80)
+        radius: Theme.metrics.radiusCard
+        color: Theme.colors.surface
+        border.width: Theme.metrics.borderWidth
+        border.color: Theme.colors.borderStrong
+
+        ColumnLayout {
+            id: textEditLayout
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: Theme.metrics.spacingMd
+            spacing: Theme.metrics.spacingSm
+
+            Text {
+                Layout.fillWidth: true
+                text: "编辑正文"
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.metrics.fontSection
+                font.weight: Font.DemiBold
+                color: Theme.colors.textPrimary
+            }
+            // 可滚动编辑区:长文本(上限 1MB)不能把卡片撑出屏幕。
+            // 用 ScrollView 而非手搓 Flickable:TextArea 的多行滚动/光标跟随
+            // 由控件自己处理,手写 Flickable + TextArea.flickable 在本项目
+            // 的 Basic 样式下拿不到稳定的 implicitHeight。
+            ScrollView {
+                Layout.fillWidth: true
+                Layout.preferredHeight: Math.min(textEditArea.implicitHeight + 16, 320)
+                clip: true
+                ScrollBar.vertical.policy: ScrollBar.AsNeeded
+
+                TextArea {
+                    id: textEditArea
+                    placeholderText: "正文不能为空"
+                    placeholderTextColor: Theme.colors.textTertiary
+                    color: Theme.colors.textPrimary
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.metrics.fontBody
+                    selectionColor: Theme.colors.accent
+                    selectedTextColor: Theme.colors.accentText
+                    wrapMode: TextArea.WrapAnywhere
+                    background: Rectangle {
+                        color: Theme.colors.surfaceSecondary
+                        radius: Theme.metrics.radiusInput
+                        border.width: Theme.metrics.borderWidth
+                        border.color: textEditArea.activeFocus ? Theme.colors.accent
+                                                              : Theme.colors.border
+                    }
+                    // 多行编辑:Ctrl+Enter 保存,单独 Enter 保持换行
+                    // (正文里换行是常态,用 Enter 保存会让用户无法输入多行)。
+                    Keys.onPressed: function(event) {
+                        if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+                                && (event.modifiers & Qt.ControlModifier)) {
+                            root.commitTextEditor()
+                            event.accepted = true
+                        } else if (event.key === Qt.Key_Escape) {
+                            textEditCard.visible = false
+                            event.accepted = true
+                        }
+                    }
+                }
+            }
+            // 错误行:仅在保存失败时占位,平时不占高度(同一 HintLabel 语言)。
+            Text {
+                id: textEditError
+                Layout.fillWidth: true
+                visible: text !== ""
+                text: ""
+                color: Theme.colors.error
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.metrics.fontCaption
+                wrapMode: Text.Wrap
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Theme.metrics.spacingSm
+                Text {
+                    text: "Ctrl+Enter 保存 · Esc 取消"
+                    color: Theme.colors.textTertiary
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.metrics.fontMicro
+                }
+                Item { Layout.fillWidth: true }
+                ThemedButton {
+                    variant: "secondary"
+                    size: "sm"
+                    text: "取消"
+                    onClicked: textEditCard.visible = false
+                }
+                ThemedButton {
+                    objectName: "textEditSave"   // 验收钩子
+                    variant: "primary"
+                    size: "sm"
+                    text: "保存"
+                    onClicked: root.commitTextEditor()
+                }
+            }
+        }
     }
 
     // ---- 标签编辑卡片(S5.2) ----

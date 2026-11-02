@@ -34,6 +34,8 @@ add_executable(nextboard WIN32
     src/app_font.cpp
     src/host/single_instance.cpp
     src/host/app_paths.cpp
+    src/host/log_rotate.cpp
+    src/host/log_rotate_flow.cpp
     src/host/auto_start.cpp
     src/host/auto_paste.cpp
     src/host/image_save.cpp
@@ -48,6 +50,7 @@ add_executable(nextboard WIN32
     src/host/editor_flow.cpp
     src/host/stitch_flow.cpp
     src/host/stitch_live_flow.cpp
+    src/host/text_edit_flow.cpp
     src/host/core_bridge.cpp
     src/host/memory_probe.cpp
     src/panel/panel_window.cpp

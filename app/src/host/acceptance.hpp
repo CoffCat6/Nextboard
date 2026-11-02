@@ -158,4 +158,23 @@ void runTodoLayoutFlow(PanelWindow& panel);
 /// 日志前缀 NOTE STEP*,失败行含 PASS/FAIL。
 void runNoteAcceptanceFlow();
 
+/// 日志轮转验收(--log-rotate-flow,`host/log_rotate`)。///
+/// 轮转出错的表现都很安静:永不滚动(磁盘被写满)、滚成多代(.log.1/.log.2/…
+/// 无限累积)、滚动时丢掉最后一条(崩溃前排障最关键的那条)—— 都不报错,只能靠断言。
+/// 在**临时目录**里用小阈值逼迫滚动,验证:未达阈值不动 / 跨阈值进归档 /
+/// 二次滚动覆盖不累积 / 打开前超限先滚动 / 累计起点取已有大小 / 文件缺失不崩。
+/// 纯文件操作,不写库、不碰真实日志,无需 --data-dir。日志前缀 LOGROTATE。
+void runLogRotateFlow();
+
+/// 文本条目编辑验收(--text-edit-flow,3.1):原地改写正文的端到端回归。
+///
+/// 失败模式全是**静默**的,故逐条钉住:
+///   ① 正文改了但 preview/byte_size 没跟 → 列表显示旧摘要、容量统计错;
+///   ② 正文改了但 FTS 没跟 → 搜新内容搜不到、搜旧内容却命中;
+///   ③ 编辑顺手清了标签/固定/来源 → 改个错字条目就"变了个样";
+///   ④ 空正文被接受 → 列表出现空卡片、行高塌陷;
+///   ⑤ 不存在的条目/非文本类型被误改。
+/// 会写库(播种 + 改写 + 删除),必须配 --data-dir。日志前缀 TEXT-EDIT。
+void runTextEditFlow();
+
 } // namespace nb
