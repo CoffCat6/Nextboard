@@ -52,14 +52,33 @@ pub(super) fn send(req: &HttpRequest, endpoint: &ProxyEndpoint) -> AppResult<Htt
 
     let status = response.status().as_u16();
     // 响应体上限沿用 WinHTTP 路径的常量，避免两条传输行为不一致
-    let body = response
-        .into_body()
-        .read_to_string()
-        .map_err(|err| AppError::Translate(format!("读取响应内容失败：{err}")))?;
-    if body.len() > MAX_RESPONSE_BYTES {
-        return Err(AppError::Translate(
-            "响应内容过大，已中止（接口可能返回了非预期内容）".into(),
-        ));
+    // ⚠️ 必须**增量**读(2026-11-03,外部审查 #36):原实现用 read_to_string() 一次性
+    //    把整个响应体读进内存,然后才比 MAX_RESPONSE_BYTES —— 上限变成"读完才查",
+    //    恶意服务端返回几个 GB 时进程先被撑爆。改为按块读、逐块累计,越界立刻停手
+    //    (与 WinHTTP 路径的语义拉齐)。
+    let mut body = String::new();
+    {
+        use std::io::Read;
+        let mut reader = response.into_body().into_reader();
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = reader
+                .read(&mut buf)
+                .map_err(|err| AppError::Translate(format!("读取响应内容失败：{err}")))?;
+            if n == 0 {
+                break;
+            }
+            if body.len() + n > MAX_RESPONSE_BYTES {
+                return Err(AppError::Translate(
+                    "响应内容过大，已中止（接口可能返回了非预期内容）".into(),
+                ));
+            }
+            // 只接受 UTF-8:这是流式读,无法回头做"非法字节替换",遇到非法字节
+            // 整体报错比写出乱码诚实。
+            let piece = std::str::from_utf8(&buf[..n])
+                .map_err(|_| AppError::Translate("响应内容不是合法 UTF-8".into()))?;
+            body.push_str(piece);
+        }
     }
     Ok(HttpResponse { status, body })
 }

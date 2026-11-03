@@ -474,11 +474,23 @@ mod winhttp {
                 WinHttpQueryDataAvailable(request.raw(), &mut available)
                     .map_err(|err| AppError::Translate(format!("读取响应长度失败：{err}")))?;
             }
-            let to_read = if available == 0 {
+            // ⚠️ 单块分配也要受**剩余预算**约束(2026-11-03,外部审查 #36)。
+            // 原实现直接 `vec![0u8; available]` —— 恶意/异常服务端只要在
+            // WinHttpQueryDataAvailable 里报一个巨大的可读长度,host 就会在
+            // "读完再查 4MB 上限"**之前**先分配这块内存。上限应该是**边读边守**,
+            // 不是事后核对。
+            let want = if available == 0 {
                 READ_CHUNK
             } else {
                 available as usize
             };
+            let remaining = MAX_RESPONSE_BYTES.saturating_sub(body.len());
+            if remaining == 0 {
+                return Err(AppError::Translate(
+                    "响应内容过大，已中止（接口可能返回了非预期内容）".into(),
+                ));
+            }
+            let to_read = want.min(remaining);
             let mut chunk = vec![0u8; to_read];
             let mut read: u32 = 0;
             // SAFETY：request 有效；chunk 为可写缓冲区，其容量即 dwnumberofbytestoread。

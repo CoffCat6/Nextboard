@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use blake3::Hasher;
 use clipboard_win::formats;
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 
 use crate::core::{notify_host, try_core, Core, WM_APP_CLIP_CHANGED};
 use crate::error::AppResult;
@@ -27,10 +27,13 @@ const WM_CLIPBOARDUPDATE: u32 = 0x031D;
 
 /// 启动事件驱动监听线程(消息窗口 + AddClipboardFormatListener)。
 pub fn start_monitor() {
-    std::thread::Builder::new()
+    // 启动失败(资源耗尽等)不是致命错误:核心其余功能照常可用,只是不记新内容。
+    let spawned = std::thread::Builder::new()
         .name("clipboard-monitor".into())
-        .spawn(monitor_thread)
-        .expect("启动剪贴板监听线程失败");
+        .spawn(monitor_thread);
+    if let Err(err) = spawned {
+        error!("启动剪贴板监听线程失败:{err}");
+    }
 }
 
 #[cfg(windows)]
@@ -55,7 +58,20 @@ fn monitor_thread() {
             return LRESULT(0);
         }
         if msg == WM_CLIPBOARDUPDATE {
-            handle_clipboard_update();
+            // ⚠️ **panic 边界**(2026-11-03 补):这是 `extern "system"` 函数,
+            //    panic 一旦穿出这个边界,Rust 规范要求直接 abort 整个进程 ——
+            //    ffi.rs 里 nb_* 入口的 catch_unwind 完全覆盖不到这里。
+            //    后果是"用户复制了某个东西,Nextboard 就消失",且不在崩溃日志里
+            //    留任何东西(托盘程序没有 stderr)。这里把它降级成一条 WARN:
+            //    监听线程活着,后续剪贴板事件照常处理。
+            //    注:catch_unwind 需要 UnwindSafe —— 本函数只读全局状态、无 &mut,
+            //    用 AssertUnwindSafe 是恰当的(与 ffi.rs 的用法同构)。
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                handle_clipboard_update,
+            ));
+            if outcome.is_err() {
+                warn!("剪贴板事件处理 panic(已捕获,监听线程继续):畸形剪贴板内容?");
+            }
             return LRESULT(0);
         }
         if msg == WM_DESTROY {
@@ -66,7 +82,14 @@ fn monitor_thread() {
     }
 
     unsafe {
-        let hinstance = GetModuleHandleW(None).expect("GetModuleHandleW 失败");
+        // ⚠️ 启动路径**不用 expect**(2026-11-03):线程内 panic 不 abort 进程,
+        //    但会静默杀死监听线程 —— 用户可见现象是"历史突然不记录了",日志在
+        //    stderr(托盘程序看不到)。改为记 error 并直接返回,与
+        //    spawn_thumbnail_backfill 的容错口径一致。
+        let Ok(hinstance) = GetModuleHandleW(None) else {
+            error!("GetModuleHandleW 失败,剪贴板监听未启动");
+            return;
+        };
         let class_name = windows::core::w!("nbcore_clip_monitor");
         let wc = WNDCLASSW {
             lpfnWndProc: Some(wndproc),
@@ -91,8 +114,14 @@ fn monitor_thread() {
             None,
             Some(hinstance.into()),
             None,
-        )
-        .expect("创建剪贴板监听消息窗口失败");
+        );
+        let hwnd = match hwnd {
+            Ok(h) => h,
+            Err(err) => {
+                error!("创建剪贴板监听消息窗口失败:{err},监听未启动");
+                return;
+            }
+        };
         let _hwnd: HWND = hwnd;
 
         info!("剪贴板监听线程就绪(事件驱动)");
@@ -332,15 +361,36 @@ fn decode_dib(dib: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
         return None;
     }
     // BI_BITFIELDS 的掩码紧跟头部(40 字节头时);V5 头(124)自带掩码字段
+    //
+    // ⚠️ **掩码区必须先验长度再切**(2026-11-03 修)。原实现无条件切 `&dib[40..56]`,
+    //    而校验只要求 `dib.len() >= header_size` —— 于是 `header_size ∈ 52..=55`
+    //    的载荷(截断的 BITMAPV2/V3 头)在这里 **切越界 panic**。
+    //    为什么这一条特别要紧:调用链是
+    //        DispatchMessageW → wndproc(unsafe extern "system") → handle_clipboard_update → 这里
+    //    panic 一旦穿出 `extern "system"` 边界,Rust 规范要求 **abort 整个进程**;
+    //    ffi.rs 里 nb_* 入口的 catch_unwind 覆盖不到 OS 回调这条路径,而
+    //    release profile 特意设了 panic = "unwind"(core/Cargo.toml)也救不了。
+    //    触发条件是"任何应用往剪贴板写了一份畸形 CF_DIB",不需要用户做任何事。
+    //    52..=55 的头拿不出完整 16 字节掩码:退回默认掩码即可 —— 这类载荷随后
+    //    必然在下面的 `dib.len() < expected` 被拒(行宽至少 4 字节)。
     let (r_mask, g_mask, b_mask, a_mask) = if header_size >= 52 {
-        read_masks(&dib[40..56])
+        if dib.len() >= 56 {
+            read_masks(&dib[40..56])
+        } else {
+            (0x00FF_0000, 0x0000_FF00, 0x0000_00FF, 0)
+        }
     } else if header_size == 40 && compression == BI_BITFIELDS && dib.len() >= 40 + 12 {
         read_masks(&dib[40..52])
     } else {
         (0x00FF_0000, 0x0000_FF00, 0x0000_00FF, 0)
     };
-    let row_size = ((width as usize * bpp as usize + 31) / 32) * 4;
-    let expected = header_size + row_size * height as usize;
+    // 行宽与总长度改用 checked 运算:这里同样跑在 wndproc 里(见上),debug 构建下
+    // 未检查的乘法一旦溢出就是 panic → abort;release 则是静默回绕成错误的 `expected`,
+    // 两种都不该发生。溢出按"拒绝解析"处理。
+    let row_size = (width as usize)
+        .checked_mul(bpp as usize)
+        .map(|bits| (bits + 31) / 32 * 4)?;
+    let expected = header_size.checked_add(row_size.checked_mul(height as usize)?)?;
     if dib.len() < expected {
         return None;
     }
@@ -884,7 +934,14 @@ pub fn encode_png_with(rgba: &[u8], width: u32, height: u32, fast: bool) -> AppR
 /// 打开状态丢失,微信等会碰剪贴板的程序易触发)。这里改为与文本写入同构的
 /// open(带重试)→ 单次 `SetClipboardData`;其余格式由系统为粘贴方自动合成。
 pub fn write_rgba_to_clipboard(rgba: &[u8], width: u32, height: u32) -> AppResult<()> {
-    let expected = (width as usize) * (height as usize) * 4;
+    // checked 乘法,与 encode_png_with(:851-854)同口径:未检查的乘法在 debug 构建下
+    // 会 panic(→ 若发生在 wndproc 线程即 abort),release 下静默回绕成错误的 expected。
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or_else(|| {
+            crate::error::AppError::InvalidInput(format!("尺寸过大:{width}x{height}"))
+        })?;
     if rgba.len() != expected {
         return Err(crate::error::AppError::InvalidInput(format!(
             "RGBA 长度 {} 与尺寸 {width}x{height} 不匹配",
@@ -1171,6 +1228,70 @@ mod tests {
         let big = ClipItem::Text("x".repeat(2048));
         assert!(!is_oversized(&small, &settings));
         assert!(is_oversized(&big, &settings));
+    }
+
+    /// 畸形 CF_DIB 回归(2026-11-03,外部审查 Blocker #1)。
+    ///
+    /// 原实现:掩码分支无条件切 `&dib[40..56]`,而校验只要求 `dib.len() >= header_size`。
+    /// `header_size = 52` 且载荷恰好 52 字节时切片越界 → panic → 穿出 wndproc 的
+    /// `extern "system"` 边界 → **abort 整个进程**(不需要用户做任何事,别的应用往
+    /// 剪贴板写一份畸形位图就够了)。这里把"宁可返回 None 也绝不 panic"钉死。
+    #[test]
+    fn decode_dib_rejects_truncated_header_without_panicking() {
+        // header_size = 52(V2 头),但只给了 52 字节 —— 掩码区不足 16 字节
+        let mut dib = vec![0u8; 52];
+        dib[0..4].copy_from_slice(&52u32.to_le_bytes()); // biSize
+        dib[4..8].copy_from_slice(&1i32.to_le_bytes()); // biWidth
+        dib[8..12].copy_from_slice(&1i32.to_le_bytes()); // biHeight
+        dib[12..14].copy_from_slice(&1u16.to_le_bytes()); // biPlanes
+        dib[14..16].copy_from_slice(&32u16.to_le_bytes()); // biBitCount
+        dib[16..20].copy_from_slice(&3u32.to_le_bytes()); // BI_BITFIELDS
+        assert!(decode_dib(&dib).is_none(), "截断头必须拒绝解析,而不是越界 panic");
+
+        // 53 / 54 / 55 同样在危险区(原实现切 &dib[40..56] 全部越界)
+        for n in 52usize..=55 {
+            let mut d = vec![0u8; n];
+            d[0..4].copy_from_slice(&(n as u32).to_le_bytes());
+            d[12..14].copy_from_slice(&1u16.to_le_bytes());
+            d[14..16].copy_from_slice(&32u16.to_le_bytes());
+            assert!(decode_dib(&d).is_none(), "header_size={n} 必须返回 None 而不 panic");
+        }
+    }
+
+    /// 合法头不得因为上面的长度校验而回归:40 / 56 / 124 三种都要照常解析。
+    #[test]
+    fn decode_dib_still_accepts_valid_headers() {
+        // 40 字节头 + 1x1 的 32bpp 像素行(BI_RGB)
+        let mut d40 = vec![0u8; 40 + 4];
+        d40[0..4].copy_from_slice(&40u32.to_le_bytes());
+        d40[4..8].copy_from_slice(&1i32.to_le_bytes());
+        d40[8..12].copy_from_slice(&1i32.to_le_bytes());
+        d40[12..14].copy_from_slice(&1u16.to_le_bytes());
+        d40[14..16].copy_from_slice(&32u16.to_le_bytes());
+        d40[16..20].copy_from_slice(&0u32.to_le_bytes()); // BI_RGB
+        let (rgba, w, h) = decode_dib(&d40).expect("40 字节头应解析成功");
+        assert_eq!((w, h), (1, 1));
+        assert_eq!(rgba.len(), 4);
+
+        // 自产自销:rgba_to_dibv5 的 124 字节 V5 头必须原样解得回来
+        let src: Vec<u8> = vec![10, 20, 30, 255, 40, 50, 60, 255];
+        let dib = rgba_to_dibv5(&src, 2, 1);
+        let (rgba, w, h) = decode_dib(&dib).expect("V5 头应解析成功");
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(rgba.len(), 8);
+    }
+
+    /// 尺寸溢出必须拒绝而不是 panic / 回绕。
+    #[test]
+    fn decode_dib_rejects_overflowing_dimensions() {
+        let mut dib = vec![0u8; 40 + 4];
+        dib[0..4].copy_from_slice(&40u32.to_le_bytes());
+        // 上限本来就是 1<<15,这里用一个远超上限的宽度:先被尺寸闸门拦掉。
+        dib[4..8].copy_from_slice(&(1i32 << 30).to_le_bytes());
+        dib[8..12].copy_from_slice(&(1i32 << 30).to_le_bytes());
+        dib[12..14].copy_from_slice(&1u16.to_le_bytes());
+        dib[14..16].copy_from_slice(&32u16.to_le_bytes());
+        assert!(decode_dib(&dib).is_none());
     }
 
     /// 图片大小上限改为按**编码后的 PNG** 判断的回归测试。

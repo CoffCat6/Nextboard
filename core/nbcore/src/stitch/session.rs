@@ -96,16 +96,43 @@ struct Session {
     overlap_ratio: i64,
     /// 是否已吸收过首帧。
     has_frame: bool,
+    /// 最后一次活动时间(创建或 append)。
+    ///
+    /// 为什么需要:会话持有整张结果图(百 MB 级),宿主若在"停止滚动"那一步崩溃
+    /// 或被强杀,就永远走不到 abort/finish —— 这些会话只能等进程退出才释放。
+    /// 有了这个时间戳,下次任何一次会话操作都能顺带回收超时的僵尸会话。
+    last_used: std::time::Instant,
 }
+
+/// 会话空闲多久算"僵尸":超过即在下一次会话操作时回收。
+///
+/// 5 分钟:正常长截图是**用户连续滚动**,帧间隔在百毫秒级;停下来 5 分钟还没结束,
+/// 只能是宿主崩了/用户放弃了。这个值同时是"结果图占着内存多久"的上界。
+const SESSION_IDLE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// 会话表。Mutex 内只做内存操作,持锁时间 = 一次帧拷贝,不涉及 IO。
 static SESSIONS: Mutex<Option<HashMap<String, Session>>> = Mutex::new(None);
 
 fn with_sessions<T>(f: impl FnOnce(&mut HashMap<String, Session>) -> T) -> AppResult<T> {
+    // ⚠️ 中毒要恢复(2026-11-03):把中毒映射成 Err 会让**长截图功能直到进程重启
+    // 都不可用**(持锁线程 panic 一次就够)。表内只有内存状态,恢复内部值是安全的;
+    // 与 translate/http.rs:307、ocr/rapid.rs 同一策略。
     let mut guard = SESSIONS
         .lock()
-        .map_err(|_| AppError::Internal("长截图会话表锁失败".into()))?;
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let map = guard.get_or_insert_with(HashMap::new);
+    // 顺带回收僵尸会话(见 Session::last_used):宿主崩溃/强杀时永远不会有人来
+    // 调 abort,这些会话的结果图会一直占着内存到进程退出。回收放在**每次操作**
+    // 而不是后台线程 —— 零额外线程、零额外锁,且"有操作就说明活着,顺手清一次"。
+    let before = map.len();
+    map.retain(|_, s| s.last_used.elapsed() < SESSION_IDLE_TTL);
+    if map.len() != before {
+        log::warn!(
+            "长截图:回收 {} 个空闲超 {:?} 的僵尸会话(宿主未 abort)",
+            before - map.len(),
+            SESSION_IDLE_TTL
+        );
+    }
     Ok(f(map))
 }
 
@@ -175,6 +202,7 @@ pub fn begin_session(session: &str, spec: SessionSpec) -> AppResult<()> {
                 max_height: effective,
                 overlap_ratio: spec.overlap_ratio.clamp(1, 20),
                 has_frame: false,
+                last_used: std::time::Instant::now(),
             },
         );
         Ok(())
@@ -196,6 +224,10 @@ pub fn append_frame(session: &str, rgba: Vec<u8>, width: u32, height: u32) -> Ap
                 "长截图会话 {session} 不存在(未 begin 或已结束)"
             )));
         };
+        // 刷新活动时间:回收按它判定僵尸会话(见 Session::last_used)。
+        // 放在 get_mut 之后、任何可能提前 return 的校验之前 —— 一次真实 append
+        // 就说明会话活着,哪怕这帧随后因尺寸不符被拒。
+        state.last_used = std::time::Instant::now();
 
         // ---- 尺寸校验:不符就报错,绝不静默丢帧 ----
         // 旧实现只比宽度;高度变化(选区被改/取错区域)会让「重叠 = min(prev_h-k, next_h)」

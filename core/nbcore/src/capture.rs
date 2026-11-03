@@ -85,8 +85,11 @@ impl ScreenCapturer for XCapCapturer {
                 is_primary: m.is_primary().unwrap_or(false),
             })
             .collect();
-        let picked_name = pick_target(&infos, target)
-            .map(|m| m.name.clone())
+        // 匹配必须**按索引回到 `all`,不能再按名字 find 一次**(2026-11-03,
+        // 外部审查 #34):name 为空时(`target.name` 空 → 走坐标回退)按名字找会
+        // 取到"第一台空名显示器"而不是坐标匹配到的那台,多台无名显示器时取错屏。
+        // `infos` 与 `all` 一一对应(同一轮枚举、同序 collect),故下标可直接用。
+        let picked_index = pick_target_index(&infos, target)
             .ok_or_else(|| {
                 AppError::Internal(format!(
                     "未找到目标显示器 (name={:?}, {}, {})",
@@ -95,7 +98,7 @@ impl ScreenCapturer for XCapCapturer {
             })?;
         let monitor = all
             .into_iter()
-            .find(|m| m.name().ok() == Some(picked_name.clone()))
+            .nth(picked_index)
             .ok_or_else(|| AppError::Internal("目标显示器已消失".into()))?;
         let image = monitor.capture_image()?;
         let (width, height) = (image.width(), image.height());
@@ -123,12 +126,25 @@ pub fn monitors() -> Vec<MonitorInfo> {
 ///
 /// 抽成纯函数是为了可测:配对规则是"多屏位置/分辨率混乱"的根因所在,
 /// 必须能脱离真实显示器直接断言。
+/// 引用版包装:只给单测用(capture() 走 pick_target_index)。
+/// 产品路径不再经过它 —— 保留是为了让"配对规则"的既有断言不必改写。
+#[cfg(test)]
 fn pick_target<'a>(list: &'a [MonitorInfo], target: &MonitorInfo) -> Option<&'a MonitorInfo> {
+    pick_target_index(list, target).map(|i| &list[i])
+}
+
+/// 同 pick_target,但返回**下标**。
+///
+/// 为什么要有它(2026-11-03,外部审查 #34):capture() 需要回到
+/// xcap::Monitor::all() 的原始 Vec 上取显示器,而 MonitorInfo 与 Monitor 之间
+/// 只有**位置**对应关系。此前用"选中的 name 再 find 一次"来桥接,于是 name 为空
+/// (坐标回退分支)时会去找"第一台空名显示器" —— 多台无名显示器时取错屏。
+/// 返回下标后,那个桥接不再经过 name,也就没有这个坑。
+fn pick_target_index(list: &[MonitorInfo], target: &MonitorInfo) -> Option<usize> {
     if !target.name.is_empty() {
-        return list.iter().find(|m| m.name == target.name);
+        return list.iter().position(|m| m.name == target.name);
     }
-    list.iter()
-        .find(|m| m.x == target.x && m.y == target.y)
+    list.iter().position(|m| m.x == target.x && m.y == target.y)
 }
 
 /// 宿主侧一个屏幕的描述(Qt `QScreen` 的口径),用于与核心的显示器配对。

@@ -1507,17 +1507,36 @@ fn migrate_legacy_hotkeys(value: &mut serde_json::Value) {
     info!("已迁移旧快捷键配置 hotkeyToggle → hotkeys.toggleMain（{legacy}）");
 }
 
+/// save 的进程内串行锁。
+///
+/// 为什么需要(2026-11-03):宿主可能从两个线程并发 `save_settings`(UI 线程的动作 +
+/// QtConcurrent worker)。`std::fs::write` 对**同一个** tmp 路径并发写会互相覆盖,
+/// rename 上去的可能是半截内容 —— 而 `load()` 对损坏配置的整体回退是"全部设置重置",
+/// 正是本文件注释竭力避免的事故。
+/// 两道保险:① tmp 名带 uuid(不同调用不同文件,互不覆盖);
+///          ② 加一把进程内锁(同一进程内的"读-改-写"顺序稳定)。
+static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// 写回设置并落盘(结构同 load:外层 `{"settings": …}`,原子写防半截文件)。
 pub fn save(data_dir: &Path, settings: &Settings) -> AppResult<()> {
+    // 锁中毒不该让设置功能永久失效:拿回内部值继续(与 translate/http.rs 同一策略)。
+    let _guard = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::fs::create_dir_all(data_dir)?;
     let value = serde_json::to_value(settings)
         .map_err(|err| AppError::Internal(format!("设置序列化失败: {err}")))?;
     let text = serde_json::to_string_pretty(&serde_json::json!({ "settings": value }))
         .map_err(|err| AppError::Internal(format!("设置序列化失败: {err}")))?;
     let path = data_dir.join(CONFIG_FILE);
-    let tmp = data_dir.join(format!("{CONFIG_FILE}.tmp"));
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, &path)?;
+    // tmp 名带唯一后缀:并发写各自落到自己的文件,不会互相截断。
+    // (clip.rs 的 write_atomic 已是这个写法,这里拉齐口径。)
+    let tmp = data_dir.join(format!("{CONFIG_FILE}.{}.tmp", uuid::Uuid::now_v7()));
+    std::fs::write(&tmp, &text)?;
+    // Windows 的 rename 不覆盖已存在目标:先删旧文件再改名(同 clip::write_atomic)。
+    let _ = std::fs::remove_file(&path);
+    if let Err(err) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err.into());
+    }
     Ok(())
 }
 

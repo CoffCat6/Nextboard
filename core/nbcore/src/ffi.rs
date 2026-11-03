@@ -26,7 +26,12 @@ const NB_OK: i32 = 0;
 const NB_ERR: i32 = -1;
 
 /// FFI 层已初始化标志(nb_init 只允许一次,nb_call 前必须已初始化)。
+/// 只在**初始化成功之后**置位;失败路径会放回 false,允许调用方重试。
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+/// 已 shutdown 标志:OnceLock 无法清空,所以 shutdown 是**一次性**的,
+/// 之后再 nb_init 必须明确拒绝(否则会造出"标志位开、CORE 是旧实例"的僵尸态)。
+static SHUTDOWN_DONE: AtomicBool = AtomicBool::new(false);
 
 // ---------- 基础导出 ----------
 
@@ -52,7 +57,21 @@ pub extern "C" fn nb_abi_version() -> u32 {
 #[no_mangle]
 pub unsafe extern "C" fn nb_init(config_json: *const c_char) -> i32 {
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        if INITIALIZED.swap(true, Ordering::SeqCst) {
+        // ⚠️ 标志位必须在**初始化成功之后**才置起来(2026-11-03 修)。
+        // 原实现在一切可能失败的操作之前 swap(true),于是 Core::init 一旦失败
+        // (数据目录不可写 / settings load 失败 / db 被占用),INITIALIZED 永久为
+        // true:重试 nb_init 永远返回"已初始化",而 nb_call 能过初始化闸门却拿到
+        // "核心未初始化" —— 整个进程进入**不可恢复的楔死状态**,只能重启。
+        // 改为 CAS:并发重复调用仍然严格只放行一个,失败路径保持 false。
+        if SHUTDOWN_DONE.load(Ordering::SeqCst) {
+            return Err(AppError::Internal(
+                "nbcore 已 shutdown,本进程内不能再初始化(需重启宿主)".into(),
+            ));
+        }
+        if INITIALIZED
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
             return Err(AppError::Internal("nbcore 已初始化".into()));
         }
         let text = cstr_to_string(config_json)?;
@@ -90,6 +109,11 @@ pub unsafe extern "C" fn nb_init(config_json: *const c_char) -> i32 {
         Ok(())
     }))
     .unwrap_or_else(|_| Err(AppError::Panicked("nb_init panic".into())));
+    // 失败(含 panic)一律把闸门放回 false,让调用方能重试 ——
+    // 否则就是上面注释说的那个"楔死"状态。
+    if result.is_err() {
+        INITIALIZED.store(false, Ordering::SeqCst);
+    }
     report(result)
 }
 
@@ -195,7 +219,12 @@ pub unsafe extern "C" fn nb_set_notify_hwnd(hwnd: u64) {
 #[no_mangle]
 pub unsafe extern "C" fn nb_shutdown() {
     let _ = std::panic::catch_unwind(|| {
-        INITIALIZED.store(false, Ordering::SeqCst);
+        // ⚠️ 这里**不能**把 INITIALIZED 置回 false(2026-11-03 修)。
+        // Core 存在进程级 OnceLock 里,OnceLock 无法清空;若把闸门开回去,
+        // 下一次 nb_init 会走到 CORE.set 失败,留下"标志位=true、CORE 是旧实例、
+        // 监听线程全死"的僵尸状态 —— 比直接拒绝更糟。
+        // 现在的语义:**shutdown 是一次性的**(与进程同寿),再 nb_init 明确报错。
+        SHUTDOWN_DONE.store(true, Ordering::SeqCst);
         crate::core::Core::shutdown();
     });
 }
@@ -1011,8 +1040,15 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
             let tag = str_opt(req, "tag");   // S5.2 标签筛选
             // source 筛选(S5.1):只看截图/翻译结果等;缺省与空串都视为不过滤
             let source = str_opt(req, "source");
-            let limit = req.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
-            let offset = req.get("offset").and_then(|v| v.as_i64()).unwrap_or(0);
+            // ⚠️ 必须钳制(2026-11-03):SQLite 的 `LIMIT -1` 语义是**无上限**,
+            // 传 -1 会把整表读进内存(大历史下即内存事故);offset 负值同样无意义。
+            // 上限 1000 远高于宿主一次翻页的用量,不影响任何真实调用。
+            let limit = req
+                .get("limit")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(50)
+                .clamp(0, 1000);
+            let offset = req.get("offset").and_then(|v| v.as_i64()).unwrap_or(0).max(0);
             let db = core.db.lock()?;
             let (items, total) = entry::list(
                 &db,
@@ -1526,8 +1562,15 @@ fn dispatch(method: &str, req: &serde_json::Value) -> Result<serde_json::Value, 
                     )))
                 }
             };
-            let limit = req.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
-            let offset = req.get("offset").and_then(|v| v.as_i64()).unwrap_or(0);
+            // ⚠️ 必须钳制(2026-11-03):SQLite 的 `LIMIT -1` 语义是**无上限**,
+            // 传 -1 会把整表读进内存(大历史下即内存事故);offset 负值同样无意义。
+            // 上限 1000 远高于宿主一次翻页的用量,不影响任何真实调用。
+            let limit = req
+                .get("limit")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(50)
+                .clamp(0, 1000);
+            let offset = req.get("offset").and_then(|v| v.as_i64()).unwrap_or(0).max(0);
             let db = core.db.lock()?;
             let (items, total) = todo::list(
                 &db,

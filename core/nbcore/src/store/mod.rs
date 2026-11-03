@@ -8,7 +8,7 @@ pub mod todo_note;
 use std::path::Path;
 use std::sync::Mutex;
 
-use crate::error::{AppError, AppResult};
+use crate::error::AppResult;
 
 /// 共享数据库连接。MVP 用互斥锁串行化访问(设计文档 §5.2)。
 pub struct Db(pub Mutex<rusqlite::Connection>);
@@ -16,9 +16,12 @@ pub struct Db(pub Mutex<rusqlite::Connection>);
 impl Db {
     /// 加锁获取连接;锁中毒(持锁线程 panic)映射为内部错误而非进程崩溃。
     pub fn lock(&self) -> AppResult<std::sync::MutexGuard<'_, rusqlite::Connection>> {
-        self.0
-            .lock()
-            .map_err(|_| AppError::Internal("数据库连接锁中毒".into()))
+        // ⚠️ 中毒**必须恢复**而不是映射成永久错误(2026-11-03 修):把中毒映射为
+        // Err 意味着"持锁线程 panic 一次 → 数据库功能直到进程重启全不可用" ——
+        // 而本库的设计恰恰是"崩了也要能继续用"。SQLite 连接本身在持锁线程 panic
+        // 时并未处于写到一半的状态(每次调用自成事务),恢复内部值是安全的。
+        // 与 translate/http.rs:307、ocr/rapid.rs 的处理同一策略。
+        Ok(self.0.lock().unwrap_or_else(|e| e.into_inner()))
     }
 }
 
@@ -64,6 +67,11 @@ pub fn open(path: &Path) -> AppResult<rusqlite::Connection> {
     // WAL 默认 synchronous=FULL,每个事务 commit 都 fsync;NORMAL 在 WAL 下断电
     // 只丢最后几笔事务、不损坏库 —— 剪贴板历史完全可接受,换掉每次入库的同步盘。
     conn.pragma_update(None, "synchronous", "NORMAL")?;
+    // busy_timeout:进程内已有 Mutex 串行化,但备份恢复、外部工具、以及
+    // **单实例门禁失效时的第二个进程**都会摸同一个库 —— 没有超时的话
+    // WAL 写冲突会立刻返回 SQLITE_BUSY(表现为"复制了但历史里没有")。
+    // 3s 覆盖一次正常事务,又不会让 UI 卡到可见。
+    conn.busy_timeout(std::time::Duration::from_millis(3000))?;
     migrate(&mut conn)?;
     Ok(conn)
 }

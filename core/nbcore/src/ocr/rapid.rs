@@ -161,7 +161,11 @@ fn idle_deadline_lock() -> std::sync::MutexGuard<'static, Option<Instant>> {
 
 /// 看门狗到点:仅当引擎仍在且空闲已满 TTL 才释放。
 fn reap_idle_engine() {
-    let Ok(mut session) = SESSION.lock() else { return };
+    // 中毒恢复而非放弃:持锁线程 panic 一次就让 OCR 永久不可用是不可接受的
+    // (与 idle_deadline_lock 同一策略,见 :156)。
+    let mut session = SESSION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if session.engine.is_some()
         && session.last_used.is_some_and(|t| t.elapsed() >= IDLE_TTL)
     {
@@ -357,9 +361,11 @@ fn with_engine<T>(f: impl FnOnce(&mut crate::ocr::rapid::RapidOcr) -> AppResult<
         .map(|s| s.ocr_profile.clone())
         .unwrap_or_default();
 
+    // 中毒恢复(见 reap_idle_engine):OCR 是用户高频动作,不该因为一次 panic
+    // 就永久失效到进程重启。
     let mut session = SESSION
         .lock()
-        .map_err(|_| AppError::Internal("OCR session 锁已污染".into()))?;
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     // 空闲超时 → 销毁(session 生命周期唯一出口之一)。
     if let (Some(last), Some(ttl)) = (session.last_used, ttl) {
@@ -397,13 +403,15 @@ pub fn release_session() {
     if idle_deadline_lock().take().is_some() {
         IDLE_KICK.notify_all();
     }
-    if let Ok(mut session) = SESSION.lock() {
-        if session.engine.is_some() {
-            info!("OCR session 已显式释放");
-        }
-        session.engine = None;
-        session.last_used = None;
+    // 中毒恢复:release 是"尽量释放资源"的动作,拿到锁就清,拿不到(中毒)也清。
+    let mut session = SESSION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if session.engine.is_some() {
+        info!("OCR session 已显式释放");
     }
+    session.engine = None;
+    session.last_used = None;
 }
 
 /// RapidOCR 识别入口(签名与 `system::recognize_with` 对齐,便于 `mod.rs` 分派)。

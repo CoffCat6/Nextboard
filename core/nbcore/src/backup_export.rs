@@ -35,6 +35,18 @@ const EXPORT_BATCH: i64 = 500;
 /// 解包暂存目录名(数据目录下)。固定名:上次运行的残留会被下次开跑先清掉。
 const STAGING_DIR: &str = "restore-staging";
 
+/// 解包阶段允许写入的**总字节上限**(zlib 解压后计)。
+///
+/// 为什么需要(2026-11-03,外部审查 #21):`stage_backup` 此前只校验条目名与
+/// schema 版本,没有任何总量限制 —— 一个几十 MB 的 zip bomb(高压缩比条目)
+/// 可以在解包阶段写出数十 GB,把用户磁盘写满。备份包本身是既定的不可信输入
+/// (恶意/损坏的备份文件),这条闸门和 `enclosed_name` 是同一层的防护。
+///
+/// 2GB 的取舍:本仓实测最重的用户数据是剪贴板图片 blob(单张 4K PNG 数 MB),
+/// 万条历史的备份包解包后仍在数百 MB 量级;2GB 留足余量,又不至于让"磁盘写满"
+/// 变成一次解包就能做到的事。
+const MAX_UNPACK_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // 备份
 // ---------------------------------------------------------------------------
@@ -732,6 +744,8 @@ fn stage_backup(zip_path: &Path, data_dir: &Path) -> AppResult<StagedBackup> {
     let staged_blobs = staging_root.join("blobs");
     let mut blob_count = 0usize;
     let mut has_db = false;
+    // 累计已解出字节数(见 MAX_UNPACK_BYTES)。
+    let mut unpacked: u64 = 0;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|err| {
             AppError::Internal(format!("读取 zip 条目失败: {err}"))
@@ -754,8 +768,18 @@ fn stage_backup(zip_path: &Path, data_dir: &Path) -> AppResult<StagedBackup> {
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent)?;
             }
+            // 逐块拷贝并累计:只用 io::copy 拿不到增量,等写完再判就晚了
+            // (磁盘已经被写满)。超限立即中止并删掉半截文件。
             let mut out = std::fs::File::create(&target)?;
-            std::io::copy(&mut entry, &mut out)?;
+            let copied = copy_with_budget(&mut entry, &mut out, &mut unpacked)?;
+            if !copied {
+                let _ = std::fs::remove_file(&target);
+                let _ = std::fs::remove_dir_all(&staging_root);
+                return Err(AppError::InvalidInput(format!(
+                    "备份解包超过 {} GB 上限(疑似 zip bomb 或备份已损坏),已中止",
+                    MAX_UNPACK_BYTES / (1024 * 1024 * 1024)
+                )));
+            }
             if rel == Path::new("clipboard.db") {
                 has_db = true;
             } else {
@@ -955,6 +979,13 @@ fn import_snapshot(
         set
     };
 
+    // 待搬文件清单:**先记后搬**(2026-11-03 修,外部审查 #22)。
+    // 原实现在 tx.commit() **之前**就 copy_blob,事务若失败(唯一约束 / 磁盘满),
+    // 已经搬过去的文件就成了孤儿 —— 库里没有对应条目,文件却占着磁盘,
+    // 且下次导入会因 hash 不同再搬一份。改为"循环里只记路径,commit 成功后再搬":
+    // 事务失败时什么都没落地;commit 成功后的搬迁失败只影响"图片缺失"(可重导)。
+    let mut pending_blobs: Vec<(PathBuf, PathBuf)> = Vec::new();
+
     let tx = conn.transaction()?;
     for row in &rows {
         // 去重口径 = 内容 hash(文本=正文 blake3,图片=png blake3,待办="todo:<id>")。
@@ -978,18 +1009,34 @@ fn import_snapshot(
             .map(|p| Path::new(p).is_absolute())
             .unwrap_or(false);
         if let Some(src_rel) = matched_rel_path(&blob_index, &row.id) {
+            // 三条分支里只有第三条的 dst 直接来自**备份库内容**(blob_path 列),
+            // 必须净化 —— 见 safe_blob_rel。前两条的源头是 zip 条目名(已过
+            // enclosed_name),同样再滤一遍:统一口径,不依赖"这个分支是安全的"的记忆。
             let main_dst = if remap {
-                rename_stem(&src_rel, &row.id, &new_id)
+                Some(rename_stem(&src_rel, &row.id, &new_id))
             } else if is_absolute {
-                src_rel.clone()
+                Some(src_rel.clone())
             } else {
-                PathBuf::from(row.blob_path.as_deref().unwrap_or_default())
+                safe_blob_rel(row.blob_path.as_deref().unwrap_or_default())
             };
-            if remap || is_absolute {
-                blob_path = Some(main_dst.to_string_lossy().replace('\\', "/"));
-            }
-            if copy_blob(&staged.blobs, &blobs_dir, &src_rel, &main_dst) {
-                blob_count += 1;
+            match main_dst {
+                Some(dst) => {
+                    if remap || is_absolute {
+                        blob_path = Some(dst.to_string_lossy().replace('\\', "/"));
+                    }
+                    pending_blobs.push((src_rel.clone(), dst));
+                }
+                None => {
+                    // blob_path 非法(绝对路径 / 含 .. / 空):不搬文件,计入缺图。
+                    // 条目本身照常入库(文本、待办本来就没有 blob;图片退化为缺图),
+                    // 但 blob_path 置空,不留一个指向任意位置的路径在库里。
+                    log::warn!(
+                        "import_snapshot: 条目 {} 的 blob_path 非法,已跳过该文件并清空路径",
+                        row.id
+                    );
+                    blob_missing += 1;
+                    blob_path = None;
+                }
             }
             // 缩略图等其它同前缀文件:同改名规则逐个搬(未重铸时保持 staged 相对路径)。
             for other in blob_files_with_stem(&blob_index, &row.id) {
@@ -1001,9 +1048,7 @@ fn import_snapshot(
                 } else {
                     other.clone()
                 };
-                if copy_blob(&staged.blobs, &blobs_dir, other, &other_dst) {
-                    blob_count += 1;
-                }
+                pending_blobs.push((other.clone(), other_dst));
             }
         } else if row.kind == "image" {
             // 图片但 staged 里找不到文件:保留原路径(可能是仍可用的绝对路径),只计数。
@@ -1087,6 +1132,12 @@ fn import_snapshot(
         imported += 1;
     }
     tx.commit()?;
+    // ---- 事务已落地,现在才动文件(见 pending_blobs 的说明)----
+    for (src_rel, dst_rel) in &pending_blobs {
+        if copy_blob(&staged.blobs, &blobs_dir, src_rel, dst_rel) {
+            blob_count += 1;
+        }
+    }
     drop(staged_conn);
     let _ = std::fs::remove_dir_all(&staged.dir);
 
@@ -1308,9 +1359,95 @@ fn rename_stem(rel: &Path, old_id: &str, new_id: &str) -> PathBuf {
     }
 }
 
+/// 带总量预算的流式拷贝:返回 `false` 表示累计字节数已越过 `MAX_UNPACK_BYTES`。
+///
+/// 为什么不直接用 `std::io::copy`:它不暴露增量,等它返回时磁盘已经被写满了 ——
+/// 而 zip bomb 的攻击面恰恰是"写满磁盘"。按块拷并逐个累计才能在越界的那一块
+/// **立刻**停手(见 stage_backup 里的调用点)。
+fn copy_with_budget(
+    src: &mut impl std::io::Read,
+    dst: &mut impl std::io::Write,
+    total: &mut u64,
+) -> AppResult<bool> {
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = match src.read(&mut buf) {
+            Ok(0) => return Ok(true),
+            Ok(n) => n,
+            Err(err) => return Err(err.into()),
+        };
+        *total = total.saturating_add(n as u64);
+        if *total > MAX_UNPACK_BYTES {
+            return Ok(false);
+        }
+        dst.write_all(&buf[..n])?;
+    }
+}
+
+/// 把备份库里的 blob_path 列净化为可安全 join 的相对路径。
+///
+/// 为什么需要(2026-11-03 修,外部审查 Blocker #2):stage_backup 对 zip **条目名**
+/// 做了 enclosed_name() 防护,但 import_snapshot 里 blob 的**目标路径**取自
+/// 此备份 clip_entries.blob_path 列 —— 那是**数据**,不经过任何路径防护。
+/// 恶意备份只需放一行
+///   blob_path = "../../../../Users/<user>/AppData/Roaming/.../Startup/x.png"
+/// 再把任意字节塞进 blobs/<id>.png,导入即写用户目录任意位置。
+/// ("导入来源不明的备份"正是本功能既定的威胁模型,不是假想场景。)
+///
+/// 判定:必须相对、且不含 .. 或根/盘符组件。不合格返回 None,
+/// 调用方跳过并计入 blob_missing(不静默丢弃 —— 计数会随结果回报给用户)。
+fn safe_blob_rel(stored: &str) -> Option<PathBuf> {
+    if stored.trim().is_empty() {
+        return None;
+    }
+    let path = Path::new(stored);
+    if path.is_absolute() || path.has_root() {
+        return None;
+    }
+    let mut clean = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::Normal(part) => clean.push(part),
+            // CurDir 无害(但没必要保留);ParentDir / RootDir / Prefix 一律拒绝
+            std::path::Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    if clean.as_os_str().is_empty() {
+        None
+    } else {
+        Some(clean)
+    }
+}
+
 /// 把 staged blobs 里的文件按目标相对路径拷进线上 blobs 目录;成功返回 true。
+///
+/// dst_rel 可能来自备份库内容,调用方必须先过 safe_blob_rel;这里再做一道
+/// 规范化后的 starts_with 断言兜底 —— 两道都过才落盘(纵深防御:将来若有人
+/// 新增调用点忘了净化,这里仍然拦得住)。
 fn copy_blob(staged_blobs: &Path, live_blobs: &Path, src_rel: &Path, dst_rel: &Path) -> bool {
     let dst = live_blobs.join(dst_rel);
+    // 兜底断言:normalize 后必须仍在 blobs 目录内。
+    // (不引入外部 crate,按字面组件比较即可 —— 上面已拒绝过 .. 与根前缀。)
+    let mut normalized = PathBuf::new();
+    for comp in dst.components() {
+        match comp {
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    if !normalized.starts_with(live_blobs) {
+        log::warn!(
+            "import_snapshot: 拒绝越界的 blob 目标路径 {}(基底 {}),已跳过",
+            dst.display(),
+            live_blobs.display()
+        );
+        return false;
+    }
+    let dst = normalized;
     if let Some(parent) = dst.parent() {
         if std::fs::create_dir_all(parent).is_err() {
             return false;
@@ -1827,6 +1964,108 @@ mod tests {
         drop(conn_b);
         std::fs::remove_dir_all(&dir_a).unwrap();
         std::fs::remove_dir_all(&dir_b).unwrap();
+    }
+
+    /// 回归(2026-11-03,外部审查 Blocker #2):备份**库内容**里的 blob_path 必须净化。
+    ///
+    /// stage_backup 对 zip 条目名有 enclosed_name 防护,但 import_snapshot 的 blob
+    /// 目标路径取自备份库的 clip_entries.blob_path 列 —— 那是数据,不经过任何路径
+    /// 防护。恶意备份放一行 ../../<某处> 就能写到 blobs 目录之外。
+    /// 本测试直接构造这种备份并断言:文件没有被写出目录、条目仍入库、路径被清空。
+    #[test]
+    fn import_rejects_path_traversal_in_blob_path_column() {
+        // 本测试要在**目录之外**观察"有没有被写出文件",所以自建一个隔离的父目录:
+        // 直接看 target/tmp 会被**并行运行的其他测试**干扰(clipboard.db-shm/-wal
+        // 随时出现)。观察范围严格限定在本测试自己的 root 内。
+        let root = temp_dir("trav-root");
+        let dir_a = root.join("a");
+        let dir_b = root.join("b");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+        let mut conn_a = crate::store::open(&dir_a.join("clipboard.db")).unwrap();
+        let conn_b = crate::store::open(&dir_b.join("clipboard.db")).unwrap();
+
+        // 备份侧:一条图片条目,blob_path 指向 blobs 目录之外(dir_a 之上两层)。
+        insert_entry(
+            &conn_b,
+            "evil1",
+            "image",
+            None,
+            Some("../../escaped.png"),
+            "h-evil",
+            1_700_000_000_000,
+        );
+        // staged 里得真有一个同 id 的文件,才会走到 copy 分支。
+        write_blob(&dir_b, "evil1.png", b"evil-bytes");
+        let zip = dir_b.join("evil.zip");
+        backup_snapshot(&conn_b, &dir_b, &zip).unwrap();
+
+        // 观察面:root 下、a/blob 之外的全部文件(= 任何"逃出去"的落点)。
+        fn scan(root: &Path, allowed: &Path, out: &mut Vec<PathBuf>) {
+            let Ok(rd) = std::fs::read_dir(root) else { return };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    scan(&p, allowed, out);
+                } else if !p.starts_with(allowed) {
+                    out.push(p);
+                }
+            }
+        }
+        let blobs_a = dir_a.join("blobs");
+        let mut before: Vec<PathBuf> = Vec::new();
+        scan(&root, &blobs_a, &mut before);
+
+        let out = import_snapshot(&mut conn_a, &dir_a, &zip).unwrap();
+
+        let mut after: Vec<PathBuf> = Vec::new();
+        scan(&root, &blobs_a, &mut after);
+        let fresh: Vec<&PathBuf> = after.iter().filter(|p| !before.contains(p)).collect();
+        assert!(
+            fresh.is_empty(),
+            "blob 被写到 blobs 目录之外(zip-slip 变体): {fresh:?}"
+        );
+
+        // 条目本身仍导入(不因一个坏 blob 丢掉用户数据),但 blob_path 被清空、
+        // 并计入 blob_missing —— 计数要能被 UI 回报,不能静默吞掉。
+        assert_eq!(out.imported, 1);
+        assert!(out.blob_missing >= 1, "越界路径应计入 blob_missing");
+        let stored: Option<String> = conn_a
+            .query_row(
+                "SELECT blob_path FROM clip_entries WHERE hash='h-evil'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(stored.is_none(), "越界 blob_path 必须被清空,实际 {stored:?}");
+
+        drop(conn_a);
+        drop(conn_b);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// safe_blob_rel 的表驱动断言(不依赖 io,纯判定逻辑)。
+    #[test]
+    fn safe_blob_rel_accepts_only_clean_relative_paths() {
+        use super::safe_blob_rel;
+        // 合法:相对、不含 ..
+        assert_eq!(
+            safe_blob_rel("2026-11/abc.png"),
+            Some(PathBuf::from("2026-11/abc.png"))
+        );
+        assert_eq!(safe_blob_rel("abc.png"), Some(PathBuf::from("abc.png")));
+        assert_eq!(
+            safe_blob_rel("./2026-11/abc.png"),
+            Some(PathBuf::from("2026-11/abc.png")),
+            "CurDir 应被剥掉而非拒绝"
+        );
+        // 非法:穿越 / 绝对 / 盘符 / 空
+        assert_eq!(safe_blob_rel("../../escaped.png"), None);
+        assert_eq!(safe_blob_rel("2026-11/../../../x.png"), None);
+        assert_eq!(safe_blob_rel("/etc/passwd"), None);
+        assert_eq!(safe_blob_rel("C:\\Windows\\x.png"), None);
+        assert_eq!(safe_blob_rel(""), None);
+        assert_eq!(safe_blob_rel("   "), None);
     }
 }
 
