@@ -1,5 +1,6 @@
 #include "capture/smart_capture.hpp"
 
+#include <QDebug>
 #include <QHash>
 #include <limits>
 #include <algorithm>
@@ -555,6 +556,12 @@ QStringList dumpElementTree(quintptr windowId, int depth, int maxPerLevel) {
         return out;
     }
     uia->get_ControlViewWalker(&walker);
+    // 与 buildElementSnapshot 同一条守卫:空 walker 不得进循环(否则 571/601 处解引用)。
+    if (!walker) {
+        release(node);
+        release(uia);
+        return out;
+    }
 
     // ---- 每层打印**全部**子元素,并把"该子元素自己的子节点数"一并打出来 ----
     //
@@ -680,6 +687,14 @@ QVector<ElementNode> buildElementSnapshot(quintptr windowId, int maxNodes, int b
     }
     IUIAutomationTreeWalker* walker = nullptr;
     uia->get_ControlViewWalker(&walker);
+    // walker 拿不到 = COM 侧异常(理论上不会,但 dfsDeepest 有同样的 null 守卫):
+    // 不能带着空 walker 进循环 —— 那会在 GetFirstChildElement 上解引用空指针,
+    // 又是一个 0xC0000005。拿不到就按"该窗口没有可用树"降级。
+    if (!walker) {
+        release(root);
+        release(uia);
+        return out;
+    }
 
     QElapsedTimer timer;
     timer.start();
@@ -697,6 +712,10 @@ QVector<ElementNode> buildElementSnapshot(quintptr windowId, int maxNodes, int b
 
     int visited = 0;
     int maxDepthSeen = 0;
+    // 诊断:矩形无效(不入快照)的子元素数量。UIA 树里这类节点不罕见(浏览器
+    // 的 virtualized/离屏内容),也是上面那段 double-Release 崩溃的触发面 ——
+    // 留一条日志,复发时能一眼看出"这次是否走过了那条分支"。
+    int invalidRect = 0;
 
     while (!stack.isEmpty()) {
         if (timer.elapsed() > budgetMs || visited > maxNodes) break;
@@ -722,41 +741,50 @@ QVector<ElementNode> buildElementSnapshot(quintptr windowId, int maxNodes, int b
             release(n);
         }
 
-        for (IUIAutomationElement* kid : kids) {
+        // ⚠️ 引用所有权(2026-11-03 闪退修复,别改回去):
+        //
+        //   kids 数组对每条子元素持有 1 份引用,**统一由下面第二个循环释放**。
+        //   循环体内绝不能 release()。旧实现在"矩形无效"分支里额外放了一次,
+        //   紧接着的统一释放又 Release 同一条指针 —— 同一个 COM 对象被释放两次,
+        //   第二次是 use-after-free;崩溃栈实测就落在 Release 的 vtable 调用上
+        //   (用户在 Chrome 中截图时 0xC0000005,Chrome 的 UIA 树里 bounding rect
+        //    为空/非正的节点最多,最容易踩到;崩溃时刻与 400ms 预算耗尽的清理路径
+        //    完全吻合)。
+        //
+        //   第二层保险:统一释放循环用**引用**遍历,release() 会把槽位置空,
+        //   将来即使有人再误加一次释放,也只会是空指针(release 内部跳过),
+        //   不会退化成 UAF。
+        for (IUIAutomationElement*& kid : kids) {
             if (timer.elapsed() > budgetMs || visited > maxNodes) break;
             ++visited;
 
             RECT rc{};
             const bool ok = SUCCEEDED(kid->get_CurrentBoundingRectangle(&rc)) &&
                             rc.right > rc.left && rc.bottom > rc.top;
-            if (ok) {
-                ElementNode n;
-                n.physical = QRect(rc.left, rc.top, static_cast<int>(rc.right - rc.left),
-                                   static_cast<int>(rc.bottom - rc.top));
-                BSTR name = nullptr;
-                if (SUCCEEDED(kid->get_CurrentName(&name)) && name) {
-                    n.title = QString::fromWCharArray(name);
-                    ::SysFreeString(name);
-                }
-                n.parent = cur.parentIdx;
-                n.depth = cur.depth + 1;
-                if (n.depth > maxDepthSeen) maxDepthSeen = n.depth;
-
-                const int idx = out.size();
-                out.append(n);
-                kid->AddRef();      // 栈自己那一份
-                stack.append({kid, idx, n.depth});
-            } else {
-                // 矩形无效:不入快照,也就不需要再下沉 —— 但引用必须放掉
-                IUIAutomationElement* k = kid;
-                release(k);
+            if (!ok) {
+                ++invalidRect;
+                continue;   // 不入快照,也就不再下沉;引用仍由下面的统一循环释放
             }
+
+            ElementNode n;
+            n.physical = QRect(rc.left, rc.top, static_cast<int>(rc.right - rc.left),
+                               static_cast<int>(rc.bottom - rc.top));
+            BSTR name = nullptr;
+            if (SUCCEEDED(kid->get_CurrentName(&name)) && name) {
+                n.title = QString::fromWCharArray(name);
+                ::SysFreeString(name);
+            }
+            n.parent = cur.parentIdx;
+            n.depth = cur.depth + 1;
+            if (n.depth > maxDepthSeen) maxDepthSeen = n.depth;
+
+            const int idx = out.size();
+            out.append(n);
+            kid->AddRef();      // 栈自己那一份(kids 数组那一份仍旧由下面统一释放)
+            stack.append({kid, idx, n.depth});
         }
 
-        for (IUIAutomationElement* kid : kids) {
-            IUIAutomationElement* k = kid;
-            release(k);
-        }
+        for (IUIAutomationElement*& kid : kids) release(kid);
     }
 
     for (const Item& it : stack) {
@@ -766,6 +794,12 @@ QVector<ElementNode> buildElementSnapshot(quintptr windowId, int maxNodes, int b
     release(walker);
     release(root);
     release(uia);
+
+    if (invalidRect > 0) {
+        qDebug().nospace() << "元素快照: 窗口=" << Qt::hex << windowId << Qt::dec
+                           << " 节点=" << out.size() << " 无效矩形=" << invalidRect
+                           << " 用时=" << timer.elapsed() << "ms";
+    }
 
     if (stats) {
         stats->depth = maxDepthSeen;

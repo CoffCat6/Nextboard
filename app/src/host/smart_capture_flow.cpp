@@ -1040,6 +1040,26 @@ void runSmartUiaFlow() {
                     << QStringLiteral(" [depth=%1 visited=%2 %3ms view=%4]")
                            .arg(st.depth).arg(st.visited).arg(st.elapsedMs)
                            .arg(st.viewUsed == 0 ? QStringLiteral("Control") : QStringLiteral("Raw"));
+            // ---- 快照路径回归(2026-11-03 闪退)----
+            //
+            // 生产代码走的是**整窗快照**(buildElementSnapshot + elementAtSnapshot),
+            // 而上面的 probeElementAt 是光标单点探测 —— 两条路径不同:崩溃只在
+            // 快照路径上。旧实现在"子元素 bounding rect 无效"时多 Release 了一次,
+            // 同一条 UIA 指针被第二次释放 → 0xC0000005(用 Chrome 截图时必现)。
+            // 这里对每个被探测的窗口真跑一次快照:引用计数一旦不平衡,本 flow
+            // 会直接崩掉(退出码非零),而不是留给用户复现。
+            smart::ProbeStats snapStats;
+            const QVector<smart::ElementNode> snapshot =
+                smart::buildElementSnapshot(w.id, 6000, 400, &snapStats);
+            qInfo() << "SMART-UIA  快照" << w.title.left(30) << "→" << snapshot.size() << "个节点"
+                    << QStringLiteral(" [visited=%1 %2ms]")
+                           .arg(snapStats.visited).arg(snapStats.elapsedMs);
+            // 查表本身是纯内存操作:命中与否都合法(窗口内容可能没有更细的元素),
+            // 这里只要求"能在快照上安全地查一次",不判命中。
+            const int snapHit =
+                smart::elementAtSnapshot(snapshot, w.physical, w.physical.center(), 24);
+            qInfo() << "SMART-UIA  快照查表命中索引 =" << snapHit;
+
             if (isChromium) {
                 ++chromiumProbed;
                 if (!elems.isEmpty()) ++chromiumRefined;

@@ -2,6 +2,92 @@
 
 > 按里程碑记录关键决策与实测数据,保持第一代 phase 文档的习惯。
 
+## 2026-11-03 「在 Chrome 里截图闪退」:UIA 元素快照 double-Release(已修)
+
+> 用户反馈:**在 Chrome 界面截图就闪退**。这是一次可定案的 0xC0000005,
+> 与上面外部审查里"未定位的 0xC0000374"不是同一件事。
+
+### 一、现场
+
+`app/build/data/nextboard.log` 里三次崩溃(21:00:30 / 21:01:19 / 21:02:13),签名完全一致:
+
+```
+[CRASH] 未处理异常 code=0xc0000005 ... module=nextboard.exe offset=0xa648b
+  #7 nextboard.exe+0xa648b      ← 故障指令
+  #8 nextboard.exe+0x9e2ec
+  #9 nextboard.exe+0x9dfd1
+  #10 Qt6Core.dll+0x24170a      ← Qt 线程入口(QThreadPool worker)
+```
+
+三次都发生在**按热键之后、用户还没落笔之前**:距 `capture-start` 分别约
+480ms / 480ms / 1420ms;崩溃前最后一批日志就是遮罩首帧绘制警告,没有其它业务动作。
+当时桌面上 Chrome 是 z 序最前的窗口(`CoffCat6/mihomo-tui - Google Chrome`)。
+
+### 二、定位(没有 PDB 的 release 怎么对上符号)
+
+release 产物不带 PDB,0xa648b 无法直接查。采用两步:
+
+1. **机器码签名**:取旧 exe 中 `0xa648b` 起 32 字节,在一个"同源码 + /Zi + /DEBUG"
+   的重建版 `.text` 里搜索 —— 命中**唯一**一处。故障指令是
+   `ff 50 10`(call qword ptr [rax+0x10],即 COM `Release`)后面的
+   `add rdi,8 / cmp rdi,rsi / jne`,是一个"逐指针数组调用 Release"的循环。
+2. 用 DbgHelp 在该重建版上查地址(模块用 `base=0` + `SymLoadModuleEx` 自动取镜像基址),
+   得到:`nb::smart::buildElementSnapshot + 2075` @ `smart_capture.cpp:758` ——
+   正是 `for (IUIAutomationElement* kid : kids) release(kid)` 那个统一释放循环。
+
+### 三、根因:同一个 UIA 元素被 Release 两次
+
+`buildElementSnapshot` 自己声明的所有权规则是:"kids 数组对每条子元素持有 1 份引用,
+本层统一 Release"。旧实现在"bounding rect 无效"分支里**额外**释放了一次:
+
+```cpp
+} else {
+    IUIAutomationElement* k = kid;   // 副本!
+    release(k);                      // 第一次释放;kids 槽位没被置空
+}
+...
+for (IUIAutomationElement* kid : kids) release(kid);   // 第二次释放同一条指针
+```
+
+`release(T*&)` 的置空只作用于**实参本身**,释放副本不会清掉 `kids` 里的槽位。
+于是同一个 COM 代理被 Release 两次:第二次 `p->Release()` 经已释放对象的 vtable
+调用 → 0xC0000005(故障点正是 `call [rax+0x10]`)。
+
+**为什么是 Chrome**:UIA 树里 bounding rect 为空/非正的节点,浏览器最多。
+`--smart-uia-flow` 加诊断后实测:Chrome 958 节点 / **8 个无效矩形**,
+VSCodium 727 / 4,Pebrel 8 / 1。之前"偶发"的原因:是否立刻崩取决于该代理是否还有
+外部持有者(引用计数归零才真正销毁);而 400ms 预算耗尽(`break`)后必然走到统一释放,
+所以崩溃时刻与预算时长(≈0.48s)吻合。
+
+### 四、修复(`app/src/capture/smart_capture.cpp`)
+
+1. 删除那个提前释放分支(`!ok` 时只 `continue`,引用交给统一释放);
+2. 统一释放循环改为**引用遍历** `for (IUIAutomationElement*& kid : kids) release(kid)`,
+   让 `release()` 能把槽位置空 —— 将来即使有人再误加一次释放,也只会是空指针(被跳过),
+   不会退化成 UAF;注释写明"循环体内绝不能 release";
+3. 补 `get_ControlViewWalker` 的**空指针守卫**(`buildElementSnapshot` 与诊断用的
+   `dumpElementTree`):空 walker 会在 `GetFirstChildElement` 上再制造一次 0xC0000005;
+4. 新增诊断日志(仅当出现无效矩形时):`元素快照: 窗口=… 节点=… 无效矩形=… 用时=…ms`
+   (DEBUG 级,方便复发时一眼看出是否走过这条分支)。
+
+### 五、回归与验证
+
+- **确定性回归**:`--smart-uia-flow` 新增"对每个被探测窗口真跑一次
+  `buildElementSnapshot` + `elementAtSnapshot` 查表"——生产路径是整窗快照,
+  而原 flow 只测 `probeElementAt` 单点探测,两条路径不同,崩溃只在快照路径上。
+- **变异验证(A/B)**:把修复还原成旧代码重建,同一台机器(Chrome 在跑)执行
+  `--smart-uia-flow` → **必崩**:`EXIT=-1073741819`,日志 `code=0xc0000005`;
+  换回修复版 → `EXIT=0 / RESULT failures = 0`。即这条 flow 现在能真的抓到该缺陷。
+- 其余验收全绿:`--smart-capture-flow` / `--smart-live-flow` / `--smart-settings-flow` /
+  `--capture-toolbar-flow` / `--editor-flow` / `--hotkey-lifecycle-flow`(均 exit 0)。
+
+### 六、教训
+
+- `release(T*&)` 只在实参是"槽位本身"时才置空;**用副本释放 = 放弃置空**。
+- "循环内提前释放 + 循环尾统一释放"是一条必须禁止的写法;若容器负责统一释放,
+  循环体内一个 `release` 都不能有。这条已写进函数注释,防止复发。
+- 诊断工具(`dumpElementTree`)的空指针也会把排查带偏,顺手一并补守卫。
+
 ## 2026-11-03 外部审查报告处置(docs/code-review-2026-11-03.md)
 
 > 外部审查给出 37 项发现。**先核对,再修**:核实后发现报告最关键的证据链
