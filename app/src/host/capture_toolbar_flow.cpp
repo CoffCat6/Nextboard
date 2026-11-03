@@ -46,6 +46,7 @@
 #include <windows.h>
 #include <QMouseEvent>
 #include <QScreen>
+#include <QThreadPool>
 #include <QTimer>
 
 namespace nb {
@@ -457,6 +458,20 @@ void runCaptureToolbarFlow() {
                         /*popup=*/false, lines);
                     QApplication::processEvents();
 
+                    // ⚠️ 必须判空(2026-11-03,外部审查 #25):showResult 失败/极端环境
+                    //    返回空指针,而下面直接解引用。同文件 327/347 等处都做了判空,
+                    //    唯独 B11 段漏了 —— 与"宁缺毋滥"的断言风格不一致。
+                    //    为 null 时记一条失败并退出本流程(不静默 return)。
+                    check(!lp.isNull(), QStringLiteral("B11 前置:OCR 结果面板已创建"));
+                    if (lp.isNull()) {
+                        // 面板没建起来 = 本段所有断言都无从成立。**记一条失败并退出**,
+                        // 不要静默 return(那会让日志看起来"这段跑完了" —— 见 #26 的同类问题)。
+                        qWarning() << "CAPTURE-TOOLBAR  B11 中止:结果面板为空";
+                        qInfo() << "CAPTURE-TOOLBAR  RESULT failures =" << g_failures;
+                        QApplication::quit();
+                        return;
+                    }
+
                     // ① 行框数据一致(图中取字的地基)
                     check(lp->sourceRectForLine(0) == QRect(10, 8, 150, 26),
                           QStringLiteral("行框 0 与喂入数据一致"));
@@ -526,9 +541,9 @@ void runCaptureToolbarFlow() {
         }
 
         if (!screen) {
-            qWarning() << "CAPTURE-TOOLBAR  FAIL 无可用屏幕,跳过端到端段";
-            ++g_failures;
-            QApplication::quit();
+            // 已计入 g_failures,但仍走统一出口 —— 保证 RESULT 行照常打印,
+            // 而不是"日志里连结果都没有"就没了进程。
+            flowAbortAndQuit("CAPTURE-TOOLBAR", g_failures, "无可用屏幕");
             return;
         }
         // 造一个**真实的**下层窗口:挖洞是否奏效的唯一标准是"鼠标事件送到谁"。

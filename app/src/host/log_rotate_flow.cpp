@@ -57,8 +57,8 @@ void runLogRotateFlow() {
 
     QTemporaryDir tmp;
     if (!tmp.isValid()) {
-        qWarning() << "LOGROTATE ⚠️ 临时目录创建失败,跳过";
-        QApplication::quit();
+        // 不静默 quit:流程没跑完 = 本次构建什么都没证明(见 acceptance.hpp 的说明)。
+        flowAbortAndQuit("LOGROTATE", failures, "临时目录创建失败");
         return;
     }
     const QString dir = tmp.path();

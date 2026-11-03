@@ -293,8 +293,8 @@ void runSmartCaptureFlow() {
 
         QScreen* screen = QGuiApplication::primaryScreen();
         if (!screen) {
-            qWarning() << "SMART-CAPTURE  FAIL 没有屏幕";
-            QApplication::quit();
+            // 必须计入 failures:否则"无屏幕的机器上跑出 0 失败",是假绿。
+            flowAbortAndQuit("SMART-CAPTURE", g_failures, "没有可用屏幕");
             return;
         }
 
@@ -348,10 +348,9 @@ void runSmartCaptureFlow() {
 
         // 认不上屏几何时退化成几何断言(不假装通过)
         if (frozen.isNull()) {
-            qWarning() << "SMART-CAPTURE  FAIL 底图构造失败";
             target->close();
             target->deleteLater();
-            QApplication::quit();
+            flowAbortAndQuit("SMART-CAPTURE", g_failures, "底图构造失败");
             return;
         }
 

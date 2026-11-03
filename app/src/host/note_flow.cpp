@@ -56,6 +56,25 @@ void finish() {
     qApp->quit();
 }
 
+/// 步骤入口的**窗口存活守卫**。
+///
+/// 为什么需要(2026-11-03,外部审查 #8):整条流程是串行回调链,各步的
+/// QTimer::singleShot( 用 qApp 作 context —— 那只能保证"应用还活着",
+/// **不能**保证回调里解引用的 window 还活着。STEP6 删待办会关窗、外部
+/// close() 也会,于是回调里 window->geometry() 就是一次 UAF。
+/// 当前靠"流程顺序保证窗口活着"这条脆弱契约兜底。
+///
+/// 修法取舍:把 context 换成 window 是错的 —— 定时器会静默失效,那几步断言
+/// 就"没跑也算过"(正是 #26 那种假绿)。这里改成**显式判空 + 记失败**:
+/// 窗口真没了是有诊断价值的失败,而不是悄悄跳过。
+/// @return false 表示窗口已销毁,调用方应立即 return。
+bool requireWindow(QWidget* window, const char* step) {
+    if (window) return true;
+    ++g_failures;
+    qWarning().noquote() << "NOTE  FAIL" << step << "窗口已销毁(无法继续该步)";
+    return false;
+}
+
 void sendMouse(QWidget* w, QEvent::Type type, const QPoint& local, Qt::MouseButton button,
                Qt::MouseButtons buttons) {
     QMouseEvent ev(type, QPointF(local), w->mapToGlobal(QPointF(local)), button, buttons,
@@ -259,6 +278,7 @@ void step46(const QString& id, QWidget* window) {
           QStringLiteral("STEP4.6 触发贴边菜单项"));
 
     QTimer::singleShot(400, qApp, [id, window, usableEdge] {
+        if (!requireWindow(window, "STEP4.6")) return;
         auto* note = qobject_cast<NoteWindow*>(window);
         const QVariantMap row = noteRowFromCore(id);
         const QRect avail = screenAvailFor(window);
@@ -278,6 +298,8 @@ void step46(const QString& id, QWidget* window) {
               QStringLiteral("STEP4.6 触发「取消贴边」"));
 
         QTimer::singleShot(400, qApp, [id, window, note] {
+            if (!requireWindow(window, "STEP4.6-b")) return;
+            if (!note) { ++g_failures; qWarning() << "NOTE  FAIL STEP4.6-b 便签对象已销毁"; return; }
             const QVariantMap row2 = noteRowFromCore(id);
             const QRect avail = screenAvailFor(window);
             qInfo() << "STEP4.6 取消贴边后:edge=" << row2.value(QStringLiteral("edge"))
@@ -368,6 +390,7 @@ void step5(const QString& id, QWidget* window) {
                   QStringLiteral("STEP5c 面板侧写入成功"));
             // core 的调度是"写库后 PostMessage",给宿主一个事件循环的时间
             QTimer::singleShot(600, qApp, [id, window] {
+                if (!requireWindow(window, "STEP5c")) return;
                 auto* body3 = window->findChild<QTextEdit*>(
                     QStringLiteral("nbNoteBody"));
                 const QString bodyText = body3 ? body3->toPlainText() : QString();
@@ -483,6 +506,7 @@ void step2a(const QString& id, QWidget* window, const QRect& avail) {
     dragWindowTo(window, otherAvail.center() - QPoint(window->width() / 2,
                                                       window->height() / 2));
     QTimer::singleShot(400, qApp, [id, window, other, otherAvail, avail] {
+        if (!requireWindow(window, "STEP2a")) return;
         const QVariantMap row = noteRowFromCore(id);
         const QRect geo = window->geometry();
         qInfo() << "STEP2a 松手后 geo:" << geo
@@ -503,6 +527,7 @@ void step2a(const QString& id, QWidget* window, const QRect& avail) {
         //    旧实现在副屏上算的是主屏的边,四边里只有恰好重合的右侧能命中。
         dragEdgeTo(window, QStringLiteral("left"), otherAvail);
         QTimer::singleShot(400, qApp, [id, window, otherAvail, avail] {
+            if (!requireWindow(window, "STEP2a-b")) return;
             const QVariantMap row2 = noteRowFromCore(id);
             const QRect geo2 = window->geometry();
             qInfo() << "STEP2a 副屏贴左边 edge:" << row2.value(QStringLiteral("edge"))
@@ -556,6 +581,7 @@ void step2b(const QString& id, QWidget* window, const QRect& avail) {
         const QRect here = availUnder(window);
         dragEdgeTo(window, expect, here);
         QTimer::singleShot(300, qApp, [id, window, chain, index, expect] {
+            if (!requireWindow(window, "STEP2b-chain")) return;
             const QVariantMap row = noteRowFromCore(id);
             const QString edge = row.value(QStringLiteral("edge")).toString();
             const QRect geo = window->geometry();
@@ -583,6 +609,8 @@ void step4(const QString& id, QWidget* window, const QRect& avail) {
     qInfo() << "STEP4 指针移到拉手:" << sliver << "窗口:" << window->geometry();
     movePointerTo(window, sliver, /*expectInside=*/true);
     QTimer::singleShot(900, qApp, [id, window, note] {
+        if (!requireWindow(window, "STEP4")) return;
+        if (!note) { ++g_failures; qWarning() << "NOTE  FAIL STEP4 便签对象已销毁"; return; }
         const QVariantMap row = noteRowFromCore(id);
         qInfo() << "STEP4 collapsed:" << note->isCollapsed()
                 << "geo:" << window->geometry();
@@ -599,6 +627,8 @@ void step3(const QString& id, QWidget* window, const QRect& avail) {
     note->setAutoHide(true);
     movePointerTo(window, avail.center(), /*expectInside=*/false);
     QTimer::singleShot(1600, qApp, [id, window, note, avail] {
+        if (!requireWindow(window, "STEP3")) return;
+        if (!note) { ++g_failures; qWarning() << "NOTE  FAIL STEP3 便签对象已销毁"; return; }
         const QVariantMap row = noteRowFromCore(id);
         // 收起后窗口大部分在屏幕外:屏内可见宽必须取「窗口 ∩ 可用区」
         const QRect visible = window->geometry().intersected(avail);
@@ -696,6 +726,7 @@ void step2(const QString& id, QWidget* window, const QRect& avail) {
     Q_UNUSED(geo);
     dragEdgeTo(window, QStringLiteral("right"), avail);
     QTimer::singleShot(300, qApp, [id, window, avail] {
+        if (!requireWindow(window, "STEP2")) return;
         const QVariantMap row = noteRowFromCore(id);
         qInfo() << "STEP2 edge:" << row.value(QStringLiteral("edge"))
                 << "geo:" << window->geometry() << "avail:" << avail;

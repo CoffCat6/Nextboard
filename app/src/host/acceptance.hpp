@@ -188,4 +188,18 @@ void runLogRotateFlow();
 /// 会写库(播种 + 改写 + 删除),必须配 --data-dir。日志前缀 TEXT-EDIT。
 void runTextEditFlow();
 
+/// 验收流的**统一失败退出**(2026-11-03,外部审查 #26)。
+///
+/// 为什么需要:各 *_flow.cpp 里的"环境不满足"分支此前直接 `QApplication::quit()`
+/// 就返回 —— **不计入 failures**。于是出现"断言其实没跑完、日志却显示干净退出"
+/// 的假绿(log_rotate_flow 的临时目录失败、smart_capture_flow 的无屏幕分支等都是)。
+/// 一条流程无法执行**本身就是失败**:它对本次构建什么都没证明。
+///
+/// 用法:`return flowAbortAndQuit(tag, failures, "无可用屏幕");`
+///   - tag      日志前缀(如 "SMART-CAPTURE")
+///   - failures 调用方的失败计数(本函数不持有它,只负责打印最终值)
+///   - why      跳过原因(会作为一条失败打到日志)
+///   - 返回 int,便于写成 `return flowAbortAndQuit(...);` 直接退出 void lambda
+int flowAbortAndQuit(const char* tag, int failures, const char* why);
+
 } // namespace nb

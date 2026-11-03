@@ -57,9 +57,9 @@ private:
     /// 用 std::unique_ptr 而不是值成员:HotkeyFilter 的完整定义在本文件之外,
     /// 值成员需要完整类型。
     std::unique_ptr<HotkeyFilter> m_filter;
-    // hotkey id 从 1 递增;key = 注册 id,value = action
+    // key = 注册 id,value = action。id 由**进程级**计数器分配(hotkeys.cpp),
+    // 不与实例生命周期绑定 —— 否则验收流的临时实例会注销掉主实例的热键。
     QMap<int, Action> m_registered;
-    int m_nextId = 1;
     /// 本轮 applyFromSettings 的失败项("组合键(原因)"),轮末汇总提示后清空。
     QStringList m_failures;
 };

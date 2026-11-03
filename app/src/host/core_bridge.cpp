@@ -157,6 +157,8 @@ void CoreBridge::shutdown() {
 }
 
 QJsonObject CoreBridge::call(const QString& method, const QJsonObject& req) {
+    // 进程级串行化:所有 nb_* 入口都必须持有同一把锁(见 core_bridge.hpp 的 ffiMutex)。
+    QMutexLocker ffiLock(&m_ffiMutex);
     if (!ok()) {
         qWarning() << "nb_call" << method << "-> core not ok";
         return {{"ok", false}};
@@ -220,6 +222,7 @@ QString CoreBridge::coreVersion() const {
 }
 
 QImage CoreBridge::captureMonitor(unsigned index) {
+    QMutexLocker ffiLock(&m_ffiMutex);
     if (!m_captureMonitor || !m_freeBuffer) return {};
     unsigned char* rgba = nullptr;
     unsigned w = 0, h = 0;
@@ -243,6 +246,7 @@ QImage CoreBridge::captureMonitorMatched(QScreen* screen) {
 }
 
 QImage CoreBridge::captureMonitorMatched(const QRect& geo, const QString& name, qreal dpr) {
+    QMutexLocker ffiLock(&m_ffiMutex);
     if (!m_captureMonitorMatched || !m_freeBuffer) return {};
     const QByteArray nameUtf8 = name.toUtf8();
     unsigned char* rgba = nullptr;
@@ -271,6 +275,7 @@ QJsonArray CoreBridge::listMonitors() {
 }
 
 QImage CoreBridge::captureCrop(const QImage& screen, const QRect& rect) {
+    QMutexLocker ffiLock(&m_ffiMutex);
     if (!m_captureCrop || !m_freeBuffer || screen.isNull()) return {};
     if (rect.width() <= 0 || rect.height() <= 0) return {};
     // 核心按 RGBA8888 紧凑排布读取:先统一格式再取裸指针
@@ -307,6 +312,7 @@ QImage CoreBridge::captureMonitorRegion(QScreen* screen, const QRect& regionDevi
 
 QImage CoreBridge::captureMonitorRegion(const QRect& geo, const QString& name, qreal dpr,
                                         const QRect& regionDevice) {
+    QMutexLocker ffiLock(&m_ffiMutex);
     if (!m_captureMonitorRegion || !m_freeBuffer) return {};
     if (regionDevice.width() <= 0 || regionDevice.height() <= 0) return {};
     const QByteArray nameUtf8 = name.toUtf8();
@@ -333,6 +339,7 @@ QImage CoreBridge::captureMonitorRegion(const QRect& geo, const QString& name, q
 
 bool CoreBridge::stitchBegin(const QString& session, QScreen* screen, const QRect& regionDevice,
                             int maxHeight, qint64 maxBytes, int overlapRatio, QString* error) {
+    QMutexLocker ffiLock(&m_ffiMutex);
     if (!m_stitchBegin || !m_freeString) {
         if (error) *error = QStringLiteral("当前 nbcore.dll 没有 nb_stitch_begin(核心版本过旧)");
         return false;
@@ -368,6 +375,7 @@ bool CoreBridge::stitchBegin(const QString& session, QScreen* screen, const QRec
 }
 
 QJsonObject CoreBridge::stitchAppend(const QString& session, const QImage& frame) {
+    QMutexLocker ffiLock(&m_ffiMutex);
     if (!m_stitchAppend || !m_freeString || frame.isNull()) return {};
     if (session.isEmpty()) return {};
     // 核心按 RGBA8888 紧凑排布读(与 captureCrop / ocrImage 同口径)
@@ -392,6 +400,7 @@ QJsonObject CoreBridge::stitchAppend(const QString& session, const QImage& frame
 }
 
 bool CoreBridge::stitchFinish(const QString& session, QImage* outPng, QJsonObject* outMeta) {
+    QMutexLocker ffiLock(&m_ffiMutex);
     if ((!m_stitchFinish && !m_stitchFinishRgba) || !m_freeString || !m_freeBuffer
         || !outPng || !outMeta) return false;
     if (session.isEmpty()) return false;
@@ -447,6 +456,7 @@ bool CoreBridge::stitchFinish(const QString& session, QImage* outPng, QJsonObjec
 }
 
 void CoreBridge::stitchAbort(const QString& session) {
+    QMutexLocker ffiLock(&m_ffiMutex);
     if (!m_stitchAbort || session.isEmpty()) return;
     const QByteArray sessionUtf8 = session.toUtf8();
     m_stitchAbort(sessionUtf8.constData());
@@ -460,6 +470,7 @@ QJsonObject CoreBridge::ingestCaptureRgba(const QImage& image, const QString& so
 
 QJsonObject CoreBridge::ingestCaptureRgba2(const QImage& image, const QString& source,
                                            const QString& owner) {
+    QMutexLocker ffiLock(&m_ffiMutex);
     if (!m_freeString || image.isNull()) return {};
     // 核心按 RGBA8888 紧凑排布读(与 captureCrop / ocrImage / stitchAppend 同口径)。
     // ⚠️ convertToFormat 在原图已是 RGBA8888 时**返回同一份数据**(隐式共享,不拷贝),
@@ -500,6 +511,7 @@ QJsonObject CoreBridge::ingestCaptureRgba2(const QImage& image, const QString& s
 }
 
 bool CoreBridge::copyRgbaToClipboard(const QImage& image) {
+    QMutexLocker ffiLock(&m_ffiMutex);
     if (!m_copyRgbaToClipboard || image.isNull()) return false;
     const QImage src = image.convertToFormat(QImage::Format_RGBA8888);
     const int rc = m_copyRgbaToClipboard(
@@ -515,6 +527,7 @@ QString CoreBridge::ocrImage(const QImage& image) {
 
 OcrTextWithLines CoreBridge::ocrImageDetailed(const QImage& image) {
     OcrTextWithLines out;
+    QMutexLocker ffiLock(&m_ffiMutex);
     if (!m_ocrRgba || !m_freeString || image.isNull()) return out;
     // 核心按 RGBA8888 紧凑排布读取(与 captureCrop 同口径)
     const QImage src = image.convertToFormat(QImage::Format_RGBA8888);

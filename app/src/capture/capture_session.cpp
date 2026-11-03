@@ -127,6 +127,9 @@ void abortStitchSession() {
 /// 内存(软件渲染下的后备缓冲 ≈ 窗口尺寸×4)必须等对象真的析构才归还。`destroyed`
 /// 是唯一可靠的时点。`fn` 再经一次 singleShot(0) 转出去,避免在半死对象的析构链上
 /// 跑编码/写库这类重活。
+/// ⚠️ 当前**无调用点**(2026-11-03 核对:全仓仅此定义)。留着是因为它恰好是
+/// "等遮罩析构后再做重活"的标准写法,后续该场景可直接复用;若长期无人用应删除,
+/// 不要让读者以为某条现存路径依赖它。
 void runAfterDestroyed(QObject* obj, std::function<void()> fn) {
     QObject::connect(obj, &QObject::destroyed, obj,
                      [fn](QObject*) { QTimer::singleShot(0, qApp, fn); },

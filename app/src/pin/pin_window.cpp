@@ -4,6 +4,8 @@
 #include "host/image_save.hpp"
 
 #include <QClipboard>
+
+#include "host/core_bridge.hpp"
 #include <QContextMenuEvent>
 #include <QCursor>
 #include <QDateTime>
@@ -287,13 +289,22 @@ void PinWindow::updateToolbar() {
 }
 
 void PinWindow::copyToClipboard() {
+    // ⚠️ 经核心写入,不用 QGuiApplication::clipboard()(2026-11-03 修)。
+    // 核心的 clipboard_win 带**打开重试**:别的进程短暂占用剪贴板是常态(内置
+    // 截图/OCR/编辑器路径早已统一走核心,注释见 core_bridge.hpp:241)。
+    // Qt 的直接写入在这种时刻会**静默失败**,而下面照样弹"已复制"—— 用户看到的是
+    // 一句假提示,粘出来还是旧内容。日志里 "Retrying/Unable to obtain clipboard"
+    // 就是 Qt 这条路径打出来的。
+    bool ok = false;
     if (!m_text.isEmpty()) {
-        QGuiApplication::clipboard()->setText(m_text);
-        showNotice(QStringLiteral("已复制文本"));
+        ok = CoreBridge::instance().copyTextToClipboard(m_text);
     } else {
-        QGuiApplication::clipboard()->setImage(m_image);
-        showNotice(QStringLiteral("已复制图片"));
+        ok = CoreBridge::instance().copyRgbaToClipboard(m_image);
     }
+    // 提示必须说实情:失败就明确告诉用户,不要用成功文案掩盖。
+    showNotice(ok ? (m_text.isEmpty() ? QStringLiteral("已复制图片")
+                                      : QStringLiteral("已复制文本"))
+                  : QStringLiteral("复制失败:剪贴板被占用,请重试"));
 }
 
 void PinWindow::saveAs() {
@@ -451,7 +462,18 @@ void PinWindow::paintEvent(QPaintEvent*) {
             const QSize physical(qMax(1, qRound(imageRect.width() * dpr)),
                                  qMax(1, qRound(imageRect.height() * dpr)));
             m_displayCache = QImage(physical, QImage::Format_ARGB32_Premultiplied);
+            // 分配失败(4K 贴图 + 高分屏)会是 null image → QPainter 不激活 →
+            // drawImage 写空指针 → 0xC0000005。退回直接画原图(降级但可见)。
+            if (m_displayCache.isNull()) {
+                painter.drawImage(imageRect, m_image);
+                return;
+            }
             QPainter p(&m_displayCache);
+            if (!p.isActive()) {   // 双保险:与 image_save.cpp:53-67 同一范式
+                m_displayCache = QImage();
+                painter.drawImage(imageRect, m_image);
+                return;
+            }
             p.setRenderHint(QPainter::SmoothPixmapTransform, !fastTransition);
             p.drawImage(m_displayCache.rect(), m_image);
             p.end();
@@ -463,6 +485,32 @@ void PinWindow::paintEvent(QPaintEvent*) {
     } else {
         painter.drawImage(imageRect, m_image);
     }
+}
+
+void PinWindow::reclampToCurrentScreen() {
+    // 判据:窗口至少有**一个可见像素**落在某块现存屏的可用区内就认为它还在,
+    // 不做任何移动(用户故意把窗口摆到跨屏边界/贴边是合法用法)。
+    const QRect cur = frameGeometry();
+    for (QScreen* s : QGuiApplication::screens()) {
+        if (s->availableGeometry().intersects(cur)) return;
+    }
+    // 找归属屏:先光标屏(用户"刚在某块屏上"),再主屏。
+    QScreen* target = QGuiApplication::screenAt(QCursor::pos());
+    if (!target) target = QGuiApplication::primaryScreen();
+    if (!target) return;   // 连主屏都没有:无从安置,保持原样(总比挪到 0,0 好)
+    const QRect avail = target->availableGeometry();
+    // 图比屏大时退化为左上角对齐可用区(与构造函数 init 的 center_in 语义一致)。
+    const QSize sz = size();
+    const int x = sz.width() >= avail.width()
+        ? avail.left()
+        : qBound(avail.left(), cur.left(), avail.right() - sz.width() + 1);
+    const int y = sz.height() >= avail.height()
+        ? avail.top()
+        : qBound(avail.top(), cur.top(), avail.bottom() - sz.height() + 1);
+    // 跨屏后 DPR 可能不同:先按新屏 DPR 重算逻辑尺寸(applyScale),再定位 ——
+    // 顺序反过来会让 qBound 用旧尺寸算,贴到屏幕右侧时差出几个像素。
+    applyScale();
+    move(x, y);
 }
 
 void PinWindow::applyScale() {

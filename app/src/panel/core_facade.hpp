@@ -189,6 +189,11 @@ public:
     Q_INVOKABLE void openTodoNote(const QString& id);
 
     /// 托盘「便签」子菜单 / 热键的兜底入口:全部展开 / 全部收起。
+    /// 屏幕增删后把全部贴图拉回可见区(见 PinWindow::reclampToCurrentScreen)。
+    /// 由 main.cpp 的 screenAdded/screenRemoved 接线调用 —— 贴图没有任务栏/托盘入口,
+    /// 这是用户把它们找回来的唯一自动途径。
+    void reclampAllPins();
+
     Q_INVOKABLE void expandAllTodoNotes();
     Q_INVOKABLE void collapseAllTodoNotes();
 

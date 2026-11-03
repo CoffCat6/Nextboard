@@ -97,9 +97,8 @@ bool beginFor(CoreBridge& core, const QString& session, int w, int h, int maxHei
 void runStitchFlow() {
     CoreBridge& core = CoreBridge::instance();
     if (!core.hasStitch()) {
-        qWarning() << "STITCH ⚠️ 当前 nbcore.dll 没有长截图导出"
-                      "(nb_stitch_begin/append/finish/abort)—— 核心版本过旧";
-        QApplication::quit();
+        // 核心过旧是**可诊断的失败**,不是"跳过":本次构建没验证长截图。
+        flowAbortAndQuit("STITCH", 0, "nbcore 没有长截图导出(核心版本过旧)");
         return;
     }
 

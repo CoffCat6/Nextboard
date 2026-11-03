@@ -13,6 +13,8 @@
 #include <QImage>
 #include <QRect>
 
+#include <QMutex>
+
 class QScreen;
 
 using NbInit = int(__cdecl*)(const char*);
@@ -100,6 +102,11 @@ constexpr UINT WM_APP_SETTINGS_CHANGED = 0x8000 + 2;
 /// 拉取待播报列表(docs/05-todo.md §4.2;⚠️ 常量必须与 core 侧同步)。
 /// 取 +4 而非 +3:+3 为 CAPTURE_READY 预留。
 constexpr UINT WM_APP_TODO_DUE = 0x8000 + 4;
+/// 二次启动唤起(宿主自有消息,与 core 无关):由 **被拒绝的第二个实例**
+/// 经 `PostMessageW(HWND_BROADCAST, …)` 广播,已有实例的 PanelWindow 接住并前置。
+/// 广播没有目标句柄,所以接收方只能"按消息号认领"—— 值取 +10 与 core.rs 里
+/// "已占用"的登记表一致(single_instance.cpp 原本就用的 0x8000+10)。
+constexpr UINT WM_APP_ACTIVATE = 0x8000 + 10;
 
 /// nbcore.dll 加载与调用。进程内单份;失败时 ok()=false 且 lastError 有原因。
 class CoreBridge {
@@ -116,6 +123,20 @@ public:
     void setNotifyHwnd(HWND hwnd);
 
     bool ok() const { return m_callFn != nullptr; }
+
+    /// nbcore 的**进程级串行化锁**。
+    ///
+    /// 为什么放在 CoreBridge 上而不是某个调用点(2026-11-03 修):nbcore 的契约是
+    /// "nb_call 是单门面",但宿主有**五类**入口会并发进入 —— UI 线程的同步
+    /// `call`,QThreadPool 里的 AsyncCall、长截图采集 worker、编辑器 OCR/二维码
+    /// worker、以及 Tray/便签的杂项调用。原实现只在 AsyncCall::run() 里用了
+    /// **函数级 static** 互斥,别的入口完全没走,等于只覆盖了 1/5。
+    /// 锁粒度 = **一次 FFI 调用**;持锁期间不 emit、不碰 UI、不做长耗时等待
+    /// (否则一把锁就会把 UI 线程卡住)。
+    /// 非递归即可:已核对没有任何"持锁入口再调另一个持锁入口"的路径
+    /// (Qt 6 里 QMutex 只有非递归形态,递归版是独立的 QRecursiveMutex ——
+    ///  需要重入时必须显式换类型,这个约束正好帮我们守住不嵌套)。
+    QMutex& ffiMutex() { return m_ffiMutex; }
 
     /// JSON 门面调用。返回响应对象 { ok, data|error };transport 失败时返回含 error 的对象。
     QJsonObject call(const QString& method, const QJsonObject& req = {});
@@ -266,6 +287,8 @@ public:
     static CoreBridge& instance();
 
 private:
+    /// 见 ffiMutex()。所有导出调用都必须持有它。
+    QMutex m_ffiMutex;
     HMODULE m_dll = nullptr;
     NbInit m_init = nullptr;
     NbCallFn m_callFn = nullptr;

@@ -187,18 +187,20 @@ QVariantMap CoreFacade::call(const QString& method, const QVariantMap& req) {
 namespace {
 
 /// 线程池任务:在 worker 线程调 nbcore,结果回 UI 线程发信号。
-/// nbcore 的 nb_call 是进程级单门面;CoreBridge 内无锁(调用方都同线程)。
-/// worker 里专门加一把静态互斥,防止未来其它线程再进 nb_call 撞车。
+///
+/// ⚠️ 串行化已**上移**到 CoreBridge(2026-11-03):这把锁原先只在这里以
+/// "函数级 static" 形式存在,而 ocrImageDetailed / qrDecodeRgba / captureMonitorRegion
+/// / stitchAppend 等入口从 QThreadPool 直接进 nbcore,完全没走它 ——
+/// "nb_call 是进程级单门面"的不变量只覆盖了 1/5 的入口。现在所有 nb_* 调用
+/// 统一持有 CoreBridge::ffiMutex(),包括本结构体调用的 call()。
+/// 这里不再重复加锁(否则两把锁的层级关系无人维护)。
 struct AsyncCall : QRunnable {
     QString method;
     QJsonObject req;
     std::function<void(const QJsonObject&)> onDone;
 
     void run() override {
-        static QMutex coreMutex;
-        QMutexLocker lock(&coreMutex);
         const QJsonObject resp = CoreBridge::instance().call(method, req);
-        lock.unlock();
         QMetaObject::invokeMethod(&CoreFacade::instance(),  // 队列投递回 UI 线程
                                   [onDone = std::move(onDone), resp] { onDone(resp); },
                                   Qt::QueuedConnection);
@@ -923,6 +925,17 @@ QString CoreFacade::appIconUrl(const QString& target) {
 void CoreFacade::openTodoNote(const QString& id) {
     // 注册表负责"已开则前置 / 未开则建窗 / 上限拒绝"全部判断(避免两处各判一遍)
     NoteRegistry::instance().open(id);
+}
+
+void CoreFacade::reclampAllPins() {
+    // 先清空指针再遍历:QPointer 已在窗口销毁时置空,removeIf 是廉价清理。
+    // 只处理**仍可见**的贴图 —— 编辑期间暂隐(parked)的贴图不该被挪动,
+    // 它们编辑完成会自己回到原屏幕坐标。
+    QList<QPointer<PinWindow>>& pins = pinRegistry();
+    pins.removeIf([](const QPointer<PinWindow>& p) { return p.isNull(); });
+    for (const QPointer<PinWindow>& pin : pins) {
+        if (pin && pin->isVisible() && !isParkedForEdit(pin.data())) pin->reclampToCurrentScreen();
+    }
 }
 
 void CoreFacade::expandAllTodoNotes() { NoteRegistry::instance().expandAll(); }

@@ -115,6 +115,21 @@ void AnnotationToolbar::reloadIcons() {
 void AnnotationToolbar::rebuildActions() {
     const QColor ink = iconInkFor(palette());
 
+    // ⚠️ 回收顺序是有讲究的(2026-11-03,外部审查 #30):
+    //    QToolBar::clear() 只 removeAction、**不 delete**(已对照 Qt 6.9.0 源码),
+    //    而下面每轮都 new 出四个 QActionGroup + 约 22 个 QAction —— 每重建一轮就
+    //    白留一整组动作(~QAction 有反向清理,不会悬空,但量级随调用次数放大)。
+    //    ① 必须**先**取 actions() 再 clear():clear 之后列表就空了,此时再取等于没取;
+    //    ② 四个 group 以 this 为父,deleteLater 即可(不在本函数的调用栈上销毁);
+    //    ③ action 单独 deleteLater:它们由工具栏 addAction 创建、工具栏只持有引用,
+    //       没人删就是泄漏。
+    QList<QAction*> staleActions = m_toolsBar->actions();
+    staleActions += m_paramsBar->actions();
+    for (QAction* a : staleActions) a->deleteLater();
+    for (QActionGroup* g : {m_toolGroup, m_colorGroup, m_sizeGroup, m_fontGroup}) {
+        if (g) g->deleteLater();
+    }
+    m_panAction = nullptr;   // 指向的是上面那批 action,已排队销毁
     m_toolsBar->clear();
     m_paramsBar->clear();
 

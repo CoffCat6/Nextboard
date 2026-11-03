@@ -5,15 +5,18 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QIcon>
 #include <QJsonObject>
 #include <QMessageBox>
+#include <QMutex>
 #include <QPainter>
 #include <QQuickWindow>
 #include <QSGRendererInterface>
+#include <QThreadPool>
 #include <QTimer>
 #include <QDebug>
 
@@ -26,12 +29,27 @@
 #include "host/app_paths.hpp"
 #include "host/log_rotate.hpp"
 
+// 日志写入锁:fileMessageHandler 与崩溃处理器共用。
+//
+// 为什么必须有:QtConcurrent 工作线程里的 qWarning/qInfo(长截图 worker 等)会与
+// 主线程并发进入这里,而下面的 QFile / written 都是**函数级静态**。无锁并发写的
+// 后果不是崩溃,是**丢日志** —— 行交错、半行、滚动计数错乱,而崩溃排障恰恰完全
+// 依赖这份文件的完整性。
+static QMutex g_logMutex;
+
 // S2 阶段:qDebug/qInfo 全量落文件;WIN32 子程序无控制台,这是唯一可观测手段。
 // 日志与数据同处:`<exe 同级>\data\nextboard.log`(便携式布局,见 host/app_paths.hpp)
 //
 // 单代滚动(host/log_rotate):托盘常驻程序一开几周,Info 级日志源源不断,
 // 不设上限会把用户磁盘写满。语义见该模块头注释 —— 阈值 2MB,保留 `void .log.1`。
+//
+// ⚠️ **每行必须带时间戳**(2026-11-03 补)。此前格式只有 `[LEVEL] msg`,于是
+//    "日志停在最后一条正常记录上"有两种完全不同的成因无法区分:进程死了 / 进程
+//    还活着只是没再写。一份外部审查报告正是据此把**一个仍在运行的进程**判成了
+//    "静默死亡",进而推出错误的根因(docs/code-review-2026-11-03.md §1.1)。
+//    时间戳让"距上一次操作多久"变成可读事实,核心侧 nbcore.log 一直有这个字段。
 static void fileMessageHandler(QtMsgType type, const QMessageLogContext& ctx, const QString& msg) {
+    QMutexLocker lock(&g_logMutex);
     static const QString path = nb::appDataFile(QStringLiteral("nextboard.log"));
     static QFile log;
     static qint64 written = -1;   // -1 = 尚未打开;打开时置为现有大小
@@ -43,7 +61,11 @@ static void fileMessageHandler(QtMsgType type, const QMessageLogContext& ctx, co
     }
     const char* level = type == QtDebugMsg ? "DEBUG" : type == QtInfoMsg ? "INFO"
         : type == QtWarningMsg ? "WARN" : type == QtCriticalMsg || type == QtFatalMsg ? "CRIT" : "?";
-    const QByteArray line = QStringLiteral("[%1] %2\n").arg(level, msg).toUtf8();
+    const QByteArray line =
+        QStringLiteral("[%1] [%2] %3\n")
+            .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz")),
+                 QLatin1String(level), msg)
+            .toUtf8();
     log.write(line);
     written += line.size();
     // 仅 Warning 及以上才强制刷盘(flush 含 _commit 同步盘);Debug/Info 交给
@@ -93,10 +115,24 @@ extern "C" __declspec(dllimport) unsigned short __stdcall RtlCaptureStackBackTra
     unsigned long* BackTraceHash);
 
 void appendCrashLog(const QString& text) {
+    // ⚠️ 崩溃路径**不能**阻塞等 g_logMutex:若崩溃线程此刻正持有它(崩在
+    //    fileMessageHandler 里),等待就是死锁 —— 进程挂住、日志也永远写不出去,
+    //    比丢几行更糟。用 tryLock:拿不到就照写(独立 QFile 句柄,append 语义下
+    //    最坏是与另一条交错,但崩坏现场保住了)。正常路径(未崩溃时的手工
+    //    appendCrashLog,如 std::terminate 的常规触发)能拿到锁,行为不变。
+    const bool locked = g_logMutex.tryLock(50);
     QFile log;
     // 崩溃路径同样走轮转:判一次大小即可,失败也无所谓(写不进去就是写不进去)。
-    if (nb::openLogFileAppend(log, nb::appDataFile(QStringLiteral("nextboard.log"))))
-        log.write(QStringLiteral("[CRASH] %1\n").arg(text).toUtf8());
+    if (nb::openLogFileAppend(log, nb::appDataFile(QStringLiteral("nextboard.log")))) {
+        // 崩溃日志同样带时间戳:事后要能与上下文日志对齐(见 fileMessageHandler 注释)。
+        log.write(QStringLiteral("[%1] [CRASH] %2\n")
+                      .arg(QDateTime::currentDateTime().toString(
+                               QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz")),
+                           text)
+                      .toUtf8());
+        log.flush();
+    }
+    if (locked) g_logMutex.unlock();
 }
 
 /// 把当前线程的调用栈写进日志(纯地址,不含符号)。
@@ -250,16 +286,45 @@ int main(int argc, char* argv[]) {
             }
         }
     }
-    if (!ownDataDir) {
-        SingleInstance instance;
-        if (!instance.ensure("NextboardSingleInstance")) {
-            // 已有实例:激活它的窗口后退出
-            instance.activateExisting();
-            return 0;
-        }
+    // ⚠️ **门禁对象必须活到 main 返回**(2026-11-03 修)。
+    // 原实现把它声明在上面的 if 块里,块一结束就析构 → single_instance.cpp 的
+    // 析构里 ReleaseMutex + CloseHandle 提前归还了命名互斥量。命名内核对象在
+    // **最后一个句柄关闭时即销毁**,于是紧接着的下一次启动 CreateMutexW 会成功、
+    // ensure() 返回 true —— 两个完整实例并存:双托盘图标、两路剪贴板监听写同一个
+    // data/、第二个实例的全局热键全部注册失败并弹「快捷键不可用(被其他程序占用)」。
+    // 用户报的"快捷键冲突"正是这个,而不是热键本身。
+    // (变量名用 gate 而非 instance:下面 make_unique 的 PanelWindow 在同类作用域里。)
+    SingleInstance singleInstance;
+    // 门禁键 = **数据目录**(见 single_instance.cpp 的 dirHash):
+    // 两个用不同 --data-dir 的实例各写各的库,不该互相挡掉。
+    // 此刻 QApplication 还没构造,故用 appDataDirEarly()(appDataDir() 依赖
+    // applicationDirPath(),此时返回空串)。
+    const QString instanceKey = nb::appDataDirEarly();
+    if (!ownDataDir && !singleInstance.ensure(instanceKey)) {
+        // 已有实例:激活它的窗口后退出(PanelWindow::nativeEvent 认领 WM_APP_ACTIVATE)
+        singleInstance.activateExisting();
+        return 0;
     }
 
-    QApplication app(argc, argv);
+    // ⚠️ **QApplication 故意活到进程结束**(2026-11-03,定位 0xC0000374)。
+    //
+    // Qt 有一条硬约束:**所有 QObject 必须在 QApplication 之前销毁**。而本进程的
+    // 几个进程级状态都是静态对象,它们的析构排在 main 之后:
+    //   · CoreFacade::instance()  —— Meyers 单例,是 QObject
+    //   · g_overlays(QList<QPointer<OverlayWidget>>)—— QPointer 析构要碰 QObject 的弱引用
+    //   · 若干 static QImage
+    // 栈上的 QApplication 会在 main return 时先析构,于是上面这些静态 Qt 对象在
+    // **QApplication 已死**之后才析构 —— 它们析构时要访问 Qt 的全局状态,那已经拆了。
+    //
+    // 实测证据(退出期埋点 + HeapValidate):
+    //   · 崩溃发生在 RESULT 打印之后;
+    //   · 退出前与 exec() 返回后 HeapValidate(GetProcessHeap()) 均为 **OK**
+    //     → 损坏不在业务执行期,只在拆卸期;
+    //   · 崩溃由 CRT 在 free 时发现,走 fast-fail,**不落 [CRASH] 日志**;
+    //   · 概率 ~5-13%(取决于当时遗留了多少连接/子对象/事件队列状态)。
+    // 改为堆分配且**不 delete**:Qt 与所有静态 Qt 对象的析构顺序因此正确,
+    // 进程退出由操作系统统一回收(这是 Qt 桌面应用的常规做法,不是"泄漏")。
+    auto* app = new QApplication(argc, argv);
     QApplication::setApplicationName("Nextboard");
     QApplication::setOrganizationName("Nextboard");
     // 应用图标:主面板标记(AppMark)的 ico 版,已打进 Qt 资源(不依赖工作目录)。
@@ -601,6 +666,10 @@ int main(int argc, char* argv[]) {
     // nbcore 通知 HWND = 主面板窗口;WM_APP → PanelWindow::clipChanged
     // → ClipEntryModel::refresh(200ms 去抖)。
     core.setNotifyHwnd(panel.nativeHandle());
+    // 发布本实例的面板 HWND:被拒绝的第二个实例据此刻点投递 WM_APP_ACTIVATE。
+    // 必须在这里(窗口已创建、nativeHandle() 有效)而不是更早 —— 早于窗口创建的
+    // winId() 会递归触发 CreateWindowEx(见 panel_window.cpp 的警告)。
+    singleInstance.publishWindow(panel.nativeHandle());
 
     // ---- 桌面便签(docs/20-todo-sticky-note.md)----
     // 启动恢复:只为 todo_note.visible=1 的行建窗(visible=0 是"几何记忆")。
@@ -630,13 +699,48 @@ int main(int argc, char* argv[]) {
     QObject::connect(&panel, &nb::PanelWindow::clipChanged, &panel,
                      [noteSyncDebounce] { noteSyncDebounce->start(); });
     // 屏幕增删/分辨率变化:全部重夹回各自可用区(拔副屏后不留虚空的窗口)
-    QObject::connect(qApp, &QGuiApplication::screenAdded, &panel,
-                     [] { nb::NoteRegistry::instance().reclampAll(); });
-    QObject::connect(qApp, &QGuiApplication::screenRemoved, &panel,
-                     [] { nb::NoteRegistry::instance().reclampAll(); });
+    //
+    // ⚠️ 两条链路都要接(2026-11-03 补):便签与贴图是**两套独立窗口**,
+    //    原先只接了便签 —— 贴图停在被拔掉那块屏的坐标上会留在虚空里,而贴图
+    //    是 Qt::Tool、不占任务栏、不进 Alt+Tab、托盘也没有列表,用户**没有任何
+    //    手段**把它找回来(便签至少还有托盘菜单兜底)。
+    QObject::connect(qApp, &QGuiApplication::screenAdded, &panel, [] {
+        nb::NoteRegistry::instance().reclampAll();
+        nb::CoreFacade::instance().reclampAllPins();
+    });
+    QObject::connect(qApp, &QGuiApplication::screenRemoved, &panel, [] {
+        nb::NoteRegistry::instance().reclampAll();
+        nb::CoreFacade::instance().reclampAllPins();
+    });
 
-    const int rc = QApplication::exec();
+    const int rc = app->exec();
 
+    // ⚠️ **必须先把线程池排空,再拆核心**(2026-11-03,定位 0xC0000374)。
+    //
+    // 实测时序(埋点日志):
+    //   35.545 WORKER enter call:"ocr_entry"   ← 翻译链路把 OCR 丢进 QThreadPool
+    //   35.583 EXIT after-exec  active=1       ← exec() 已返回,Qt 开始销毁
+    //   35.584 EXIT after-shutdown
+    //   35.973 WORKER exit call:"ocr_entry"    ← worker 在主线程离开后又跑了 389ms
+    //
+    // 危害有三层:
+    //   ① `AsyncCall::run()` 收尾要 `QMetaObject::invokeMethod(&CoreFacade::instance(), …)`,
+    //      而 CoreFacade/CoreBridge 都是**函数级静态单例**,正处在静态析构期 ——
+    //      对已销毁对象投递事件是堆损坏(0xC0000374),且它由 CRT 在 free 时发现,
+    //      属 fast-fail,**不会**落 `[CRASH]` 日志(与现场"断言全过、退出即消失、
+    //      无崩溃条目"完全吻合;偶发是因为 OCR 首次建引擎耗时不定)。
+    //   ② ffi.rs 的 nb_shutdown 注释明确要求"只能在宿主确认没有任何 nb_call 在执行时
+    //      调用" —— 此前宿主从不排空线程池,这条契约**从未被满足**。
+    //   ③ 静态析构期 nbcore.dll 仍在(刻意不 FreeLibrary),但 Rust 侧状态与
+    //      Qt 侧单例的存活期不再有保证。
+    //
+    // 5s 超时是兜底:正常任务(OCR/二维码/translate)都在秒级内结束;真卡死时
+    // 宁可带着风险退出,也不能让用户点"退出"后进程挂住。
+    if (!QThreadPool::globalInstance()->waitForDone(5000)) {
+        qWarning() << "退出:线程池 5s 内未排空(仍有"
+                   << QThreadPool::globalInstance()->activeThreadCount()
+                   << "个任务在跑),继续退出";
+    }
     core.shutdown();
     return rc;
 }

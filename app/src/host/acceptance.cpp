@@ -1104,4 +1104,12 @@ void runTodoLayoutFlow(PanelWindow& panel) {
     });
 }
 
+int flowAbortAndQuit(const char* tag, int failures, const char* why) {
+    // 计一条失败:见 acceptance.hpp 的说明 —— 流程没跑完 ≠ 通过。
+    qWarning().noquote() << tag << "⚠️ 流程中止:" << why;
+    qInfo().noquote() << tag << "RESULT failures =" << (failures + 1) << "(含中止)";
+    QApplication::quit();
+    return failures + 1;
+}
+
 } // namespace nb

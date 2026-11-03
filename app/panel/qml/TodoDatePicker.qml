@@ -49,6 +49,9 @@ Rectangle {
     /// ⚠️ Tumbler 没有 `positionAt()`(那是 ListView 的);定位选中项只能给
     ///    `currentIndex` 赋下标 —— 值 → 下标的换算靠 values 数组 indexOf。
     function setFromMs(ms) {
+        // 每次打开选择器都会走这里 → 顺带刷新年份表(见 yearTumbler 的注释:
+        // 年份不该是"首次求值就固定"的绑定,否则跨年运行的实例会拿着旧年份)。
+        yearTumbler.refreshYears()
         syncing = true
         if (!ms || ms <= 0) {
             selectedMs = 0
@@ -269,12 +272,21 @@ Rectangle {
             Wheel {
                 id: yearTumbler
                 caption: "年"
-                values: {
+                // ⚠️ 年份表**一次性算好并存在属性里**(2026-11-03,外部审查 #37)。
+                //    原先直接在 values 绑定里 new Date() —— new Date() 不产生绑定
+                //    依赖,该绑定只在首次读取时求值一次,跨年运行的实例会一直拿着
+                //    旧年份表(靠 ±3 年余量兜底,约 3 年后露出问题)。
+                //    现在没有响应式依赖了,把"什么时候重算"写成明确契约:
+                //    每次 setFromMs(打开选择器)调用 refreshYears() 重算一次。
+                property var yearValues: []
+                values: yearValues
+                function refreshYears() {
                     const y = new Date().getFullYear()
                     const arr = []
                     for (let i = y - 3; i <= y + 3; ++i) arr.push(i)
-                    return arr
+                    yearValues = arr
                 }
+                Component.onCompleted: refreshYears()
                 onCurrentIndexChanged: picker.rebuildFromTumblers()
             }
             Wheel {

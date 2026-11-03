@@ -121,15 +121,13 @@ void runStitchLiveFlow() {
     QTimer::singleShot(1200, qApp, [] {
         QScreen* screen = QGuiApplication::primaryScreen();
         if (!screen) {
-            qWarning() << "STITCH-LIVE   FAIL 无可用屏幕";
-            QApplication::quit();
+            flowAbortAndQuit("STITCH-LIVE", g_liveFailures, "无可用屏幕");
             return;
         }
         const QRect geo = screen->geometry();
         CoreBridge& core = CoreBridge::instance();
         if (!core.hasStitch()) {
-            qWarning() << "STITCH-LIVE   FAIL nbcore 没有长截图导出";
-            QApplication::quit();
+            flowAbortAndQuit("STITCH-LIVE", g_liveFailures, "nbcore 没有长截图导出");
             return;
         }
 
@@ -171,8 +169,7 @@ void runStitchLiveFlow() {
             if (o && o->screen() == screen) { overlay = o; break; }
         }
         if (!overlay) {
-            qWarning() << "STITCH-LIVE   FAIL 会话未建立遮罩";
-            QApplication::quit();
+            flowAbortAndQuit("STITCH-LIVE", g_liveFailures, "会话未建立遮罩");
             return;
         }
         overlay->raise();
@@ -289,12 +286,14 @@ void runStitchLiveFlow() {
             QObject::connect(overlay, &OverlayWidget::stitchFinished, overlay,
                              [finishedImage](const QImage& img) { *finishedImage = img; });
 
+            // region 一路按值捕获到最内层:下面的"长图宽度 = 选区设备像素宽"以它为准
+            // (它是核心固化的实际采集矩形,比现场重算的 qRound(sel.width()*dpr) 更自洽)。
             QTimer::singleShot(400, qApp,
-                               [overlay, page, sel, screen, sampleCenter, finishedImage] {
+                               [overlay, page, sel, screen, sampleCenter, finishedImage, region] {
                 page->scrollBy(80);
                 QApplication::processEvents();
                 QTimer::singleShot(500, qApp,
-                                   [overlay, page, sel, screen, sampleCenter, finishedImage] {
+                                   [overlay, page, sel, screen, sampleCenter, finishedImage, region] {
                     const QColor after = sampleCenter("after-scroll");
                     const QColor wantAfter =
                         LivePage::colorAt((sel.center().y() - page->y()) + page->offset());
@@ -313,8 +312,10 @@ void runStitchLiveFlow() {
                     // (HUD 的几何/可点性已由 --capture-toolbar-flow 的纯几何断言
                     // 与 panelOutsideSelection 覆盖)。
                     overlay->requestStitchFinishForTest();
+                    // 宽度基准用**外层已取到的 region**(见下方断言的说明)。
+                    const int expectWidth = region.width();
                     QTimer::singleShot(700, qApp,
-                                       [overlay, sel, screen, finishedImage] {
+                                       [overlay, sel, screen, finishedImage, expectWidth] {
                         qInfo() << "STITCH-LIVE  finished image ="
                                 << finishedImage->width() << "x" << finishedImage->height()
                                 << " (selection device height ≈"
@@ -328,10 +329,17 @@ void runStitchLiveFlow() {
                                                  "(滚动内容真的拼进去了;实得 %1 vs %2)")
                                       .arg(finishedImage->height())
                                       .arg(selDeviceH));
-                        liveCheck(finishedImage->width() ==
-                                      qRound(sel.width() * screen->devicePixelRatio()),
-                                  QStringLiteral("长图宽度 = 选区设备像素宽"));
-
+                        // ⚠️ 基准用**采集时实际的 region**,不要现场重算
+                        //    (2026-11-03)。原写法 `qRound(sel.width() * dpr)` 与
+                        //    前面的 region 校验(容许 ±2)口径不一致:150% 屏上
+                        //    sel.width()=400 → 700,而核心固化出的 region 宽是 701,
+                        //    于是"容差通过的检查"与"要求精确相等的检查"互相矛盾,
+                        //    真跑这条流程必然报一条失败。
+                        //    region 是本次会话真正采下来的设备矩形,也已在上面的
+                        //    断言里校验过(与选区一致,±2),用它作宽度的基准是唯一
+                        //    自洽的口径。region 在外层定义,故先取成 expectWidth 再传进内层。
+                        liveCheck(finishedImage->width() == expectWidth,
+                                  QStringLiteral("长图宽度 = 选区设备像素宽(基准=实际 region)"));
                         qInfo() << "STITCH-LIVE  RESULT failures =" << g_liveFailures;
                         QApplication::quit();
                     });

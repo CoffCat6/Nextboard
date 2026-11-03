@@ -162,8 +162,15 @@ void NoteRegistry::applyLimit() {
 }
 
 void NoteRegistry::close(const QString& todoId) {
-    QPointer<NoteWindow>& ref = m_windows[todoId];
-    auto* window = ref.data();
+    // ⚠️ 用 value() 而非 operator[](2026-11-03 修)。原写法 `QPointer<NoteWindow>& ref =
+    //    m_windows[todoId]` 有三个隐患:
+    //    ① 键不存在时**隐式插入**一个空 QPointer(查询带上了修改语义,与
+    //       open()/describe() 用 value()/contains() 的口径不一致);
+    //    ② ref 是哈希槽的**引用**,而下面的 window->close() 会同步触发
+    //       destroyed → forget() → m_windows.remove(id) —— 哈希可能重排,ref 悬空;
+    //    ③ 今天 ref 在 close() 之后没被再用,所以崩不了。这种"恰好没用到"的
+    //       约定迟早被后人踩穿。
+    const QPointer<NoteWindow> window = m_windows.value(todoId);
     if (!window) {
         m_windows.remove(todoId);
         return;

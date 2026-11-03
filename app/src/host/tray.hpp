@@ -14,6 +14,9 @@ class Tray : public QSystemTrayIcon {
     Q_OBJECT
 public:
     Tray(PanelWindow& panel, CoreBridge& core, QObject* parent = nullptr);
+    /// 显式接管 m_menu 的所有权:QSystemTrayIcon::setContextMenu() 不取得它,
+    /// 而 QMenu 的父对象只能是 QWidget*,所以无法靠 parent 链回收。
+    ~Tray() override;
 
     /// 待办到点(docs/05-todo.md §4.3):拉取待播报列表 → 逐条弹气泡 →
     /// 回写"已播报"标记(宿主确认制去重,气泡只弹一次)。

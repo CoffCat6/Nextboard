@@ -1001,10 +1001,15 @@ void AnnotationEngine::clampCropRect() {
 QImage AnnotationEngine::compose() const {
     const QSize size = m_base.size();
     QImage out(size, QImage::Format_ARGB32_Premultiplied);
+    // ⚠️ 分配失败(长截图合成图可达数百 MB)时 QImage 为 null、QPainter 不激活,
+    //    后续 render 会写空指针 → 0xC0000005(与 image_save.cpp:53-67 已修的
+    //    "painter 未激活"同一类)。宁可返回空图,让调用方走"保存失败"分支。
+    if (out.isNull()) return QImage();
     out.fill(Qt::transparent);
     // 裁剪覆盖层不进输出(用户裁到一半按「完成」是真实场景)
     const CropOverlayHide cropHidden(m_cropOverlay);
     QPainter painter(&out);
+    if (!painter.isActive()) return QImage();
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setRenderHint(QPainter::SmoothPixmapTransform);
     // 源矩形**显式**取底图尺寸,不吃 sceneRect 的隐式推导:
@@ -1018,9 +1023,11 @@ QImage AnnotationEngine::compose() const {
 QImage AnnotationEngine::compose(const QRect& physicalRect) const {
     if (!physicalRect.isValid() || physicalRect.isEmpty()) return compose();
     QImage out(physicalRect.size(), QImage::Format_ARGB32_Premultiplied);
+    if (out.isNull()) return QImage();          // 同 compose():分配失败时不进 painter
     out.fill(Qt::transparent);
     const CropOverlayHide cropHidden(m_cropOverlay);
     QPainter painter(&out);
+    if (!painter.isActive()) return QImage();
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setRenderHint(QPainter::SmoothPixmapTransform);
     // 只渲染选区对应的场景区域(源 = 物理像素 = 场景坐标)

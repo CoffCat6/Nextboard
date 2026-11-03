@@ -6,6 +6,7 @@
 #include "panel/panel_window.hpp"
 
 #include <QCryptographicHash>
+#include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
 #include <QImage>
@@ -95,7 +96,19 @@ QImage hIconToImage(HICON icon) {
         return QImage();
     }
     const int w = bmp.bmWidth, h = bmp.bmHeight;
+    // ⚠️ w/h 可能为 0(畸形图标),分配也可能失败:两者都让 color 为 null,
+    //    此时 color.bits() 是空指针,GetDIBits 直接写它 → 0xC0000005。
+    if (w <= 0 || h <= 0) {
+        ::DeleteObject(info.hbmColor);
+        ::DeleteObject(info.hbmMask);
+        return QImage();
+    }
     QImage color(w, h, QImage::Format_ARGB32_Premultiplied);
+    if (color.isNull() || !color.bits()) {
+        ::DeleteObject(info.hbmColor);
+        ::DeleteObject(info.hbmMask);
+        return QImage();
+    }
     BITMAPINFO bmi = {};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bmi.bmiHeader.biWidth = w;
@@ -121,6 +134,12 @@ QImage hIconToImage(HICON icon) {
         if (!hasAlpha) {
             // 用 mask 填 alpha:mask 1bpp,0 = 不透明
             QImage mask(w, h, QImage::Format_Mono);
+            if (mask.isNull() || !mask.bits()) {
+                // mask 拿不到:保留 color 的原始 alpha(旧图标会全不透明,属可见降级)
+                ::DeleteObject(info.hbmColor);
+                ::DeleteObject(info.hbmMask);
+                return out.convertToFormat(QImage::Format_ARGB32);
+            }
             BITMAPINFO mbmi = bmi;
             mbmi.bmiHeader.biBitCount = 1;
             HDC dc2 = ::GetDC(nullptr);
@@ -147,7 +166,18 @@ QImage hIconToImage(HICON icon) {
 QString resolveLnkTarget(const QString& lnkPath) {
     // COM 就绪兜底:Qt 不自动初始化;已初始化时返回 S_FALSE/RPC_E_CHANGED_MODE,
     // 均不重复 Uninitialize(引用计数模型,此处自增无副作用)。
-    ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    // ⚠️ 与 CoUninitialize 配对(2026-11-03):CoInitializeEx 返回 S_OK / S_FALSE 时
+    //    **本函数都增加了一次引用计数**,必须配对减掉;返回 RPC_E_CHANGED_MODE
+    //    (线程已是 MTA)时不算初始化,不能减。原实现完全不减 —— 主线程上只是
+    //    进程级泄漏(可接受),但一旦被非主线程调用就是线程退出后的 COM 泄漏。
+    const HRESULT hrCom = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const bool comNeedsUninit = SUCCEEDED(hrCom);
+    struct ComGuard {
+        bool active;
+        ~ComGuard() {
+            if (active) ::CoUninitialize();
+        }
+    } const comGuard{comNeedsUninit};
     const QString native = QDir::toNativeSeparators(lnkPath);
     IShellLinkW* link = nullptr;
     const HRESULT hrCreate = ::CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
@@ -187,7 +217,7 @@ void QuickCommands::registerActions() {
                       [this] {
                           // 与热键 Ctrl+Shift+A 同源:收面板 → 等窗口真消失 → 框选
                           m_panel.hide();
-                          QTimer::singleShot(150, [] {
+                          QTimer::singleShot(150, qApp, [] {
                               startCaptureSession(nb::CaptureIntent::Region);
                           });
                           return true;

@@ -512,9 +512,26 @@ bool OcrResultPanel::eventFilter(QObject* watched, QEvent* event) {
 }
 
 void OcrResultPanel::closeEvent(QCloseEvent* e) {
-    // 预览浮窗是独立顶层:面板走 WA_DeleteOnClose 后它若不主动关,
-    // 会留一个看不见的常驻窗口(与面板"不留尸"的约束同源)。
-    hidePreview();
+    // 预览浮窗是独立顶层(无父对象):面板走 WA_DeleteOnClose 后它若只 hide,
+    // 会留一个**看不见但仍存在**的顶层窗口 —— 面板本身销毁了,这个窗口没有
+    // 任何人持有它的指针,再也没机会删。
+    //
+    // ⚠️ 2026-11-03 前这里只调 hidePreview(),于是一个 QWidget + 2 个 QLabel +
+    //    一份 stylesheet 随每个 OCR 结果面板永久泄漏;OCR 是高频动作,长驻托盘
+    //    应用里这份泄漏单调累积。
+    // 现在:deleteLater() 并置空三个指针(deleteLater 而非 delete:本函数还在
+    // QWidget 的事件处理栈上,立即删除自己创建的兄弟窗口容易踩到半销毁状态)。
+    if (m_preview) {
+        m_preview->hide();
+        m_preview->deleteLater();
+        m_preview = nullptr;
+        m_previewImage = nullptr;      // 是 m_preview 的子对象,随它一起析构
+        m_previewCaption = nullptr;    // 同上
+    }
+    // 状态一并复位:否则下一次 buildPreview 之前若有代码读 m_hoverLine/anchor,
+    // 会拿到上一轮的残留值(hidePreview 里做的就是这件事)。
+    m_hoverLine = -1;
+    m_previewAnchorGlobal = QRect();
     QFrame::closeEvent(e);
 }
 

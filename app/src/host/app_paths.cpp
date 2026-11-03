@@ -3,6 +3,8 @@
 #include <QCoreApplication>
 #include <QDir>
 
+#include <windows.h>
+
 namespace nb {
 
 namespace {
@@ -20,6 +22,19 @@ QString appDataDir() {
     }
     // 便携式布局:数据跟着 exe 走,便于整目录拷贝迁移/绿色部署
     return QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("data"));
+}
+
+QString appDataDirEarly() {
+    if (!g_dataDirOverride.isEmpty()) {
+        return QDir::cleanPath(g_dataDirOverride);
+    }
+    // ⚠️ 不能用 QCoreApplication::applicationDirPath():QApplication 尚未构造时
+    //    它返回空串(见函数注释)。这里直接问 Win32 要 exe 路径。
+    wchar_t buf[MAX_PATH] = {};
+    const DWORD n = ::GetModuleFileNameW(nullptr, buf, MAX_PATH);
+    if (n == 0) return QString();
+    const QString exePath = QString::fromWCharArray(buf, static_cast<int>(n));
+    return QDir(QDir(exePath).absolutePath()).filePath(QStringLiteral("data"));
 }
 
 bool ensureAppDataDir() {

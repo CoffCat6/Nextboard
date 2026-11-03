@@ -102,11 +102,15 @@ void PanelWindow::applyTopmost() {
     // 置顶与否:固定中或停在设置页 → HWND_TOPMOST,否则 HWND_NOTOPMOST。
     // 与 setPinned 同一机制;翻译页**刻意不置顶**(见其注释)。
     const bool topmost = m_pinned || m_mode == Mode::Settings;
-    const HWND hwnd = m_cachedHwnd ? m_cachedHwnd : reinterpret_cast<HWND>(winId());
-    if (hwnd) {
-        ::SetWindowPos(hwnd, topmost ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
-                       SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    }
+    // ⚠️ **不再用 winId() 兜底**(2026-11-03,外部审查 #31)。
+    //    本文件 nativeEvent 处已明确记载:窗口创建期间(WM_NCCREATE 等)调用
+    //    winId() 会递归触发 CreateWindowEx → "CreateWindowEx failed"。
+    //    现在全部调用方都在窗口创建之后,所以安全 —— 但"兜底"的存在意味着任何
+    //    将来更早的调用路径都会复活那个已记载过的崩溃。缓存没有就什么也不做:
+    //    置顶是视觉修饰,漏一次远好于递归创建窗口。
+    if (!m_cachedHwnd) return;
+    ::SetWindowPos(m_cachedHwnd, topmost ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
 /// 读回用户上次调过的列表尺寸。
@@ -600,6 +604,23 @@ bool PanelWindow::nativeEvent(const QByteArray& eventType, void* message, qint64
         }
         if (msg->message == nb::WM_APP_SETTINGS_CHANGED) {
             emit clipChanged(); // 设置变化也刷新一次(监听开关等影响列表)
+            if (result) *result = 0;
+            return true;
+        }
+        // 二次启动唤起(single_instance.cpp 的 PostMessage(HWND_BROADCAST, WM_APP_ACTIVATE))。
+        // ⚠️ 2026-11-03 前这条消息**没有接收方**:single_instance.cpp 里的
+        //    ActivateFilter 从未被实例化,于是"再次点图标"广播出去后无人理会,
+        //    二次启动静默 return 0 —— 用户看到的是"点了图标没反应"。
+        //    在这里接住即可,不必再装一个 QAbstractNativeEventFilter。
+        if (msg->message == nb::WM_APP_ACTIVATE) {
+            // 留一条日志:这条链路是跨进程的,出问题时"没反应"和"没收到"必须能区分
+            // (此前 ActivateFilter 从未实例化,消息确实一直被丢弃而无任何痕迹)。
+            qInfo() << "收到二次启动唤起广播,前置主面板";
+            // 广播是发给**所有**顶层窗口的:本进程可能开着编辑器/贴图/便签,
+            // 只让主面板响应(它们的 nativeEvent 不会走到这里 —— 只有 PanelWindow 有)。
+            // 延后一拍再显示:此刻仍在消息分发中,直接 show() 会在这个栈上跑一次
+            // 完整布局,而触发它的是另一个进程的输入 —— 排到队列尾更稳。
+            QTimer::singleShot(0, this, [this] { showAtCursor(); });
             if (result) *result = 0;
             return true;
         }

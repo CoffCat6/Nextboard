@@ -6,6 +6,7 @@
 #include "panel/panel_window.hpp"
 
 #include <QApplication>
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QDebug>
 #include <QJsonArray>
@@ -49,7 +50,22 @@ Tray::Tray(PanelWindow& panel, CoreBridge& core, QObject* parent)
     show();
 }
 
+Tray::~Tray() {
+    // 先摘掉引用再删:菜单树里所有 action 的 lambda 都按 this 捕获,
+    // 只要 Tray 还活着它们就不会被触发(QMenu 是独立弹出窗口,不像子控件
+    // 那样随父隐藏)—— 但显式摘除让"销毁顺序"写在代码里而不是靠推理。
+    setContextMenu(nullptr);
+    delete m_menu;   // 连带两个子菜单与全部 action(QMenu 拥有子菜单/自己 addAction 的)
+    m_menu = nullptr;
+}
+
 void Tray::buildMenu() {
+    // ⚠️ 所有权必须显式接管(2026-11-03 修)。QSystemTrayIcon::setContextMenu()
+    // **不取得**菜单所有权(Qt 文档明写),而无父的 QMenu 没人删 —— 整棵菜单树
+    // (含两个子菜单与全部 action)在进程退出前永不释放。
+    // 不能写 `new QMenu(this)`:QMenu 的父参数是 QWidget*,而 Tray 是
+    // QSystemTrayIcon(QObject),类型不匹配。故由 Tray 的析构函数显式 delete
+    // (见 tray.hpp 的 ~Tray)。
     m_menu = new QMenu();
     // 托盘菜单用**独立的、更小的**字号(见 app_font.hpp 的 kTrayMenuFontPixelSize):
     // 它是系统级弹层,与桌面其它右键菜单并排,用界面正文的 14px 会明显偏大。
@@ -81,16 +97,21 @@ void Tray::buildMenu() {
     //    另:一级菜单现在**有了子菜单箭头**,当初"右内边距 24px 是给箭头预留、
     //    无子菜单时纯空占"的历史结论不再成立 —— 箭头列已必要,内边距保持 8px
     //    会让文字与箭头贴得很近,属可接受(条目短),不再为它单独加规则。
+    // ⚠️ 选择器必须同时覆盖**两个二级菜单**:QSS 作用于目标窗口及其全部子窗口,
+    //    但 #nbTrayMenu 只匹配一级菜单本体,子菜单(独立窗口)会退回原生样式。
     m_menu->setStyleSheet(QStringLiteral(
-        "QMenu#nbTrayMenu, QMenu#nbTrayTodoMenu "
+        "QMenu#nbTrayMenu, QMenu#nbTrayTodoMenu, QMenu#nbTrayNoteMenu "
         "{ background: #FFFFFF; border: 1px solid #D9E0E7; padding: 2px; }"
-        "QMenu#nbTrayMenu::item, QMenu#nbTrayTodoMenu::item "
+        "QMenu#nbTrayMenu::item, QMenu#nbTrayTodoMenu::item, QMenu#nbTrayNoteMenu::item "
         "{ color: #17202A; padding: 4px 8px; border-radius: 4px; }"
-        "QMenu#nbTrayMenu::item:selected, QMenu#nbTrayTodoMenu::item:selected "
+        "QMenu#nbTrayMenu::item:selected, QMenu#nbTrayTodoMenu::item:selected, "
+        "QMenu#nbTrayNoteMenu::item:selected "
         "{ background: #E8F1FF; color: #17202A; }"
-        "QMenu#nbTrayMenu::item:disabled, QMenu#nbTrayTodoMenu::item:disabled "
+        "QMenu#nbTrayMenu::item:disabled, QMenu#nbTrayTodoMenu::item:disabled, "
+        "QMenu#nbTrayNoteMenu::item:disabled "
         "{ color: #B6BEC8; }"
-        "QMenu#nbTrayMenu::separator, QMenu#nbTrayTodoMenu::separator "
+        "QMenu#nbTrayMenu::separator, QMenu#nbTrayTodoMenu::separator, "
+        "QMenu#nbTrayNoteMenu::separator "
         "{ height: 1px; background: #D9E0E7; margin: 4px 8px; }"));
     m_menu->addAction("打开主面板", [this] { m_panel.showCentered(); });
 
@@ -114,9 +135,17 @@ void Tray::buildMenu() {
     //    不进 Alt+Tab,被别的置顶窗口盖住时就再也点不到。core_facade.cpp 里
     //    "漏一次用户就再也找不回来"的教训对便签同样成立。
     m_noteMenu = new QMenu(QStringLiteral("桌面便签"), m_menu);
-    m_noteMenu->setObjectName(QStringLiteral("nbTrayTodoMenu"));
+    // 曾误抄成 nbTrayTodoMenu(与上面「今日待办」同名):样式表能同时命中两者、
+    // 视觉上看不出,但任何 findChild<QMenu*>("nbTrayTodoMenu") 都拿到不确定结果。
+    m_noteMenu->setObjectName(QStringLiteral("nbTrayNoteMenu"));
     m_noteMenu->addAction(QStringLiteral("暂无便签"))->setEnabled(false);
     m_menu->addMenu(m_noteMenu);
+    // 便签集合/状态变化 → 重建子菜单(见 NoteRegistry::changed 的注释:
+    // 该信号此前零订阅,四处 emit 全是空转)。只在菜单**正展开**时重建 ——
+    // 其余时刻 aboutToShow 会重建,无需提前做。
+    connect(&NoteRegistry::instance(), &NoteRegistry::changed, this, [this] {
+        if (m_noteMenu && m_noteMenu->isVisible()) refreshNoteSubmenu();
+    });
     connect(m_noteMenu, &QMenu::triggered, this, [this](QAction* action) {
         const QString cmd = action->data().toString();
         if (cmd == QLatin1String("expand-all")) {
@@ -138,7 +167,7 @@ void Tray::buildMenu() {
     // 延时 150ms 等窗口真正消失(与热键链路 hidePanelThenCapture 同一取舍)。
     const auto capture = [this](CaptureIntent intent) {
         m_panel.hide();
-        QTimer::singleShot(150, [intent] { startCaptureSession(intent); });
+        QTimer::singleShot(150, qApp, [intent] { startCaptureSession(intent); });
     };
     m_menu->addAction("矩形截图", [capture] { capture(CaptureIntent::Region); });
     m_menu->addAction("全屏截图", [capture] { capture(CaptureIntent::Fullscreen); });
@@ -150,7 +179,7 @@ void Tray::buildMenu() {
     m_delayAction = m_menu->addAction(QStringLiteral("延时截图"));
     connect(m_delayAction, &QAction::triggered, this, [this] {
         m_panel.hide();   // 与即时截图同理:面板必须先收起,否则会被拍进画面
-        QTimer::singleShot(150, [] {
+        QTimer::singleShot(150, qApp, [] {
             startDelayedCapture(captureDelaySeconds(), CaptureIntent::Region);
         });
     });

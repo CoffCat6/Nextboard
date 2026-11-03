@@ -17,6 +17,8 @@
 
 #include <QApplication>
 #include <QClipboard>
+
+#include "host/core_bridge.hpp"
 #include <QGuiApplication>
 #include <QPropertyAnimation>
 #include <QCheckBox>
@@ -1015,7 +1017,13 @@ void NoteWindow::showToolbar(const QPoint& globalPos) {
             text = text.isEmpty() ? m_lastCommittedNote
                                   : text + QStringLiteral("\n\n") + m_lastCommittedNote;
         }
-        QGuiApplication::clipboard()->setText(text);
+        // 经核心写入(带打开重试),理由同 pin_window::copyToClipboard:
+        // Qt 直写在剪贴板被占用时静默失败,而这里紧接着会提示"已复制内容"。
+        const bool ok = CoreBridge::instance().copyTextToClipboard(text);
+        if (!ok) {
+            showTransientHint(QStringLiteral("复制失败:剪贴板被占用,请重试"));
+            return;
+        }
         // 提示必须落在便签上:主面板可能隐藏着,应用级 toast 看不见
         // (与贴图 showNotice 同一取舍,见 pin_window.cpp 的注释)。
         showTransientHint(QStringLiteral("已复制内容"));

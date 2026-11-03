@@ -26,6 +26,16 @@ namespace nb {
 /// 返回该覆盖值。
 QString appDataDir();
 
+/// 数据目录的**早期**版本:不依赖 QCoreApplication(用 Win32 取 exe 路径)。
+///
+/// 唯一用途是"QApplication 构造之前"的场景 —— 目前只有单实例门禁(main.cpp
+/// 在 QApplication 之前就要算互斥量名,而 appDataDir() 依赖 applicationDirPath()、
+/// 此时返回空串)。行为与 appDataDir() 保持一致:有 --data-dir 覆盖就用覆盖值,
+/// 否则 exe 同级 data。
+/// ⚠️ 正常的运行期代码一律用 appDataDir(),不要用这个 —— 两处口径分开维护
+/// （一个走 Qt、一个走 Win32)只是为了让 QApplication 之前的调用点有正确值。
+QString appDataDirEarly();
+
 /// 覆盖数据目录(必须在任何 `appDataDir()` 调用**之前**,即 main 早期解析参数时)。
 /// 用途:自动化验收跑在独立临时目录,**绝不写用户真实数据**;
 /// 空串 = 恢复默认(exe 同级 data)。
