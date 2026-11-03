@@ -8,10 +8,13 @@
 
 #include <QMap>
 
+#include <memory>
+
 namespace nb {
 
 class PanelWindow;
 class CoreBridge;
+class HotkeyFilter;
 
 class Hotkeys : public QObject {
     Q_OBJECT
@@ -42,7 +45,6 @@ public slots:
 
 private:
     // QWidget 无关:用 QAbstractNativeEventFilter 收 WM_HOTKEY 更直接
-    bool nativeEvent(const QByteArray& eventType, void* message, qint64* result);
 
 private:
     void registerAction(Action action, const QString& combo);
@@ -50,6 +52,11 @@ private:
 
     PanelWindow& m_panel;
     CoreBridge& m_core;
+    /// WM_HOTKEY 过滤器。**由本对象持有**(成员而非裸 new),生命周期严格跟随 ——
+    /// 详见 hotkeys.cpp 里 HotkeyFilter 的注释(2026-11-02 闪退修复)。
+    /// 用 std::unique_ptr 而不是值成员:HotkeyFilter 的完整定义在本文件之外,
+    /// 值成员需要完整类型。
+    std::unique_ptr<HotkeyFilter> m_filter;
     // hotkey id 从 1 递增;key = 注册 id,value = action
     QMap<int, Action> m_registered;
     int m_nextId = 1;

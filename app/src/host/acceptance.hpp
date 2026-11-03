@@ -90,6 +90,17 @@ void runSmartLiveFlow();
 /// → 读回设置断言翻转并落盘 → 再点一次复原。会写 settings,必须配 --data-dir。
 void runSmartSettingsFlow(PanelWindow& panel);
 
+/// 热键生命周期验收(--hotkey-lifecycle-flow,docs/29 §3):
+///
+/// 回归对象(2026-11-02 用户反馈"快捷键冲突导致 Nextboard 闪退"):WM_HOTKEY 的
+/// 事件过滤器裸 new、从不摘除,而宿主 Hotkeys 是 main() 里的**栈对象** —— 退出期
+/// 宿主先析构,过滤器仍挂在 qGuiApp 上,消息一来就经悬垂指针访问已析构对象
+/// (0xC0000005)。
+///
+/// 断言:① 宿主存活时 WM_HOTKEY 被接管;② 宿主析构后过滤器已摘除、消息落到哨兵
+/// 且进程不崩;③ 连续 5 轮建/删后无泄漏残留。纯内存 + 合成原生消息,无需 --data-dir。
+void runHotkeyLifecycleFlow(PanelWindow& panel);
+
 /// 快捷指令验收(--quick-commands-flow,docs/24 §10):目录完备 / internal 真实执行
 /// (theme.toggle 翻转并复原)/ app 执行与无效路径拒绝 / system 白名单 /
 /// 配置往返 / 未知 type 前向兼容 / 12 条上限。写 settings,配 --data-dir;

@@ -6265,3 +6265,288 @@ docs/24-quick-commands-plan.md(v1 设计稿:§3 数据模型/§4 注册表/§5 s
   被拒。`TEXT-EDIT DONE failures=0`;nbcore 403 项测试全绿(含 4 项新增单测)。
 - 真机确认项:右键「编辑正文…」与卡片「编辑正文」按钮都能开卡片;多行长文本
   滚动正常;Ctrl+Enter 保存后列表卡片内容与大小同步刷新。
+
+## 2026-11-02(日)智能框选:推翻「Chromium 惰性无障碍」,修好元素级
+
+**用户反馈**:「智能框选对 chrome 系的支持不太好」。排查后发现 docs/23 §7.4 那条
+"Chrome/Chromium 元素级不生效(惰性无障碍)"是**我们对自身缺陷的误判**,已修复。
+详见 [docs/26-chromium-smart-capture.md](./26-chromium-smart-capture.md)。
+
+### 根因(与文档里写的完全相反)
+
+原 `probeElementAt` 每层只在同层命中里挑**一个**子节点下沉(取面积最小)。而 Chromium
+的 UIA 顶层恰好是**两个同尺寸 Pane**:
+
+```
+L0 Window 子节点数=2
+   [0] Pane 2077x1388  ← 空壳,0 个子节点
+   [1] Pane 2078x1390  ← 网页内容,34 个节点、深 9~11 层
+   → 取面积最小,选中 [0]
+L1 Pane 子节点数=0      ← 到此为止
+```
+
+`best` 停在 depth=1 = 整窗,症状与"元素级没生效"完全一样。**诊断工具犯了同一个错**:
+`dumpElementTree` 只沿第 0 个孩子继续下沉,而第 0 个恰是空壳 → 输出永远是 `L1 n=0`,
+于是算法与诊断互相印证,把缺陷写成了目标应用的限制。
+
+### 反证「惰性无障碍」(本机实测,不可重现)
+
+- 冷启动全新 profile、**全程不碰 MSAA**,连测 5 次:UIA 后代数均 49、raw 深度均 11;
+- 加 `--force-renderer-accessibility` / `+ --enable-features=UiaProvider`:子树规模
+  与可达深度**零变化**(18→18);
+- UIA 全局焦点事件 + 桌面级结构事件订阅:子树**不变**。
+
+另确认一条此路不通:MSAA(`IAccessible` + `accHitTest`)不能作为退路 ——
+Chromium renderer HWND 上 `accChildCount == 0`,`accHitTest` 无遮罩时也返回 `null`。
+
+### 改动
+
+| 文件 | 改动 |
+| --- | --- |
+| `app/src/capture/smart_capture.cpp` | `probeElementAt` 重写为**受预算约束的 DFS**(同层全部命中兄弟都入栈);删 `sameSizeStreak`;新增 `ProbeStats`;`dumpElementTree` 每层全展开 + 打 `→N` 子节点数 + 沿最厚支路下沉 |
+| `app/src/capture/smart_capture.hpp` | 新增 `ProbeStats`;两个函数的契约与教训写进注释 |
+| `app/src/capture/capture_session.{hpp,cpp}` | S4:负缓存 `m_elementProbeDenied`(按 `(窗口, 64px 网格)`)+ `applyElementCandidate` 改为返回是否采用 |
+| `app/src/host/smart_capture_flow.cpp` | `--smart-uia-flow` 由**软放行改硬断言**(depth ≥5 或矩形差 ≥8px),新增 Chromium 专项断言 |
+| `docs/23-smart-capture-plan.md` | §7.3 / §7.4 / §11 更正,原文保留作历史 |
+| `docs/26-chromium-smart-capture.md` | **新增**:完整根因、实测数据、方案、验收、风险 |
+
+### 实测效果(同一台机器,Chrome 156 / Edge 156 / 三屏混合 DPI)
+
+| 目标 | 修复前 | 修复后 |
+| --- | --- | --- |
+| VSCodium(ai-agent) | depth=1,整窗 2974x1920 | **2070x118,depth=18**,63ms |
+| Chrome(LINUX DO) | depth=1,整窗 1811x1682 | **573x76,depth=14**,71ms |
+| Electron(DeepSeek) | depth=1,整窗 1080x812 | **794x694,depth=11**,58ms |
+| Telegram Web(3388x1918) | depth=1,整窗 | 最深 depth=20(RawView) |
+
+### 验收
+
+- `--smart-uia-flow`:0 failures,新增 `PASS Chromium 系窗口能探出元素级候选(3/3)`;
+- `--smart-live-flow` / `--smart-settings-flow`:0 failures;
+- `--smart-capture-flow`:5 failures,**与改动前基线逐条一致**(B 段单击即确认、G 段
+  副屏确认矩形)—— 属**预先存在**的失败,非本次引入,另行处理;
+- 相邻链路回归:`--capture-toolbar-flow` / `--editor-flow` 全绿,`--stitch-flow`
+  `DONE failures=0`。
+
+### 实施期踩到的自身缺陷(已修)
+
+1. S2 两级视图第一版用 `FindAll(TreeScope_Children)` 冒充 —— FindAll 永远是同一棵
+   树,换条件不换视图。必须用 `get_ControlViewWalker` / `get_RawViewWalker` 两个
+   walker 分发。
+2. `IUIAutomationTreeWalker::GetNextSiblingElement` 的参数是**前一个兄弟**,不是父节点。
+3. 第一版把子节点直接 append 进栈(转移所有权)后仍拿它取兄弟 → use-after-release。
+   改成"本层先收齐 kids、本层统一释放、下沉时显式 AddRef"。
+4. 原计划在 `--smart-capture-flow` 加 H 段用合成候选表验 Chromium 形状 —— **不成立**:
+   候选表是扁平的,表达不了"同父同尺寸兄弟"。该段已删,断言改放 `--smart-uia-flow`。
+5. 首轮统计 `Select-String 'FAIL'` 不区分大小写,把 `RESULT failures = 0` 也计成失败,
+   误报 3 条 flow 有问题。
+
+### 未做(留待后续)
+
+- **S5 层级链 + 滚轮切粒度**:现在默认落到"最深且明显小于窗口"的那一个,Chrome 上
+  可能细到单行文本(`1338x38`)。层级链让用户能滚轮在 `窗口 → 区块 → 段落 → 行`
+  之间选。
+- **S6 设置项** `smartCaptureGranularity`(content / element / window,默认 content)。
+
+### 真机确认项
+
+沙箱跑不了 GUI,下列必须真机过一遍:Chrome 新闻/购物页悬停标题与正文能框住区块而非
+整窗;地址栏可被单独框住;同一窗口内滚轮切粒度(S5 未做前不适用);175% 屏上矩形
+与窗口边界差 < 2px;VSCodium 能框住编辑区。
+
+## 2026-11-02(日)智能框选提速:换模型而非调参数
+
+**用户反馈**:「智能框选能明确感受到延迟,必须把鼠标停留 1s 左右,还是不够灵敏」。
+详见 [docs/27-smart-capture-latency.md](./27-smart-capture-latency.md)。
+
+### 根因:三个环节叠加,不是单个参数问题
+
+| # | 环节 | 实测 | 性质 |
+| --- | --- | --- | --- |
+| L1 | `kElementProbeDelayMs = 400` | 400ms | 固定等待,**且每次 mousemove 都 start(400) 重置** |
+| L2 | 全树 DFS 探测 | 77~136ms | 每次悬停重算**同一个答案** |
+| L3 | 结果按精确像素校验 | 丢结果 | 抖动 1px → 104ms 白探 |
+
+L1 被手抖反复重置是"必须停 1 秒"的直接来源:用户以为在静止,手心微动 1~2px 就
+重新计时。L2 让最坏变成 400+136≈536ms,L3 再丢掉重来,体感破 1s。
+
+**关键洞察**:框选期间窗口内容本就是冻结的(连底图都冻了),所以"每动一次重探一次"
+是在反复算同一个答案。同窗口内移动 10 次 = 10 × 113ms ≈ **1.13s 纯等待**。
+
+### 实测(本机 Chrome 156 / Zed,中位数 7 次)
+
+瓶颈是**跨进程 COM 往返次数**,不是矩形计算:
+
+| 测量项 | 中位数 |
+| --- | --- |
+| 单次 `GetFirstChildElement`(跨进程) | 0.3~5.9ms |
+| 单次 `get_CurrentBoundingRectangle` | 0.02~0.12ms |
+| 全树 DFS | 5~136ms |
+| 纯 walk 不算矩形(同深度) | 6~11ms |
+
+所以"少问一次"比"问快一点"有效得多 —— 这就是快照方案的本质。
+
+### 改动:进窗预取 + 每帧查表
+
+| 文件 | 改动 |
+| --- | --- |
+| `smart_capture.hpp/.cpp` | 新增 `ElementNode` / `buildElementSnapshot`(整窗抓一次)/ `elementAtSnapshot`(纯内存查表,带 `parent` 索引为后续层级链预留) |
+| `capture_session.{hpp,cpp}` | `smartHoverUpdate` 里"停稳 400ms 投探测"整段删除,换成"快照就绪→当帧查表;未就绪→后台建一次,建完按**最新**光标位置刷预选";新增 `m_elementSnapshots` / `m_elementSnapshotPending` |
+| 删除 | `kElementProbeDelayMs`、`m_elementProbeTimer`、`startElementProbe()`、`m_elementProbePending`、`m_elementProbeGuard`、`m_elementProbeDenied` |
+
+> 负缓存(docs/26 S4)是给"重探模型"打的补丁。换模型后它解决的问题**不再存在**,
+> 一并删除 —— 优化掉了补丁本身,而不是优化补丁。
+
+**建完按最新光标刷预选**这个细节很关键:建快照要 6~113ms,用户可能已移到别处。
+原实现靠"结果回来时校验光标位置,不一致就丢弃"——那正是 L3 的浪费。现在结果永远
+不会因"用户动了"而作废。
+
+### 实测效果
+
+| 指标 | 修复前 | 修复后 |
+| --- | --- | --- |
+| 每次悬停 | 77~136ms 探测 + 400ms 停稳 | **0.003ms**(1500 节点)/ 0.025ms(真实 130 节点) |
+| 同窗口内移动 10 次 | ≈1.13s | 113ms(仅首次)+ 10×0.003ms |
+| 最坏体感 | ~1s | 首次进窗 ≤113ms,之后零延迟 |
+
+**正确性验证**:同一窗口撒 60 点,快照查表 vs 逐点 DFS 逐字段比对 —— **0 处不同**。
+
+### 验收
+
+`--smart-capture-flow` A6a 段新增 6 项断言(纯函数,不依赖真机):
+
+```
+PASS 快照查表取最深命中(depth=4,期望 4；索引=3)
+PASS 与窗口等大(差 6px < 8px 阈值)的节点不算细化,返回 -1(得 -1)
+PASS allowEqualWin=true 时允许返回等大节点(得 1)
+PASS 空快照安全返回 -1
+PASS 元素查表 < 0.1ms/次   (实测 0.0030808 ms/次,1500 节点)
+```
+
+性能断言是防御性的:哪天有人往 `elementAtSnapshot` 里塞 COM 调用或复杂分配,立刻翻红。
+
+四条 flow 结果:`--smart-live-flow` / `--smart-uia-flow` / `--smart-settings-flow` 全绿;
+`--smart-capture-flow` 剩 5 个失败,**与改动前基线逐条一致**,属预先存在。
+
+### 实施期踩到的自身缺陷
+
+1. `ProbeStats` 定义在 `ElementNode` 之后,而后者注释提到它 —— 编译期 C2061。
+   把它整体前移到 `// ---- UIA 元素级` 段首。
+2. 验收里我构造的测试数据错了:用"只小 10px"的节点断言"应判为等大",而阈值是
+   8px —— 10 > 8 故**应该**被算作细化。断言翻红后确认是**测试数据错**,不是
+   `elementAtSnapshot` 逻辑错。改成"只小 6px"后通过。差点误改实现去迁就断言。
+
+### 未做
+
+- **快照失效检测**:会话内窗口内容变化不重建。影响有限 —— 底图同样冻结,用户看到的
+  本来就不含滚动后的内容。要滚后再框得重新触发截图(既有产品语义)。
+- **层级链 / 滚轮切粒度**(docs/26 S5):`ElementNode.parent` 已就位,是它的前置。
+
+### 真机确认项
+
+沙箱跑不了 GUI:① 光标进入 Chrome 后**缓慢移动**,元素框应连续跟随;② 切换到 Chrome
+立刻移动,首次 ≤100ms、之后零延迟;③ 同窗口内来回移动**完全无卡顿**;④ 快速横扫
+多窗口不应卡死 UI;⑤ 滚动页面后不重新截图,框仍按旧位置(已知限制,可接受)。
+
+## 2026-11-02(日)取消悬停时的分辨率显示;顺带修绿整条智能框选验收
+
+**用户需求**:「取消智能框选时的分辨率显示,只在点击确定浮出工具栏时显示,这样就不会
+频繁显示分辨率导致显示问题」。详见 [docs/28-capture-size-hint-scope.md](./28-capture-size-hint-scope.md)。
+
+### 三处改动:需求本身 + 顺带修掉的两个既有缺陷
+
+**① 需求:`drawCandidate()` 不再调 `drawSizeHint()`**
+
+现在只有已确认的选区会画分辨率。候选预览只剩虚线框。
+
+**这不只是审美调整** —— 它修掉了一个真实残影:
+
+| 环节 | 数值 |
+| --- | --- |
+| 候选重绘脏区外扩 | **3px** |
+| 尺寸提示底板位置 | 候选上缘外侧约 **22px** |
+
+候选一移动,旧提示底板落在脏区之外、Qt 不重绘 —— 屏幕上留下一串"上一处的分辨率
+数字",叠加每秒几十次变化,视觉上就是花屏。这正是用户说的"频繁显示导致显示问题"。
+改动后在 `smartHoverUpdate` 补了注释:将来若把提示加回候选,**必须**把上边扩到
+-26,否则残影立刻复现。
+
+### 顺带修掉的三个既有缺陷
+
+**② 过时断言(5 个失败的真因)**
+
+原 B3/G 段断言 `单击即确认,regionConfirmed 已发出`。但 2026-11-01 起
+`regionAutoConfirm` 已删除,框选恒为浮条模式:单击只**采纳**,确认要按 Enter /
+点「完成」。代码里 `clickLike` 分支是 `showToolbar(); return;`,根本没有 emit。
+
+**这条断言长期是红的,而红的原因不是代码错** —— 它描述了一个已不存在的产品行为,
+留着会不断误导下一个人去"修"那段没坏的代码。改为断言当前真实语义,并用**真实
+QKeyEvent** 走 Enter 确认(不直接调 private 的 `confirmSelection()`,那会让
+"键盘确认"这条链路失去覆盖)。
+
+**③ 验收自己制造遮挡,把 z 序断言搞红**
+
+`--smart-live-flow` 的 z 序交叉验证有 4 个不一致,全是这种形状:
+
+```
+我们以为 = "35-主代理与子代理并行方案.md - ..."
+系统说   = "Nextboard"        ← 验收进程自己的面板
+```
+
+验收跑起来时面板可见,`WindowFromPoint` 如实报告"最上层是 Nextboard";而候选表按
+设计**已过滤本进程 PID** —— 两者当然不等。修法:命中窗口 PID == 本进程 → 计入
+`skipped`(因为"候选表不含自己"正是被测的另一条正确行为)。
+修复后 `一致 6 不一致 0`(原 `一致 2 不一致 4`)。
+
+**④ 元素快照的写-读回环(docs/27 引入)**
+
+`smartHoverUpdate` 先算 `picked`(空白处为空),再调 `applySnapshotCandidate()`;
+后者通过**副作用**写 `m_candidate`,调用方又回头读 `m_candidate` 决定本帧画什么 ——
+上一帧的元素框被读回来,永远不消失。B2 段(悬停空白处预选清空)抓到了它。
+
+修法双保险:① 只在 `picked` 非空时才查表;② `applySnapshotCandidate(cursor, QRect*)`
+显式交出落地矩形,调用方不再回头读成员 —— 消除回环这个结构性问题本身。
+
+### 验收
+
+`--smart-capture-flow` **48 项全绿 —— 这是该 flow 第一次全绿**(改动前有 5 个
+持续失败):
+
+```
+SMART-CAPTURE  悬停未采纳:提示区亮度 = 157 (候选不画尺寸提示 → 不应有白板)
+PASS 悬停候选时**不**显示尺寸提示(提示区亮度 157 < 200)
+SMART-CAPTURE  采纳后:提示区亮度 = 167  采纳计数 = 1  候选 = QRect(90,80 300x200)
+PASS 采纳后显示尺寸提示(亮度 167 > 128 且 > 悬停时的 157)
+RESULT failures = 0
+```
+
+亮度只差 10:白板 α120 半透明压在浅底 0xF2 上,纯底图经 90α 黑罩约 157、叠板约
+167。断言验的是"有板/没板"的布尔差异,不是对比度。
+
+全量 9 条 flow 全绿。`--capture-toolbar-flow` 曾一次卡在
+`Retrying to obtain clipboard`(无 RESULT 行),重跑三次全过,且改动前基线也偶发
+同样现象 —— 是剪贴板并发占用的环境问题。
+
+### 实施期踩到的自身缺陷(已修)
+
+1. G2 段我一度写着"采样坐标要减 `otherGeo.topLeft()`",但 `ovLight` 的
+   `setGeometry(otherGeo)` 让窗口局部原点恰好 == 屏内 (0,0),本来就是对的。
+   写错的那版把自己绕进了不存在的坐标系问题。
+2. 引用了一个不存在的 `confirmSelectionForAcceptance()` —— 差点为了验收方便给
+   产品开后门,最后改成投真实 Enter 键。
+3. 一度以为 `--settings-flow` / `--todo-flow` 没跑完(无 RESULT 行),用 stash
+   跑基线才发现**它们本来就没有 RESULT 行**。差一点去"修"两条正常通过的 flow。
+
+### 连带影响与边界
+
+- `drawSizeHint` 注释已更新(原写"选区与候选预览共用"已不成立)。
+- `updateForSelectionChange` 的 `-26` 仍必要(选区还画提示);`smartHoverUpdate`
+  的 `-3` 也对(候选不画了)。**两处数值不同是有意的**,注释写清了原因。
+- **拖拽手框也会显示分辨率**:松手即产生选区(浮条浮出),语义上属"已选定"。
+  若要求"只有点浮条按钮才显示",需在 `showToolbar` 上加"用户主动确认"标记。
+
+### 真机确认项
+
+① 鼠标在 Chrome 内游走:只有虚线框跟随,**没有**数字跳动;② 快速横扫多窗口:不残留
+浮动数字;③ 单击采纳:选区 + 浮条 + **此时**才显示分辨率;④ 拖手柄:分辨率实时跟随;
+⑤ 拖拽松手:与采纳同;⑥ Esc 后重框:无残留。

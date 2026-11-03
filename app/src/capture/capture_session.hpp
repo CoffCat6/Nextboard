@@ -7,8 +7,10 @@
 // 三者靠 devicePixelRatio 换算,漏掉换算会在缩放屏上取错区域/显示错内容。
 #pragma once
 
+#include <QHash>
 #include <QObject>
 #include <QPointer>
+#include <QSet>
 #include <QString>
 #include <QWidget>
 
@@ -133,6 +135,10 @@ public:
     int smartAcceptCount() const { return m_smartAccepts; }
     /// 当前候选的层级(0 = 窗口,1 = UIA 元素;-1 = 无)。
     int smartCandidateLevel() const { return m_candidateLevel; }
+    /// 验收用:当前重叠栈的滚轮切换偏移(docs/29 §2 的回归断言读它)。
+    /// 为什么需要暴露:滚轮选中项与窗口级预选可能**同矩形**(两个完全重叠的
+    /// 窗口),只比较矩形无法区分"切了"与"没切",必须看这个序号。
+    int smartHoverStackOffsetForTest() const { return m_hoverStackOffset; }
 
     /// 长截图的进度更新(总高/缺口/结论)。**由会话层回调** ——
     /// 采集与拼接在会话层(它才持有屏与核心句柄),遮罩只负责显示。
@@ -306,14 +312,38 @@ private:
     QPoint m_lastHoverPos;
     /// 重叠候选的切换偏移。滚轮每滚一格 +1,取模到重叠栈长度。
     int m_hoverStackOffset = 0;
+    /// 用户是否用滚轮**明确选过**某个候选(docs/29 §2)。
+    ///
+    /// 为什么需要:元素级自动细化永远返回"最深"的那个元素,会把滚轮选中的
+    /// 那一层覆盖掉 —— 用户滚到"整窗"或"区块"层,下一帧鼠标一动就被按回最细
+    /// 的元素。所以滚轮一动作就打标,直到光标**离开该候选**才清除。
+    bool m_wheelPicked = false;
     /// 按下时刻的状态:"单击采纳"要靠"按下时就在候选上 + 抬起时位移极小"判定,
     /// 两个条件都缺一不可 —— 只判位移会把"从空白处按下、拖出去一点"误当单击。
     QPoint m_pressPos;
     bool m_pressOnCandidate = false;
-    /// UIA 元素探测(S3)。鼠标停稳后投工作线程;**在飞时不再投**,结果回来才合并。
-    bool m_elementProbePending = false;
-    QTimer* m_elementProbeTimer = nullptr;   // 停稳检测(单发)
-    QPointer<QObject> m_elementProbeGuard;   // 遮罩析构后丢弃迟到结果
+
+    // ---- 元素快照(docs/27:把"每次悬停重探"改成"进窗预取 + 查表")----
+    //
+    // 实测(2026-11-02):一次全树 DFS 要 77~136ms,而**同一窗口内**悬停到下一个
+    // 位置时这些节点一个都没变(框选期间窗口内容本就冻结,连底图都冻了)。于是
+    // "每动一次鼠标重探一次"是把同一个答案反复算:同窗口内移动 10 次 = 1.13s
+    // 纯等待 —— 这正是用户报告的"必须停 1s 才灵敏"的**主因**。
+    //
+    // 改成:光标**首次进入**某窗口时后台建一次快照,之后每次悬停只做内存命中测试
+    // (实测 0.025ms/次,比重新探测快 ~3000 倍)。
+    //
+    // ⚠️ 旧的"停稳 400ms 后单点探测"模型已整体删除(m_elementProbePending /
+    // m_elementProbeTimer / m_elementProbeGuard / startElementProbe)。留着是
+    // 死代码,更糟的是会让读者以为停稳判定仍在生效 —— 它正是那 400ms 的来源。
+    struct ElementSnapshot {
+        QVector<smart::ElementNode> nodes;
+        QRect winPhysical;      // 窗口绝对物理矩形("明显小于窗口"判定用)
+        bool ready = false;     // false = 仍在建(期间退化为窗口级预选)
+    };
+    QHash<quintptr, ElementSnapshot> m_elementSnapshots;
+    /// 正在建快照的窗口(防重复投递同一次预取)。
+    QSet<quintptr> m_elementSnapshotPending;
 
     /// 按光标位置更新预选矩形(纯数学,不起 Win32 调用)。返回是否发生了变化。
     bool smartHoverUpdate(const QPoint& pos, bool allowElement);
@@ -327,10 +357,17 @@ private:
     /// anchorLogical = 锚矩形(提示压在其左上外侧);physicalSize = 显示的尺寸。
     void drawSizeHint(QPainter& painter, const QRect& anchorLogical,
                       const QSize& physicalSize);
-    /// 投一次 UIA 元素探测(工作线程);cursorLocal 是**遮罩局部逻辑**坐标。
-    void startElementProbe(const QPoint& cursorLocal);
-    /// 合并探测结果(UI 线程;元素矩形为绝对物理像素)。
-    void applyElementCandidate(const QRect& elementPhysical, const QString& title,
+    /// 确保 windowId 的元素快照已就绪(必要时异步建一次)。
+    /// @return true = 快照已就绪,调用方可立即查表。
+    bool ensureElementSnapshot(quintptr windowId, const QRect& winPhysical);
+    /// 在已有快照里查光标处的元素并落地为预选(纯内存)。返回是否命中。
+    /// @param outLocal 命中时写入元素在**本屏局部逻辑**坐标下的矩形。
+    ///                 调用方**必须**用它,而不是回头读 m_candidate ——
+    ///                 后者会与"本帧是否该画框"形成写-读回环(docs/28 §3)。
+    bool applySnapshotCandidate(const QPoint& cursorLocal, QRect* outLocal = nullptr);
+    /// 合并元素结果(UI 线程;元素矩形为绝对物理像素)。
+    /// @return 是否真正采用了(false = 与当前预选相同,调用方可据此跳过重绘)。
+    bool applyElementCandidate(const QRect& elementPhysical, const QString& title,
                                quintptr windowId);
     /// 光标处的重叠候选栈(窗口级)。
     QVector<int> hoverStack(const QPoint& pos) const;

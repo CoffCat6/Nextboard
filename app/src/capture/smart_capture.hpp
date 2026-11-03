@@ -105,6 +105,81 @@ QVector<int> candidatesAt(const QVector<Candidate>& list, const QRect& screenPhy
 
 // ---- UIA 元素级(S3)----
 
+/// 一次元素探测的结果统计(验收与排障用;产品路径不读)。
+/// 为什么要有它:**"元素级没生效"这个失效是静默的** —— 预选照常出现,只是永远
+/// 等于整窗。没有 depth/visited 就无法区分"目标应用不给树"与"我们停在第 1 层"。
+/// 这正是 docs/26 记录的事故:诊断工具与主算法犯了同一个错(每层只认一个兄弟),
+/// 于是把自身的缺陷写成了 Chromium 的限制。
+struct ProbeStats {
+    /// 命中元素的深度(0 = 除了根什么都没命中)。
+    int depth = 0;
+    /// 遍历过的节点数(预算的度量;按**节点**计数,不是"每层子节点数之和")。
+    int visited = 0;
+    /// 实际耗时(ms)。
+    int elapsedMs = 0;
+    /// 0 = 第一发(ControlView);1 = 退到第二发(RawView)。
+    int viewUsed = 0;
+    /// 是否找到了"明显小于窗口"的元素(false = 退化为窗口级)。
+    bool refined = false;
+};
+
+/// 一个窗口的**元素矩形快照**(docs/27:把"每次悬停重探"改成"进窗预取 + 查表")。
+///
+/// ## 为什么需要这个
+///
+/// 实测(2026-11-02,Chrome 156 / VSCodium):一次全树 DFS 要 **77~136ms**,而
+/// 悬停到下一个位置时这些节点**一个都没变** —— 窗口内容在框选期间是冻结的
+/// (底图都冻结了,视觉上也不会变)。于是"每动一次鼠标重探一次"是把同一个答案
+/// 反复算:同一窗口内移动 10 次 = 1.13s 纯等待。
+///
+/// 改成"窗口进入时后台建一次快照,之后每次悬停只做内存命中测试":实测查表
+/// **0.33ms/次**,比重新探测快 340 倍。
+struct ElementNode {
+    /// 绝对物理像素(与 Candidate.physical 同口径)。
+    QRect physical;
+    /// 显示用名称(UIA Name,可能为空)。
+    QString title;
+    /// 在 nodes 数组里的父索引(-1 = 顶层)。用途:滚轮在"窗口→区块→段落"
+    /// 层级链上移动时要知道谁是谁的祖先(docs/26 §4 S5)。
+    int parent = -1;
+    /// 深度(1 = 窗口的直接子元素,与 ProbeStats.depth 同口径)。
+    int depth = 0;
+};
+
+/// 一次性抓取 windowId 的整棵元素树(ControlView),供之后无数次查表。
+///
+/// ⚠️ **阻塞调用(实测 5~140ms),绝不能在 UI 线程调用**。
+///
+/// 与 probeElementAt 的分工:
+///   * probeElementAt  = 单点探测,一次只回答"这个坐标下是什么"(贵,且会被重复问);
+///   * buildElementSnapshot = 整窗一次性抓全,之后 questionAt() 是纯内存操作。
+///
+/// 快照**不是永久的**:窗口内容变化(网页滚动、切标签)后必须重建。
+/// 调用方按 (windowId, 屏幕) 缓存并在失效时丢弃,见 capture_session 的
+/// m_elementSnapshots。
+///
+/// @param windowId 目标顶层窗口 HWND;
+/// @param maxNodes 节点上限(防御浏览器整树几万节点);
+/// @param budgetMs 时间预算,超时返回已抓到的部分(仍是可用的粗结果);
+/// @param stats   可选输出。
+/// @return 抓到 0 个节点 = 该窗口没有可用树(合法的降级情形,不是错误)。
+QVector<ElementNode> buildElementSnapshot(quintptr windowId, int maxNodes = 6000,
+                                          int budgetMs = 400, ProbeStats* stats = nullptr);
+
+/// 在**快照**里查"光标处最深且明显小于窗口的那个元素"(纯内存,无 COM)。
+///
+/// @param nodes        buildElementSnapshot 的产物;
+/// @param winPhysical  窗口自身矩形(用于判断"是否明显小于窗口");
+/// @param cursor       光标绝对物理坐标;
+/// @param minSize      元素最小物理边长;
+/// @param allowEqualWin 是否允许返回"与窗口等大"的节点(默认 false:
+///                     等于窗口就是没细化)。
+/// @return 找到的元素索引(-1 = 没有命中);返回索引而非拷贝,便于调用方
+///         顺着 parent 往上走(层级链)。
+int elementAtSnapshot(const QVector<ElementNode>& nodes, const QRect& winPhysical,
+                      const QPoint& cursor, int minSize, bool allowEqualWin = false);
+
+
 /// 该目标窗口是否值得做 UIA 元素探测。
 ///
 /// 不是所有窗口都值得:浏览器/IDE/Office 有完整 UIA 树,而游戏、自绘控件返回的
@@ -116,21 +191,43 @@ bool worthProbing(quintptr windowId);
 /// ⚠️ **阻塞调用(几十~几百 ms),绝不能在 UI 线程调用**。设计上由遮罩在
 /// "鼠标停稳 400ms"时投到工作线程,完成后回 UI 线程合并。
 ///
+/// ## 算法:受预算约束的 DFS(2026-11-02 重写,见 docs/26)
+///
+/// 原实现是"每层只挑**一个**子节点下沉"(同层多个命中取面积最小)。这在 Chromium
+/// 上 100% 失效:Chrome 的顶层恰好是**两个同尺寸 Pane**,`[0]` 是空壳(0 子节点)、
+/// `[1]` 才是网页内容 —— "面积最小"必然选中空壳,于是永远停在第 1 层(整窗)。
+/// 症状极具迷惑性:功能"看起来接上了",只是元素级永远等于窗口级。
+///
+/// 现在改成:同层**所有**包含光标的子节点都入栈,逐层记录"最深且明显小于窗口"
+/// 的那一个。实测同一位置从 depth=1 到 depth=9~11(Chromium)/ 20(Telegram Web)。
+///
+/// ## 两级视图(S2)
+///
+/// 第一发 ControlView(快、语义干净),结果**等于窗口**时才补一发 RawView
+/// (更细但节点多)。大多数窗口第一发就够,不必为少数派拖慢全体。
+///
 /// @param cursorGlobalPhysical 光标的**虚拟桌面绝对物理**坐标;
 /// @param minSize              元素最小逻辑边长,过滤无意义的碎片;
 /// @param maxNodes             遍历节点上限(防止浏览器整树几万节点卡死);
-/// @param budgetMs             时间预算,超时即返回已有结果。
+/// @param budgetMs             时间预算,超时即返回已有结果;
+/// @param stats                可选输出:深度/节点数/耗时/视图(验收与排障用)。
 /// @return 找到的元素(最多一个);未找到/失败返回空。
 QVector<Candidate> probeElementAt(quintptr windowId, const QPoint& cursorGlobalPhysical,
-                                  qreal dpr, int minSize = 24, int maxNodes = 3000,
-                                  int budgetMs = 350);
+                                  qreal dpr, int minSize = 24, int maxNodes = 4000,
+                                  int budgetMs = 500, ProbeStats* stats = nullptr);
 
 /// **诊断专用**:把 windowId 的 UIA 树逐层打出来(前 depth 层,每层前 maxPerLevel 个)。
 ///
 /// 为什么要有它:元素级"没生效"的症状是**静默的** —— 预选仍然正常,只是永远
 /// 框住整个窗口。没有树结构就无从判断"是目标应用不提供子树"还是"我们自己下沉
 /// 到一半就停了"。验收(--smart-uia-flow)用它留痕;产品路径不调用。
-/// @return 每层一行:"L<depth> n=<子元素数> name=… rect=…"
+///
+/// ⚠️ 每层必须打印**全部**子元素(受 maxPerLevel 限)并标注空壳 —— 原实现只沿
+///    第 0 个孩子继续下沉,而 Chromium 的第 0 个孩子正是空壳,于是诊断结论
+///    "L1 n=0" 与主算法的同一个错误互相印证,把缺陷写成了目标应用的限制
+///    (docs/26 §2.5)。诊断工具的错误比算法的错误代价更高:它会误导归因。
+///
+/// @return 每层一行:"L<depth> n=<子元素数> [..] …"
 QStringList dumpElementTree(quintptr windowId, int depth = 4, int maxPerLevel = 6);
 
 } // namespace nb::smart

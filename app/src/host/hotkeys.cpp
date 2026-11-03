@@ -54,11 +54,32 @@ bool Hotkeys::parseCombo(const QString& combo, UINT* modifiers, UINT* vk) {
 }
 
 /// WM_HOTKEY 分发器:QAbstractNativeEventFilter 挂 QApplication。
+///
+/// ⚠️ 生命周期必须严格配对(2026-11-02 修,崩溃现场见 docs/29)。
+///
+/// 原实现有两个致命点:
+///   ① `new HotkeyFilter(this)` **从不释放**,而且析构时不 `removeNativeEventFilter`;
+///   ② 成员是**裸指针** `Hotkeys* m_owner`,而 Hotkeys 在 main() 里是**栈对象**。
+///
+/// 于是程序退出时 Hotkeys 先析构,过滤器仍留在 qGuiApp 的事件过滤链上;此后任何
+/// WM_HOTKEY 到达,就经由悬垂的 m_owner 访问已析构对象 → 0xC0000005。
+/// 实测崩溃日志里 nextboard.exe offset=0xa2fdb 反复出现,正是这条路径。
+///
+/// 修法:
+///   * 用 **QPointer** 而非裸指针 —— 对象没了就自动变 null,访问前判空;
+///   * 析构里 `removeNativeEventFilter` —— 过滤器不能比宿主活得久;
+///   * 由 Hotkeys 自己持有(成员,不 new),生命周期天然跟随。
 class HotkeyFilter : public QAbstractNativeEventFilter {
 public:
     explicit HotkeyFilter(Hotkeys* owner) : m_owner(owner) {}
+    ~HotkeyFilter() override {
+        // 冗余保险:install 侧在 Hotkeys 构造里做,remove 也在这里配对。
+        if (qGuiApp) qGuiApp->removeNativeEventFilter(this);
+    }
     bool nativeEventFilter(const QByteArray& eventType, void* message, qint64* result) override {
         Q_UNUSED(result);
+        // 宿主已析构(Hotkeys 是栈对象,退出期先走):直接放行,绝不碰 m_owner。
+        if (m_owner.isNull()) return false;
         if (eventType == "windows_generic_MSG") {
             auto* msg = static_cast<MSG*>(message);
             if (msg->message == WM_HOTKEY) {
@@ -69,13 +90,16 @@ public:
         return false;
     }
 private:
-    Hotkeys* m_owner;
+    QPointer<Hotkeys> m_owner;
 };
 
 Hotkeys::Hotkeys(PanelWindow& panel, CoreBridge& core, QObject* parent)
     : QObject(parent), m_panel(panel), m_core(core) {
-    auto* filter = new HotkeyFilter(this);
-    qGuiApp->installNativeEventFilter(filter);
+    // 过滤器由本对象**持有**:构造时装、析构时摘(见 HotkeyFilter 的注释)。
+    // 原先 `new HotkeyFilter(this)` 是裸泄漏 —— 退出时宿主先析构,过滤器仍挂在
+    // qGuiApp 上,WM_HOTKEY 一来就通过悬垂指针访问已析构对象 → 闪退。
+    m_filter = std::make_unique<HotkeyFilter>(this);
+    qGuiApp->installNativeEventFilter(m_filter.get());
     connect(this, &Hotkeys::hotkeyFired, this, [this](int id) {
         if (!m_registered.contains(id)) return;
         switch (m_registered.value(id)) {
@@ -115,6 +139,10 @@ Hotkeys::Hotkeys(PanelWindow& panel, CoreBridge& core, QObject* parent)
 
 Hotkeys::~Hotkeys() {
     for (int id : m_registered.keys()) ::UnregisterHotKey(nullptr, id);
+    // ⚠️ 顺序很重要:显式摘掉过滤器,**再**让 m_filter 析构。
+    //    HotkeyFilter 的析构里也做了一次(冗余保险),但这里显式摘更清楚 ——
+    //    读者不该靠"某个成员析构顺带做的事"来理解退出安全性。
+    if (qGuiApp && m_filter) qGuiApp->removeNativeEventFilter(m_filter.get());
 }
 
 void Hotkeys::applyFromSettings() {

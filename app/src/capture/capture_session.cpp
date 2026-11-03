@@ -870,12 +870,10 @@ constexpr int kMinSelection = 4;
 } // namespace
 
 namespace {
-/// 鼠标停稳多久才投 UIA 元素探测(毫秒)。
-///
-/// 取 400:元素探测是**跨进程 COM 往返**(几十~几百 ms),跟着鼠标每动一像素
-/// 投一次会把 CPU 与目标进程一起拖住。400ms 的含义是"用户真的停在这里了,
-/// 想看更细的框";比浮条的 700ms hover tip 短,因为它是框选的**前置**动作。
-constexpr int kElementProbeDelayMs = 400;
+// ⚠️ kElementProbeDelayMs("停稳 400ms 才投探测")已随 docs/27 的元素快照方案删除。
+// 它正是用户报告"必须停 1 秒才灵敏"的主要来源:每次 mousemove 都 `start(400)`
+// 重置计时器,手抖 1px 就要重新等 400ms,再叠加 77~136ms 的真实探测耗时。
+// 现在元素级是"进窗预取一次 + 每帧查表(0.025ms)",不再需要停稳判定。
 } // namespace
 
 OverlayWidget::OverlayWidget(QImage frozen, int screenIndex, QScreen* screen,
@@ -953,6 +951,7 @@ void OverlayWidget::smartClearCandidate(bool clearElement) {
     m_elementWindowId = 0;
     m_elementTitle.clear();
     m_hoverStackOffset = 0;
+    m_wheelPicked = false;   // 候选清了,滚轮的手动选择也一并作废(docs/29 §2)
     if (!old.isNull()) update(old.adjusted(-3, -3, 3, 3));   // 只擦掉描边,不整屏刷
 }
 
@@ -971,11 +970,39 @@ bool OverlayWidget::smartHoverUpdate(const QPoint& pos, bool allowElement) {
     const QRect old = m_candidate;
     const int oldLevel = m_candidateLevel;
 
-    // 光标换了位置 → 重叠栈的切换偏移归零(用户已经挪开,不该继续记着上次滚了几格)
-    if (pos != m_lastHoverPos) {
-        m_hoverStackOffset = 0;
-        m_lastHoverPos = pos;
+    // ---- 重叠栈切换偏移(滚轮)的存活条件 ----
+    //
+    // ⚠️ 原实现是 `if (pos != m_lastHoverPos) m_hoverStackOffset = 0;` —— 只要有
+    //    **任何**一像素移动就清零。后果(2026-11-02 用户反馈"有些应用下滑轮重置
+    //    框选窗口失效"):
+    //
+    //    * 滚轮切到第 N 个候选后,用户的手几乎不可能保持 0 像素不动 ——
+    //      trackpad 的惯性、鼠标的轻微位移都会立刻把选择弹回第 0 个;
+    //    * 更糟的是**元素级**场景:Chromium/IDE 的一个窗口内部就有几十个重叠的
+    //      UIA 元素(窗口容器、区块、段落、单行文本层层嵌套),命中栈天然 ≥ 2 ——
+    //      滚轮本来在那里最有用,却最容易被打断。而整屏最大化的单窗口几乎
+    //      没有重叠栈,所以"有些应用正常、有些应用失效"。
+    //
+    //    正确的存活条件不是"光标没动",而是**"光标还在滚轮选中的那个候选里"**:
+    //    只要没走出去,offset 就一直有效;走出去了才归零(用户已经换了目标)。
+    if (!m_lastHoverPos.isNull()) {
+        const QVector<int> prevStack = hoverStack(m_lastHoverPos);
+        const int prevIdx = prevStack.isEmpty()
+                                ? -1
+                                : prevStack.at(qBound(0, m_hoverStackOffset,
+                                                      prevStack.size() - 1));
+        // 用**局部逻辑**矩形判定(候选表是绝对物理,换算一次即可,与绘制同口径)
+        const bool stillInside =
+            prevIdx >= 0 &&
+            smart::toLocalLogical(m_candidates.at(prevIdx).physical, smartScreenPhysical(),
+                                  dpr())
+                .contains(pos);
+        if (!stillInside) {
+            m_hoverStackOffset = 0;
+            m_wheelPicked = false;   // 走出去了 → 交还给自动细化
+        }
     }
+    m_lastHoverPos = pos;
 
     QRect picked;
     int pickedLevel = -1;
@@ -1020,23 +1047,38 @@ bool OverlayWidget::smartHoverUpdate(const QPoint& pos, bool allowElement) {
         }
     }
 
-    // 停稳后才投 UIA 探测(元素级)。只在"光标停在某个窗口上"时投 ——
-    // 空白桌面没有元素可探;且探测很贵(几十~几百 ms),不能跟着鼠标每动一像素跑。
-    if (allowElement && !stack.isEmpty() && !m_elementProbePending) {
+    // ---- 元素级(docs/27):**同步查表**,不再等停稳 ----
+    //
+    // 旧实现:每次 mousemove 都 start(400) 重置计时器 → 手抖 1px 就重新等 400ms,
+    // 再加上探测本身 77~136ms,用户体感就是"必须停 1 秒"。
+    //
+    // 新实现分两态:
+    //   * 快照已就绪 → **当帧**查表(0.003ms),光标一动元素框就跟上,零延迟;
+    //   * 快照未就绪 → 后台建一次(6~113ms),期间预选停在窗口级。
+    // 因为"建快照"只在光标**首次进入**某窗口时发生一次,连续悬停的延迟归零。
+    //
+    // ⚠️ 只在 `picked` 非空时才查表。光标移到空白处(stack 为空)时 picked 是空,
+    //    此时若还去查表,applyElementCandidate 会把**上一帧**的元素框又填回来 ——
+    //    表现就是"移到桌面上,元素框赖着不走"(2026-11-02 实施期实测)。
+    //
+    // ⚠️ 滚轮刚切过(`m_wheelPickedOffset`)时不覆盖(2026-11-02,用户反馈"有些
+    //    应用下滑轮重置框选窗口失效"的第二个成因)。查表永远返回"最深"的那个
+    //    元素,而用户滚轮明确选了另一层 —— 自动覆盖等于把用户的选择按回去。
+    //    只要光标还在滚轮选中的候选内,m_wheelPickedOffset 就为真(见下方归零逻辑)。
+    if (allowElement && !stack.isEmpty() && !picked.isNull() && !m_wheelPicked) {
         const smart::Candidate& top = m_candidates.at(stack.first());
-        if (smart::worthProbing(top.windowId)) {
-            if (!m_elementProbeTimer) {
-                m_elementProbeTimer = new QTimer(this);
-                m_elementProbeTimer->setSingleShot(true);
-                connect(m_elementProbeTimer, &QTimer::timeout, this, [this] {
-                    if (m_candidate.isNull()) return;
-                    startElementProbe(m_lastHoverPos);
-                });
+        const quintptr win = top.windowId;
+        if (win && smart::worthProbing(win)) {
+            const QRect winPhys = top.physical;
+            if (ensureElementSnapshot(win, winPhys)) {
+                // 快照就绪:直接查表覆盖窗口级预选(keepElement 也不会被它破坏)
+                QRect elemLocal;
+                if (applySnapshotCandidate(pos, &elemLocal)) {
+                    picked = elemLocal;
+                    pickedLevel = 1;
+                }
             }
-            m_elementProbeTimer->start(kElementProbeDelayMs);
         }
-    } else if (m_elementProbeTimer && stack.isEmpty()) {
-        m_elementProbeTimer->stop();
     }
 
     if (picked == old && pickedLevel == oldLevel) return false;
@@ -1045,59 +1087,103 @@ bool OverlayWidget::smartHoverUpdate(const QPoint& pos, bool allowElement) {
     m_candidateLevel = pickedLevel;
     if (pickedLevel == 0) m_elementTitle.clear();
     // 局部重绘:旧候选也要擦掉(新旧可能不相交,比如光标跳到另一个窗口)
+    //
+    // ⚠️ 外扩只给 3px(描边 2px + 余量)—— 这是**对的**,因为候选已不画尺寸提示
+    //    (docs/28)。历史上一度画过:那时外扩 3px 不够(提示底板在候选上缘外侧
+    //    约 22px),候选一移动旧数字就擦不掉,屏幕上留下一串残影。若将来又把提示
+    //    加回候选,这里必须同步把上边扩到 -26,否则残影立刻复现。
     QRect dirty = picked;
     if (!old.isNull()) dirty = dirty.isNull() ? old : (old | picked);
     if (!dirty.isNull()) update(dirty.adjusted(-3, -3, 3, 3));   // 描边 2px + 余量
     return true;
 }
 
-void OverlayWidget::startElementProbe(const QPoint& cursorLocal) {
-    if (m_elementProbePending || m_candidates.isEmpty()) return;
-    const QRect screenPhys = smartScreenPhysical();
-    if (screenPhys.isEmpty()) return;
-    const qreal k = dpr();
-    // 光标 → **绝对物理**(UIA 与 Win32 同口径)
-    const QPoint cursorPhysical(
-        screenPhys.x() + qRound(cursorLocal.x() * k),
-        screenPhys.y() + qRound(cursorLocal.y() * k));
+bool OverlayWidget::ensureElementSnapshot(quintptr windowId, const QRect& winPhysical) {
+    auto it = m_elementSnapshots.find(windowId);
+    if (it != m_elementSnapshots.end() && it->ready) return true;
+    if (m_elementSnapshotPending.contains(windowId)) return false;   // 正在建
 
-    const QVector<int> stack = hoverStack(cursorLocal);
-    if (stack.isEmpty()) return;
-    // 只探**最上面那个窗口**:UIA 是跨进程 COM,一次就够贵了。
-    const quintptr windowId = m_candidates.at(stack.first()).windowId;
-    if (!windowId) return;
-    // 记录"这次探测属于哪个窗口":结果回来时要核对用户是否还停在同一窗口上。
+    m_elementSnapshotPending.insert(windowId);
 
-    m_elementProbePending = true;
-    // 守卫:遮罩可能在探测期间被关闭(用户在几百毫秒里按了 Esc)。
-    // 用 QPointer 而不是裸 this —— 迟到的结果必须能被安全丢弃。
+    // 占位:让后续查询知道"这个窗口的预取已发出"(ready=false 期间退化为窗口级)
+    ElementSnapshot placeholder;
+    placeholder.winPhysical = winPhysical;
+    placeholder.ready = false;
+    m_elementSnapshots.insert(windowId, placeholder);
+
     QPointer<OverlayWidget> self(this);
-    const QPoint anchorLocal = cursorLocal;
-    auto* watcher = new QFutureWatcher<QVector<smart::Candidate>>(this);
-    connect(watcher, &QFutureWatcher<QVector<smart::Candidate>>::finished, this,
-            [self, watcher, anchorLocal] {
+    auto* watcher = new QFutureWatcher<QVector<smart::ElementNode>>(this);
+    connect(watcher, &QFutureWatcher<QVector<smart::ElementNode>>::finished, this,
+            [self, watcher, windowId] {
         watcher->deleteLater();
         if (!self) return;
-        self->m_elementProbePending = false;
-        const QVector<smart::Candidate> found = watcher->result();
-        if (found.isEmpty()) return;
-        // 结果必须在**光标仍停在同一处**时采纳:探测要几百毫秒,用户早走了。
-        if (self->m_lastHoverPos != anchorLocal) return;
-        if (!self->m_candidate.isNull() && self->m_candidateLevel == 1) return;   // 已有更细的
-        self->applyElementCandidate(found.first().physical, found.first().title,
-                                    found.first().windowId);
+        // ⚠️ 已隐藏 / 正在销毁时**不要**再改预选、更不要 update()(docs/29 §4)。
+        //
+        // QPointer 只保证"对象还活着",不保证"它还能安全重绘":hide() 之后
+        // widget 的 paint device 可能已被平台层回收,此时 update() 投递的重绘
+        // 会让 Qt 在 begin() 失败的状态下继续走 draw*,最后在 end() 访问已释放
+        // 的后备缓冲 → 0xC0000005。
+        //
+        // 这条竞态解释了 --smart-live-flow 那种"崩不崩看运气"(实测 0/6 ~ 4/6)
+        // 的现象:取决于快照回调落地时,那块屏的遮罩是否恰好已被隐藏/清掉。
+        if (self->isHidden()) return;
+        self->m_elementSnapshotPending.remove(windowId);
+        auto snap = self->m_elementSnapshots.find(windowId);
+        if (snap == self->m_elementSnapshots.end()) return;
+        snap->nodes = watcher->result();
+        snap->ready = true;
+        // 建完立刻用**当前**光标位置刷新一次预选 —— 用户在等待期间可能已经
+        // 移到别处,让他不必再动一下才看到元素框。
+        if (!self->m_candidate.isNull() || !self->m_lastHoverPos.isNull()) {
+            self->applySnapshotCandidate(self->m_lastHoverPos);
+            self->update();
+        }
     });
-    watcher->setFuture(QtConcurrent::run([windowId, cursorPhysical, k] {
-        return smart::probeElementAt(windowId, cursorPhysical, k);
+    watcher->setFuture(QtConcurrent::run([windowId] {
+        return smart::buildElementSnapshot(windowId);
     }));
+    return false;
 }
 
-void OverlayWidget::applyElementCandidate(const QRect& elementPhysical, const QString& title,
+bool OverlayWidget::applySnapshotCandidate(const QPoint& cursorLocal, QRect* outLocal) {
+    const QVector<int> stack = hoverStack(cursorLocal);
+    if (stack.isEmpty()) return false;
+    const smart::Candidate& top = m_candidates.at(stack.first());
+    auto it = m_elementSnapshots.find(top.windowId);
+    if (it == m_elementSnapshots.end() || !it->ready || it->nodes.isEmpty()) return false;
+
+    const QRect screenPhys = smartScreenPhysical();
+    const qreal k = dpr();
+    const QPoint cursorPhysical(screenPhys.x() + qRound(cursorLocal.x() * k),
+                                screenPhys.y() + qRound(cursorLocal.y() * k));
+    const int minPhys = qMax(1, qRound(24 * k));
+
+    const int idx = smart::elementAtSnapshot(it->nodes, it->winPhysical, cursorPhysical, minPhys);
+    if (idx < 0) return false;
+
+    const smart::ElementNode& node = it->nodes.at(idx);
+    // 已经是这个元素:不必重设(否则每帧都会 update 一次)
+    if (!m_candidate.isNull() && m_candidateLevel == 1 &&
+        node.physical == m_lastCandidatePhysical) {
+        if (outLocal) *outLocal = m_candidate;
+        return true;
+    }
+    if (!applyElementCandidate(node.physical, node.title, top.windowId)) return false;
+    // ⚠️ 显式把落地的局部矩形交回调用方,而不是让调用方回头读 m_candidate。
+    //    读 m_candidate 会形成"写-读回环":smartHoverUpdate 里先算出 picked(可能
+    //    为空 = 光标在空白处),再调本函数;若本函数只按**自身**逻辑改 m_candidate,
+    //    调用方读到的就不是本帧该画的东西 —— 实测表现为"移到桌面上元素框赖着不走"。
+    if (outLocal) *outLocal = m_candidate;
+    return true;
+}
+
+
+bool OverlayWidget::applyElementCandidate(const QRect& elementPhysical, const QString& title,
                                          quintptr windowId) {
     const QRect local = smart::toLocalLogical(elementPhysical, smartScreenPhysical(), dpr());
-    if (local.isEmpty()) return;
+    if (local.isEmpty()) return false;
     // 元素不该比当前窗口级预选更"大":UIA 偶尔把整窗报成单个元素。
-    if (!m_candidate.isNull() && local == m_candidate) return;
+    if (!m_candidate.isNull() && local == m_candidate) return false;
     const QRect old = m_candidate;
     m_candidate = local;
     m_candidateLevel = 1;
@@ -1108,6 +1194,7 @@ void OverlayWidget::applyElementCandidate(const QRect& elementPhysical, const QS
         smart::toLocalPhysical(elementPhysical, smartScreenPhysical());
     const QRect dirty = old.isNull() ? local : (old | local);
     update(dirty.adjusted(-3, -3, 3, 3));
+    return true;
 }
 
 
@@ -1234,6 +1321,15 @@ void OverlayWidget::paintEvent(QPaintEvent*) {
     if (!painter.isActive()) return;
     const qreal scale = dpr();
 
+    // 崩溃定位标记(docs/29 §3 排查期):只在环境变量 NB_PAINT_TRACE=1 时输出。
+    // 崩溃日志能给出"崩溃前最后一句",把"哪一段绘制"从猜测变成事实。
+    // 环境变量而非编译开关:发布构建同样可诊断,不用专门出一个调试版。
+    static const bool paintTrace = qEnvironmentVariableIsSet("NB_PAINT_TRACE");
+    auto trace = [](const char* stage) {
+        qInfo().noquote() << "[PAINT]" << stage;
+    };
+    if (paintTrace) trace("begin");
+
     // 底图 + 半透明黑罩:优先用预合成缓存(见 m_maskedBase 注释)。
     // 冻结底图是**物理像素**,窗口坐标是**逻辑像素**:按 DPR 反向缩放绘制,
     // 使 1 图像像素 = 1 设备像素。若直接 drawImage(rect(), frozen),Qt 会把图
@@ -1252,11 +1348,13 @@ void OverlayWidget::paintEvent(QPaintEvent*) {
         // 半透明黑罩(逻辑坐标,覆盖整窗)
         painter.fillRect(rect(), QColor(0, 0, 0, 90));
     }
+    if (paintTrace) trace("base-done");
 
     // ---- 智能框选:预选高亮 ----
     // **画在选区之前**:两者同时存在时(浮条采纳后用户又去悬停别处)选区是
     // 用户已确定的答案,必须压在候选之上,不能被虚线框盖住。
     if (!m_candidate.isNull() && m_selection.isNull()) drawCandidate(painter);
+    if (paintTrace) trace("candidate-done");
 
     const QRect sel = m_selection.normalized();
     if (!sel.isNull()) {
@@ -1321,12 +1419,16 @@ void OverlayWidget::paintEvent(QPaintEvent*) {
         // (在屏外则退到选区内部顶部 —— 那是底图上紧邻提示、明暗最接近的一块)。
         drawSizeHint(painter, sel, src.size());
 
+        if (paintTrace) trace("selection-done");
         // 二级条再浮条(二级条在上层);长截图态下浮条让位给长截图面板
         if (!stitchActive()) {
             drawToolbar(painter);
+            if (paintTrace) trace("toolbar-done");
             drawSubbar(painter);
+            if (paintTrace) trace("subbar-done");
         } else {
             drawStitchPanel(painter);
+            if (paintTrace) trace("stitchpanel-done");
         }
     } else if (!m_selecting) {
         // 同上:空态提示压在底图上,固定白字(理由见尺寸提示那条)。
@@ -1375,19 +1477,27 @@ void OverlayWidget::drawCandidate(QPainter& painter) {
     painter.drawRect(r.adjusted(0, 0, -1, -1));
     painter.restore();
 
-    // 3) 尺寸提示与选区**同一块**(drawSizeHint,自适应底板 + 同一位置约定)
-    //    —— 预览时用户对照的就是"最终截出来的分辨率",两个提示必须一眼同源。
-    drawSizeHint(painter, r, src.size());
+    // 3) **不画尺寸提示**(2026-11-02 用户要求,见 docs/28)。
+    //
+    // 原实现在这里也调 drawSizeHint,理由是"预览时对照的就是最终分辨率"。
+    // 实践下来有两个问题:
+    //   ① **移动残影**:候选的重绘脏区只外扩 3px(smartHoverUpdate 里),而提示
+    //      底板画在候选上缘外侧约 22px —— 候选一移动,旧底板擦不掉,屏幕上留下
+    //      一串"上一处的位置提示"。分辨率数字跟着鼠标疯狂跳变,视觉上就是花屏。
+    //   ② **信息噪音**:悬停是"猜",数字一直在变但都不是用户的答案;真正要确认
+    //      分辨率是在**采纳之后**(浮出工具栏、选区定下来那一刻)。
+    // 所以只在选区(已确认)路径上显示,候选预览只留虚线框告诉用户"框住了哪块"。
 }
 
-/// 尺寸提示(选区与候选预览共用,保证两个提示"同一眼缘")。
+/// 尺寸提示(分辨率)。**只画在选区上** —— 候选预览不画,理由见 drawCandidate
+/// 第 3 条注释(docs/28:悬停时频繁跳变既挡视线、又因脏区不够而留残影)。
 ///
 /// 文字 = 指定尺寸的 "宽 × 高";底板压在冻结底图上,颜色按**底板覆盖区域**的
 /// 底图亮度自适应:浅底(均值 ≥ 128)→ 白板 + 深字,深底 → 黑板 + 白字。
 ///
 /// 演进史(docs/progress.md):① 纯白字无底板 → 浅色页面糊;② 恒定黑板白字 →
 /// 浅底上底图被压得很重;③ 现方案按底图明暗自适应。采样窗 = 底板自身位置,
-/// 越出屏幕上缘则退到选区/候选内部顶部等高的一条(明暗最接近)。
+/// 越出屏幕上缘则退到选区内部顶部等高的一条(明暗最接近)。
 void OverlayWidget::drawSizeHint(QPainter& painter, const QRect& anchorLogical,
                                  const QSize& physicalSize) {
     const QString sizeText =
@@ -1699,6 +1809,9 @@ void OverlayWidget::wheelEvent(QWheelEvent* e) {
     const int step = e->angleDelta().y() > 0 ? 1 : -1;
     m_hoverStackOffset = (m_hoverStackOffset + step + stack.size()) % stack.size();
     m_lastHoverPos = pos;
+    // 标记"用户用滚轮明确选过" → smartHoverUpdate 里的元素级自动细化不再覆盖它。
+    // 否则查表永远返回最深元素,滚轮选中的那一层会被立刻按回去(docs/29 §2)。
+    m_wheelPicked = true;
     const smart::Candidate& c = m_candidates.at(stack.at(m_hoverStackOffset));
     const QRect picked = smart::toLocalLogical(c.physical, smartScreenPhysical(), dpr());
     if (!picked.isEmpty()) {
@@ -2403,9 +2516,8 @@ void OverlayWidget::leaveEvent(QEvent* e) {
     //
     // 只清候选、不动选区:选区可能有已采纳的结果(浮条模式),那是用户的答案。
     smartClearCandidate();
-    // 停稳计时器也要停:光标都不在这块屏了,再探元素纯属浪费(还能避免
-    // "探测结果晚到、把刚清掉的预选又画回来")。
-    if (m_elementProbeTimer) m_elementProbeTimer->stop();
+    // 光标已离开本屏:重置悬停锚点,免得迟到的快照结果按旧位置落地
+    // (快照本身保留 —— 它是整窗数据,与光标位置无关,回到本屏还能直接用)。
     m_lastHoverPos = QPoint(-1, -1);
     m_hoverStackOffset = 0;
 }

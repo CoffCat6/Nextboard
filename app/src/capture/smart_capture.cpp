@@ -296,9 +296,160 @@ bool worthProbing(quintptr windowId) {
     return !kDeny.contains(cls);
 }
 
+
+namespace {
+
+/// 探测预算(docs/26 §4 S1)。**实测驱动**,别按直觉调小。
+///
+/// 依据(2026-11-02,Chrome 156 / Edge 156 / 三屏混合 DPI):
+///   * ControlView DFS:Chromium 探针页 21~30ms / Telegram Web 136ms;
+///   * RawView DFS:41~56ms / 108ms;
+///   * 旧值 350ms 在"每个命中兄弟都展开"之后余量不够:一次真实页面的
+///     RawView 深挖就要 100ms+,而超时是**硬截断**(直接返回当前 best,
+///     可能停在很粗的一层)。
+///
+/// 对外的默认值在头文件(probeElementAt 的默认实参),这里只放内部常量。
+
+/// 最大深度。实测最深 20(Telegram Web 的 RawView),再往下是文本 run,
+/// 框住单个字符没有意义。
+constexpr int kProbeMaxDepth = 20;
+/// "明显小于窗口"的判据(物理像素)。差得比这还小就等于没细化:
+/// Chromium 的外壳 Pane 常只比窗口小 2px(2077x1388 vs 2078x1390),
+/// 旧实现用严格 `>=` 判"与窗口等大",恰好漏掉这种。
+constexpr int kMinShrinkPhys = 8;
+
+/// 一次 DFS 的产出。
+struct DfsResult {
+    QRect best;          // 最深且明显小于窗口的命中(绝对物理像素)
+    QString bestName;
+    int depth = 0;       // best 的深度(0 = 什么都没找到)
+    int visited = 0;     // 访问过的节点数
+};
+
+/// 沿 `walker` 做受预算约束的 DFS,返回**最深且明显小于窗口**的、包含光标的元素。
+///
+/// ## 为什么不是"每层只挑一个兄弟"(原实现)
+///
+/// Chromium 顶层是两个**同尺寸** Pane:`[0]` 空壳(0 子节点)、`[1]` 才是网页内容。
+/// 原实现在同层多个命中里取"面积最小" —— 而 `[0]` 恰好小 2px,必然选中空壳,
+/// 于是永远停在第 1 层,元素级恒等于窗口级。症状极具迷惑性:功能"看起来接上了"。
+/// 实测(2026-11-02):改成同层全展开后,同一位置从 depth=1 到 depth=9~11
+/// (Chromium 探针页)/ 20(Telegram Web)。
+///
+/// ## 为什么不是"整树 FindAll"
+///
+/// 浏览器 raw 视图几万节点,一次 FindAll 就能卡几百毫秒。DFS + 预算截断
+/// 既保证深度,又把代价压在实测 20~140ms。
+DfsResult dfsDeepest(IUIAutomationTreeWalker* walker, IUIAutomationElement* root,
+                     const QRect& winRect, const QPoint& cursor, qint64 minPhysical,
+                     int maxNodes, int maxDepth, int budgetMs) {
+    DfsResult r;
+    if (!walker || !root) return r;
+    QElapsedTimer timer;
+    timer.start();
+
+    // 所有权规则(全局唯一一条,别在循环里各写一套):
+    //   * QVector<Item> stack 里的每个元素**持有 1 份引用**,出栈即 Release;
+    //   * 本层收集到的 kids 数组**持有 1 份引用**,本层处理完统一 Release;
+    //   * 要下沉时先 AddRef 再 append —— 栈与 kids 各持一份,互不干扰。
+    // 这样 GetNextSiblingElement 永远在元素仍有效时调用,不会 use-after-release
+    // (第一版在这里踩过:入栈转移所有权后再拿它取兄弟)。
+    struct Item {
+        IUIAutomationElement* node;
+        int depth;
+    };
+    QVector<Item> stack;
+    root->AddRef();                 // 调用方仍持有它自己的引用,这里多拿一份
+    stack.append({root, 0});
+
+    while (!stack.isEmpty()) {
+        if (timer.elapsed() > budgetMs || r.visited > maxNodes) break;
+        const Item cur = stack.takeLast();
+        if (cur.depth >= maxDepth) {
+            IUIAutomationElement* n = cur.node;
+            release(n);
+            continue;
+        }
+
+        // ---- 先把本节点的子元素全部收集起来,再统一判断 ----
+        QVector<IUIAutomationElement*> kids;
+        IUIAutomationElement* child = nullptr;
+        if (SUCCEEDED(walker->GetFirstChildElement(cur.node, &child)) && child) {
+            while (child) {
+                kids.append(child);
+                IUIAutomationElement* sib = nullptr;
+                if (FAILED(walker->GetNextSiblingElement(child, &sib))) sib = nullptr;
+                child = sib;
+            }
+        }
+        {
+            IUIAutomationElement* n = cur.node;
+            release(n);
+        }
+
+        for (IUIAutomationElement* kid : kids) {
+            if (timer.elapsed() > budgetMs || r.visited > maxNodes) break;
+            ++r.visited;
+
+            RECT rc{};
+            const bool ok = SUCCEEDED(kid->get_CurrentBoundingRectangle(&rc)) &&
+                            rc.right > rc.left && rc.bottom > rc.top;
+            const qint64 w = ok ? rc.right - rc.left : 0;
+            const qint64 h = ok ? rc.bottom - rc.top : 0;
+            // 坐标口径:UIA 的 bounding rectangle 是**物理屏幕坐标**(与 Win32 一致)。
+            const bool contains = ok && cursor.x() >= rc.left && cursor.x() < rc.right &&
+                                  cursor.y() >= rc.top && cursor.y() < rc.bottom;
+            const bool bigEnough = ok && w >= minPhysical && h >= minPhysical;
+            if (!contains || !bigEnough) continue;
+
+            // 只认"明显小于窗口"的元素:Chromium 的外壳 Pane 常只比窗口小 2px,
+            // 把它记成 best 等于没细化(旧实现用严格 `>=` 判"与窗口等大",
+            // 恰好漏掉这种 —— docs/26 那个缺陷的另一半)。
+            const bool smaller = w < winRect.width() - kMinShrinkPhys ||
+                                 h < winRect.height() - kMinShrinkPhys;
+            const int childDepth = cur.depth + 1;
+            const qint64 area = w * h;
+            const qint64 bestArea = static_cast<qint64>(r.best.width()) * r.best.height();
+            if (smaller && (childDepth > r.depth ||
+                            (childDepth == r.depth && area < bestArea))) {
+                r.depth = childDepth;
+                r.best = QRect(rc.left, rc.top, static_cast<int>(w), static_cast<int>(h));
+                BSTR name = nullptr;
+                if (SUCCEEDED(kid->get_CurrentName(&name)) && name) {
+                    r.bestName = QString::fromWCharArray(name);
+                    ::SysFreeString(name);
+                } else {
+                    r.bestName.clear();
+                }
+            }
+
+            // 下沉 —— 同层可以有**多个**兄弟都包含光标,全都要试。
+            // 这正是原实现("每层只挑一个")失效的地方,见函数头注释。
+            kid->AddRef();                   // 栈自己那一份
+            stack.append({kid, childDepth});
+        }
+
+        for (IUIAutomationElement* kid : kids) {
+            IUIAutomationElement* k = kid;
+            release(k);
+        }
+    }
+
+    // 预算/上限截断时栈里还有活着的元素:必须全部 Release,否则跨进程 COM 泄漏。
+    for (const Item& it : stack) {
+        IUIAutomationElement* p = it.node;
+        release(p);
+    }
+    return r;
+}
+
+} // namespace
+
 QVector<Candidate> probeElementAt(quintptr windowId, const QPoint& cursorGlobalPhysical,
-                                  qreal dpr, int minSize, int maxNodes, int budgetMs) {
+                                  qreal dpr, int minSize, int maxNodes, int budgetMs,
+                                  ProbeStats* stats) {
     QVector<Candidate> out;
+    if (stats) *stats = ProbeStats{};
     if (!windowId || dpr <= 0.01) return out;
 
     ComGuard com;
@@ -312,134 +463,75 @@ QVector<Candidate> probeElementAt(quintptr windowId, const QPoint& cursorGlobalP
     }
 
     IUIAutomationElement* node = nullptr;
-    IUIAutomationCondition* cond = nullptr;
-    const HRESULT hrWin = uia->ElementFromHandle(reinterpret_cast<UIA_HWND>(windowId), &node);
-    if (FAILED(hrWin) || !node) {
-        release(uia);
-        return out;
-    }
-    if (FAILED(uia->CreateTrueCondition(&cond)) || !cond) {
-        release(node);
+    if (FAILED(uia->ElementFromHandle(reinterpret_cast<UIA_HWND>(windowId), &node)) || !node) {
         release(uia);
         return out;
     }
 
-    const RECT winRect = [&] {
-        RECT r{};
-        node->get_CurrentBoundingRectangle(&r);
-        return r;
-    }();
+    RECT winRect{};
+    if (FAILED(node->get_CurrentBoundingRectangle(&winRect)) || winRect.right <= winRect.left ||
+        winRect.bottom <= winRect.top) {
+        release(node);
+        release(uia);
+        return out;
+    }
+    const QRect winQ(winRect.left, winRect.top, static_cast<int>(winRect.right - winRect.left),
+                     static_cast<int>(winRect.bottom - winRect.top));
     const qint64 minPhysical = qMax<qint64>(1, static_cast<qint64>(qRound(minSize * dpr)));
 
     QElapsedTimer timer;
     timer.start();
-    int visited = 0;
-    /// 连续"与窗口同尺寸"的层数(见下方下沉逻辑;防死循环)。
-    int sameSizeStreak = 0;
-    QRect best;   // 目前找到的"最深处、仍包含光标"的元素
-    QString bestName;
 
-    // ---- 贪心下沉:每层只在**子元素里挑包含光标的那几个**,再下钻一层 ----
+    // ---- 第一发:ControlView(快、语义干净)----
+    IUIAutomationTreeWalker* ctrlWalker = nullptr;
+    uia->get_ControlViewWalker(&ctrlWalker);
+    DfsResult r = dfsDeepest(ctrlWalker, node, winQ, cursorGlobalPhysical, minPhysical,
+                             maxNodes, kProbeMaxDepth, budgetMs);
+    int viewUsed = 0;
+
+    // ---- 第二发:第一发没细化时退到 RawView(S2)----
     //
-    // 为什么不 ElementFromPoint:遮罩自己全屏置顶,系统命中测试只会返回遮罩;
-    // 为什么不整树 FindAll:浏览器的整树是几万个节点,一次 FindAll 就能卡住
-    //   好几百毫秒。贪心下沉的代价是 O(深度 × 每层兄弟数),通常 < 40 次 COM 调用。
-    for (int depth = 0; depth < 32; ++depth) {
-        if (timer.elapsed() > budgetMs || visited > maxNodes) break;
-
-        IUIAutomationElementArray* children = nullptr;
-        if (FAILED(node->FindAll(TreeScope_Children, cond, &children)) || !children) break;
-
-        int len = 0;
-        children->get_Length(&len);
-        visited += len;
-
-        IUIAutomationElement* next = nullptr;
-        QRect nextRect;
-        QString nextName;
-        qint64 nextArea = 0;
-
-        for (int i = 0; i < len; ++i) {
-            if (timer.elapsed() > budgetMs || visited > maxNodes) break;
-            IUIAutomationElement* child = nullptr;
-            if (FAILED(children->GetElement(i, &child)) || !child) continue;
-
-            RECT r{};
-            if (FAILED(child->get_CurrentBoundingRectangle(&r)) || r.right <= r.left ||
-                r.bottom <= r.top) {
-                release(child);
-                continue;
-            }
-            const qint64 w = r.right - r.left;
-            const qint64 h = r.bottom - r.top;
-            // 坐标口径:UIA 的 bounding rectangle 是**物理屏幕坐标**(与 Win32 一致)。
-            const bool contains = cursorGlobalPhysical.x() >= r.left &&
-                                  cursorGlobalPhysical.x() < r.right &&
-                                  cursorGlobalPhysical.y() >= r.top &&
-                                  cursorGlobalPhysical.y() < r.bottom;
-            if (!contains || w < minPhysical || h < minPhysical) {
-                release(child);
-                continue;
-            }
-            // 同层可能多个子元素都包含光标(重叠):取**面积最小**的那个 ——
-            // 它就是视觉上"光标正压着的内容"。
-            const qint64 area = w * h;
-            if (!next || area < nextArea) {
-                release(next);
-                next = child;
-                nextRect = QRect(r.left, r.top, static_cast<int>(w), static_cast<int>(h));
-                nextArea = area;
-                BSTR name = nullptr;
-                if (SUCCEEDED(child->get_CurrentName(&name)) && name) {
-                    nextName = QString::fromWCharArray(name);
-                    ::SysFreeString(name);
-                } else {
-                    nextName.clear();
+    // RawView 比 ControlView 细 2~9 层(实测:Chromium 探针页 9 → 11 层,
+    // 能到单行文本/单列),但节点数多一个量级。只在"第一发停在很粗的层"时补,
+    // 让常见情况快、复杂情况细。
+    if (r.depth <= 2) {
+        const int remain = budgetMs - static_cast<int>(timer.elapsed());
+        if (remain > 80) {   // 余量太小别投:必然超时,徒增延迟
+            IUIAutomationTreeWalker* rawWalker = nullptr;
+            uia->get_RawViewWalker(&rawWalker);
+            const int left = maxNodes - r.visited;
+            if (left > 64) {
+                const DfsResult r2 = dfsDeepest(rawWalker, node, winQ, cursorGlobalPhysical,
+                                                minPhysical, left, kProbeMaxDepth, remain);
+                if (r2.depth > r.depth) {
+                    r = r2;
+                    viewUsed = 1;
                 }
-            } else {
-                release(child);
             }
+            release(rawWalker);
         }
-        release(children);
-
-        if (!next) break;   // 这一层没有包含光标的子元素:已到最深处
-
-        // ⚠️ 元素与窗口同尺寸**不等于"到底了"**:实测 Chrome 的 UIA 树上,
-        //    根节点就是一个与窗口等大的容器,真正的正文区块在**它下面几层**。
-        //    早先版本在这里 break,结果"元素级"永远只会框住整个窗口 ——
-        //    功能看起来接上了,实际上没有任何细化。
-        //
-        //    正确做法:同尺寸就**继续下沉**,只是不把它记成 best。
-        //    用 sameSizeStreak 兜住"一连几十层都同尺寸"的死循环。
-        const LONG winW = winRect.right - winRect.left;
-        const LONG winH = winRect.bottom - winRect.top;
-        const bool sameAsWindow =
-            nextRect.width() >= winW && nextRect.height() >= winH;
-        if (!sameAsWindow) {
-            best = nextRect;
-            bestName = nextName;
-            sameSizeStreak = 0;
-        } else if (++sameSizeStreak > 6) {
-            // 连续 6 层都和窗口一样大:这个应用的 UIA 只报容器,再钻没有意义
-            release(node);
-            node = next;
-            break;
-        }
-        release(node);
-        node = next;
     }
 
-    if (!best.isEmpty()) {
+    release(ctrlWalker);
+
+    if (r.best.isEmpty() == false) {
         Candidate c;
-        c.physical = best;
-        c.title = bestName;
+        c.physical = r.best;
+        c.title = r.bestName;
         c.id = windowId;          // 元素不单独给 id:同一次会话内由 windowId + 矩形区分
         c.windowId = windowId;
         c.level = 1;
         out.append(c);
     }
 
-    release(cond);
+    if (stats) {
+        stats->depth = r.depth;
+        stats->visited = r.visited;
+        stats->elapsedMs = static_cast<int>(timer.elapsed());
+        stats->viewUsed = viewUsed;
+        stats->refined = !r.best.isEmpty();
+    }
+
     release(node);
     release(uia);
     return out;
@@ -457,55 +549,260 @@ QStringList dumpElementTree(quintptr windowId, int depth, int maxPerLevel) {
         return out;
     }
     IUIAutomationElement* node = nullptr;
-    IUIAutomationCondition* cond = nullptr;
-    if (FAILED(uia->ElementFromHandle(reinterpret_cast<UIA_HWND>(windowId), &node)) || !node ||
-        FAILED(uia->CreateTrueCondition(&cond)) || !cond) {
-        release(node);
+    IUIAutomationTreeWalker* walker = nullptr;
+    if (FAILED(uia->ElementFromHandle(reinterpret_cast<UIA_HWND>(windowId), &node)) || !node) {
         release(uia);
         return out;
     }
+    uia->get_ControlViewWalker(&walker);
+
+    // ---- 每层打印**全部**子元素,并把"该子元素自己的子节点数"一并打出来 ----
+    //
+    // ⚠️ 旧实现只沿第 0 个孩子继续下沉(`if (i == 0)`)。Chromium 的第 0 个孩子
+    //    恰好是空壳 Pane,于是诊断输出永远是 `L1 n=0` —— 它与主算法的同一个错误
+    //    互相印证,把自身缺陷写成了"Chromium 惰性无障碍"(docs/26 §2.5)。
+    //    诊断工具的错误比算法的错误代价更高:它会误导归因。
+    //
+    //    "→N" 是子元素自己的子节点数:**空的支路一眼可见**。
     for (int d = 0; d < depth; ++d) {
-        IUIAutomationElementArray* children = nullptr;
-        if (FAILED(node->FindAll(TreeScope_Children, cond, &children)) || !children) {
-            out << QStringLiteral("L%1 <FindAll 失败>").arg(d);
+        // 先把本层子元素收齐(同一个所有权理由:取兄弟需要前一个仍有效)
+        QVector<IUIAutomationElement*> kids;
+        IUIAutomationElement* child = nullptr;
+        if (SUCCEEDED(walker->GetFirstChildElement(node, &child)) && child) {
+            while (child) {
+                kids.append(child);
+                IUIAutomationElement* sib = nullptr;
+                if (FAILED(walker->GetNextSiblingElement(child, &sib))) sib = nullptr;
+                child = sib;
+            }
+        }
+        if (kids.isEmpty()) {
+            out << QStringLiteral("L%1 n=0 <空:到叶子了>").arg(d);
             break;
         }
-        int len = 0;
-        children->get_Length(&len);
-        QString line = QStringLiteral("L%1 n=%2").arg(d).arg(len);
-        for (int i = 0; i < len && i < maxPerLevel; ++i) {
-            IUIAutomationElement* child = nullptr;
-            if (FAILED(children->GetElement(i, &child)) || !child) continue;
-            RECT r{};
-            child->get_CurrentBoundingRectangle(&r);
+
+        QString arms;
+        // 沿"子节点最多"的支路继续下沉(而不是第 0 个);空壳支路不该占预算。
+        IUIAutomationElement* next = nullptr;
+        int bestCount = 0;
+        for (int i = 0; i < kids.size(); ++i) {
+            IUIAutomationElement* kid = kids.at(i);
+            RECT rc{};
+            kid->get_CurrentBoundingRectangle(&rc);
             BSTR name = nullptr;
             QString nm;
-            if (SUCCEEDED(child->get_CurrentName(&name)) && name) {
+            if (SUCCEEDED(kid->get_CurrentName(&name)) && name) {
                 nm = QString::fromWCharArray(name);
                 ::SysFreeString(name);
             }
-            line += QStringLiteral(" [%1 %2x%3 @%4,%5]")
-                        .arg(nm.left(18))
-                        .arg(r.right - r.left)
-                        .arg(r.bottom - r.top)
-                        .arg(r.left)
-                        .arg(r.top);
-            if (i == 0) {
-                // 沿第 0 个孩子继续下沉(与 probeElementAt 的贪心路径同向)
-                release(node);
-                node = child;
-            } else {
-                release(child);
+            // 该子元素自己的子节点数 —— 诊断的关键信息("空壳"在这里现形)
+            int grand = 0;
+            IUIAutomationElement* gc = nullptr;
+            if (SUCCEEDED(walker->GetFirstChildElement(kid, &gc)) && gc) {
+                ++grand;
+                while (true) {
+                    IUIAutomationElement* sib = nullptr;
+                    if (FAILED(walker->GetNextSiblingElement(gc, &sib)) || !sib) break;
+                    IUIAutomationElement* g = gc;
+                    release(g);
+                    gc = sib;
+                    ++grand;
+                }
+            }
+            {
+                IUIAutomationElement* g = gc;
+                release(g);
+            }
+
+            if (i < maxPerLevel) {
+                arms += QStringLiteral(" [%1][%2 %3x%4 @%5,%6]→%7")
+                            .arg(i)
+                            .arg(nm.left(18))
+                            .arg(rc.right - rc.left)
+                            .arg(rc.bottom - rc.top)
+                            .arg(rc.left)
+                            .arg(rc.top)
+                            .arg(grand);
+            }
+            if (grand > bestCount) {
+                bestCount = grand;
+                IUIAutomationElement* old = next;
+                release(old);
+                kid->AddRef();
+                next = kid;      // next 自己持一份
             }
         }
-        out << line;
-        release(children);
+        out << (QStringLiteral("L%1 n=%2").arg(d).arg(kids.size()) + arms +
+                QStringLiteral(" [最深支路子节点数=%1]").arg(bestCount));
+
+        for (IUIAutomationElement* kid : kids) {
+            IUIAutomationElement* k = kid;
+            release(k);
+        }
+        release(node);
+        node = next;
         if (!node) break;
     }
-    release(cond);
+
+    release(walker);
     release(node);
     release(uia);
     return out;
+}
+
+// ---- 元素快照(docs/27:进窗预取 + 查表,取代"每次悬停重探")----
+
+QVector<ElementNode> buildElementSnapshot(quintptr windowId, int maxNodes, int budgetMs,
+                                         ProbeStats* stats) {
+    QVector<ElementNode> out;
+    if (stats) *stats = ProbeStats{};
+    if (!windowId) return out;
+
+    ComGuard com;
+    if (!com.initialized) return out;
+
+    IUIAutomation* uia = nullptr;
+    if (FAILED(::CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&uia))) ||
+        !uia) {
+        return out;
+    }
+    IUIAutomationElement* root = nullptr;
+    if (FAILED(uia->ElementFromHandle(reinterpret_cast<UIA_HWND>(windowId), &root)) || !root) {
+        release(uia);
+        return out;
+    }
+    RECT winRect{};
+    if (FAILED(root->get_CurrentBoundingRectangle(&winRect))) {
+        release(root);
+        release(uia);
+        return out;
+    }
+    IUIAutomationTreeWalker* walker = nullptr;
+    uia->get_ControlViewWalker(&walker);
+
+    QElapsedTimer timer;
+    timer.start();
+
+    // 与 dfsDeepest 同一套所有权规则:栈持有引用,出栈即 Release;
+    // 本层 kids 数组各持一份,本层统一 Release。
+    struct Item {
+        IUIAutomationElement* node;
+        int parentIdx;   // out 数组里的父索引(-1 = 根)
+        int depth;
+    };
+    QVector<Item> stack;
+    root->AddRef();
+    stack.append({root, -1, 0});
+
+    int visited = 0;
+    int maxDepthSeen = 0;
+
+    while (!stack.isEmpty()) {
+        if (timer.elapsed() > budgetMs || visited > maxNodes) break;
+        const Item cur = stack.takeLast();
+        if (cur.depth >= kProbeMaxDepth) {
+            IUIAutomationElement* n = cur.node;
+            release(n);
+            continue;
+        }
+
+        QVector<IUIAutomationElement*> kids;
+        IUIAutomationElement* child = nullptr;
+        if (SUCCEEDED(walker->GetFirstChildElement(cur.node, &child)) && child) {
+            while (child) {
+                kids.append(child);
+                IUIAutomationElement* sib = nullptr;
+                if (FAILED(walker->GetNextSiblingElement(child, &sib))) sib = nullptr;
+                child = sib;
+            }
+        }
+        {
+            IUIAutomationElement* n = cur.node;
+            release(n);
+        }
+
+        for (IUIAutomationElement* kid : kids) {
+            if (timer.elapsed() > budgetMs || visited > maxNodes) break;
+            ++visited;
+
+            RECT rc{};
+            const bool ok = SUCCEEDED(kid->get_CurrentBoundingRectangle(&rc)) &&
+                            rc.right > rc.left && rc.bottom > rc.top;
+            if (ok) {
+                ElementNode n;
+                n.physical = QRect(rc.left, rc.top, static_cast<int>(rc.right - rc.left),
+                                   static_cast<int>(rc.bottom - rc.top));
+                BSTR name = nullptr;
+                if (SUCCEEDED(kid->get_CurrentName(&name)) && name) {
+                    n.title = QString::fromWCharArray(name);
+                    ::SysFreeString(name);
+                }
+                n.parent = cur.parentIdx;
+                n.depth = cur.depth + 1;
+                if (n.depth > maxDepthSeen) maxDepthSeen = n.depth;
+
+                const int idx = out.size();
+                out.append(n);
+                kid->AddRef();      // 栈自己那一份
+                stack.append({kid, idx, n.depth});
+            } else {
+                // 矩形无效:不入快照,也就不需要再下沉 —— 但引用必须放掉
+                IUIAutomationElement* k = kid;
+                release(k);
+            }
+        }
+
+        for (IUIAutomationElement* kid : kids) {
+            IUIAutomationElement* k = kid;
+            release(k);
+        }
+    }
+
+    for (const Item& it : stack) {
+        IUIAutomationElement* p = it.node;
+        release(p);
+    }
+    release(walker);
+    release(root);
+    release(uia);
+
+    if (stats) {
+        stats->depth = maxDepthSeen;
+        stats->visited = visited;
+        stats->elapsedMs = static_cast<int>(timer.elapsed());
+        stats->viewUsed = 0;
+        stats->refined = !out.isEmpty();
+    }
+    return out;
+}
+
+int elementAtSnapshot(const QVector<ElementNode>& nodes, const QRect& winPhysical,
+                      const QPoint& cursor, int minSize, bool allowEqualWin) {
+    if (nodes.isEmpty() || winPhysical.isEmpty()) return -1;
+    const int minShrink = allowEqualWin ? 0 : kMinShrinkPhys;
+
+    int bestIdx = -1;
+    int bestDepth = -1;
+    qint64 bestArea = 0;
+
+    for (int i = 0; i < nodes.size(); ++i) {
+        const ElementNode& n = nodes.at(i);
+        if (!n.physical.contains(cursor)) continue;
+        if (n.physical.width() < minSize || n.physical.height() < minSize) continue;
+        // "明显小于窗口"的判据与 dfsDeepest 完全一致(Chromium 外壳 Pane 只差 2px)
+        const bool smaller = n.physical.width() < winPhysical.width() - minShrink ||
+                             n.physical.height() < winPhysical.height() - minShrink;
+        if (!smaller) continue;
+
+        const qint64 area = static_cast<qint64>(n.physical.width()) * n.physical.height();
+        if (n.depth > bestDepth || (n.depth == bestDepth && area < bestArea)) {
+            bestDepth = n.depth;
+            bestArea = area;
+            bestIdx = i;
+        }
+    }
+    return bestIdx;
 }
 
 } // namespace nb::smart

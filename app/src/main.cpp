@@ -86,11 +86,56 @@ static void fileMessageHandler(QtMsgType type, const QMessageLogContext& ctx, co
 // 至少留下异常码与地址。必须在 QApplication 之后安装(applicationDirPath 依赖它)。
 namespace {
 
+// ntdll 的公开导出,但 <windows.h> 不声明它(在 winternl.h 里,而那个头会带来
+// 一堆和 Qt 冲突的宏)。手写声明比 include 更省事,签名与 ntdll 一致。
+extern "C" __declspec(dllimport) unsigned short __stdcall RtlCaptureStackBackTrace(
+    unsigned long FramesToSkip, unsigned long FramesToCapture, void** BackTrace,
+    unsigned long* BackTraceHash);
+
 void appendCrashLog(const QString& text) {
     QFile log;
     // 崩溃路径同样走轮转:判一次大小即可,失败也无所谓(写不进去就是写不进去)。
     if (nb::openLogFileAppend(log, nb::appDataFile(QStringLiteral("nextboard.log"))))
         log.write(QStringLiteral("[CRASH] %1\n").arg(text).toUtf8());
+}
+
+/// 把当前线程的调用栈写进日志(纯地址,不含符号)。
+///
+/// 为什么需要:崩溃处理器原本只记"模块 + 偏移",而 offset 每次构建都变 ——
+/// 没有符号就只能在源码里猜,本次排查已经因此走了弯路(docs/29 §3)。
+/// `RtlCaptureStackBackTrace` 是 ntdll 的公开导出,**不需要 PDB/DbgHelp**,
+/// 拿到的返回地址配合"模块+偏移"就能在下次崩溃时直接对上是哪个函数调用路径。
+///
+/// 地址本身因 ASLR 每次不同,所以每帧都换算成"模块名+模块内偏移"再打印。
+void appendStackTrace() {
+    void* frames[32] = {};
+    const USHORT n = ::RtlCaptureStackBackTrace(1, 32, frames, nullptr);
+    if (n == 0) {
+        appendCrashLog(QStringLiteral("  <栈回溯为空>"));
+        return;
+    }
+    appendCrashLog(QStringLiteral("  栈回溯(%1 帧,模块内偏移):").arg(n));
+    for (USHORT i = 0; i < n; ++i) {
+        const void* addr = frames[i];
+        MEMORY_BASIC_INFORMATION mb{};
+        QString one;
+        if (VirtualQuery(addr, &mb, sizeof(mb)) && mb.Type == MEM_IMAGE) {
+            HMODULE mod = static_cast<HMODULE>(mb.AllocationBase);
+            wchar_t path[MAX_PATH] = {};
+            if (mod && GetModuleFileNameW(mod, path, MAX_PATH)) {
+                const QString file = QFileInfo(QString::fromWCharArray(path)).fileName();
+                const uintptr_t base = reinterpret_cast<uintptr_t>(mb.AllocationBase);
+                const uintptr_t at = reinterpret_cast<uintptr_t>(addr);
+                one = QStringLiteral("    #%1 %2+0x%3")
+                          .arg(i).arg(file).arg(at - base, 0, 16);
+            }
+        }
+        if (one.isEmpty()) {
+            one = QStringLiteral("    #%1 <非镜像地址 %2>")
+                      .arg(i).arg(reinterpret_cast<quintptr>(addr), 0, 16);
+        }
+        appendCrashLog(one);
+    }
 }
 
 /// 常见异常码:0xC0000005 访问违例 / 0xC0000409 栈溢出或 fail-fast /
@@ -123,6 +168,7 @@ LONG WINAPI unhandledExceptionFilter(EXCEPTION_POINTERS* info) {
                        .arg(static_cast<quint32>(code), 8, 16, QLatin1Char('0'))
                        .arg(reinterpret_cast<quintptr>(address), 0, 16)
                        .arg(where));
+    appendStackTrace();                 // 栈回溯:下次崩溃能直接对上调用路径
     return EXCEPTION_EXECUTE_HANDLER;   // 记完即终止,不再弹系统崩溃框
 }
 
@@ -182,6 +228,7 @@ int main(int argc, char* argv[]) {
                 || arg == QLatin1String("--smart-live-flow")
                 || arg == QLatin1String("--smart-uia-flow")
                 || arg == QLatin1String("--smart-settings-flow")
+                || arg == QLatin1String("--hotkey-lifecycle-flow")
                 || arg == QLatin1String("--quick-commands-flow")
                 || arg == QLatin1String("--editor-flow")
                 || arg == QLatin1String("--autostart-flow")
@@ -335,6 +382,7 @@ int main(int argc, char* argv[]) {
     bool smartLiveFlow = false;
     bool smartUiaFlow = false;
     bool smartSettingsFlow = false;
+    bool hotkeyLifecycleFlow = false;
     bool quickCommandsFlow = false;
     bool editorFlow = false;
     bool autoStartFlow = false;
@@ -397,6 +445,9 @@ int main(int argc, char* argv[]) {
             smartUiaFlow = true;
         else if (arg == QLatin1String("--smart-settings-flow"))
             smartSettingsFlow = true;
+        // 热键生命周期验收(docs/29 §3):回归"退出期 WM_HOTKEY 经悬垂指针闪退"。
+        else if (arg == QLatin1String("--hotkey-lifecycle-flow"))
+            hotkeyLifecycleFlow = true;
         else if (arg == QLatin1String("--quick-commands-flow"))
             quickCommandsFlow = true;
         else if (arg == QLatin1String("--editor-flow"))
@@ -457,6 +508,7 @@ int main(int argc, char* argv[]) {
     if (smartLiveFlow) runFlow([] { nb::runSmartLiveFlow(); });
     if (smartUiaFlow) runFlow([] { nb::runSmartUiaFlow(); });
     if (smartSettingsFlow) runFlow([&panel] { nb::runSmartSettingsFlow(panel); });
+    if (hotkeyLifecycleFlow) runFlow([&panel] { nb::runHotkeyLifecycleFlow(panel); });
     if (quickCommandsFlow) runFlow([&panel] { nb::runQuickCommandsFlow(panel); });
     if (editorFlow) runFlow([] { nb::runEditorFlow(); });
     if (autoStartFlow) runFlow([] { nb::runAutoStartFlow(); });

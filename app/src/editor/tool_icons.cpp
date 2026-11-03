@@ -23,8 +23,13 @@ constexpr qreal kViewport = 16.0;
 /// 造一张透明画布并把画笔按 16px 视口归一化:
 /// 之后绘制代码里的数字都写"16px 基准值",与 QML 侧同一手法。
 /// dpr 参与 —— 高分屏上图标不发虚(与"截图画布"同一类要注意的点)。
+///
+/// ⚠️ 返回值**可能为 null**(size ≤ 0、或极端尺寸下平台分配失败)。调用方必须
+/// `if (pm.isNull()) return {};` 之后再构造 QPainter —— 见 toolIcon() 的注释。
 QPixmap makeCanvas(int size, qreal dpr) {
+    if (size <= 0 || dpr <= 0.0) return {};
     QPixmap pm(qRound(size * dpr), qRound(size * dpr));
+    if (pm.isNull()) return {};
     pm.setDevicePixelRatio(dpr);
     pm.fill(Qt::transparent);
     return pm;
@@ -74,7 +79,9 @@ QColor iconInkFor(const QPalette& palette) {
 
 QIcon toolIcon(EditorTool tool, int size, const QColor& ink) {
     QPixmap pm = makeCanvas(size, 2.0);
+    if (pm.isNull()) return {};
     QPainter p(&pm);
+    if (!p.isActive()) return {};
     setupPainter(p, size, ink);
 
     switch (tool) {
@@ -184,7 +191,9 @@ QIcon toolIcon(EditorTool tool, int size, const QColor& ink) {
 
 QIcon barIcon(BarIcon icon, int size, const QColor& ink) {
     QPixmap pm = makeCanvas(size, 2.0);
+    if (pm.isNull()) return {};
     QPainter p(&pm);
+    if (!p.isActive()) return {};
     setupPainter(p, size, ink);
 
     switch (icon) {
@@ -323,10 +332,12 @@ QCursor crosshairCursor(bool dark, qreal dpr) {
     constexpr int kLogical = 24;
     const int px = qRound(kLogical * k);
     QPixmap pm(px, px);
+    if (pm.isNull()) return QCursor();
     pm.setDevicePixelRatio(k);   // 物理像素画布 + 声明 DPR
     pm.fill(Qt::transparent);
 
     QPainter p(&pm);
+    if (!p.isActive()) return QCursor();
     p.setRenderHint(QPainter::Antialiasing, true);
     // ⚠️ **不要**再手动 scale(k,k):设过 setDevicePixelRatio 之后,painter 已经
     //    按逻辑坐标工作了,再 scale 一次就是**双重缩放** —— 图形被推到画布外,
@@ -373,7 +384,9 @@ QCursor crosshairCursor(bool dark, qreal dpr) {
 
 QIcon strokeIcon(int width, int size, const QColor& ink) {
     QPixmap pm = makeCanvas(size, 2.0);
+    if (pm.isNull()) return {};
     QPainter p(&pm);
+    if (!p.isActive()) return {};
     setupPainter(p, size, ink);
     // 半径随档位递增(2/4/8 → 1.8/3.0/4.6),用实心圆点直观测
     const qreal r = 1.0 + width * 0.45;
@@ -386,7 +399,9 @@ QIcon strokeIcon(int width, int size, const QColor& ink) {
 
 QIcon fontSizeIcon(int pixelSize, int size, const QColor& ink) {
     QPixmap pm = makeCanvas(size, 2.0);
+    if (pm.isNull()) return {};
     QPainter p(&pm);
+    if (!p.isActive()) return {};
     setupPainter(p, size, ink);
     // 方框高度示意字号(24/36/48 → 5/7/9),配一条基线
     const qreal h = 3.0 + (pixelSize / 24.0) * 2.4;

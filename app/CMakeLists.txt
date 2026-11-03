@@ -47,6 +47,7 @@ add_executable(nextboard WIN32
     src/host/note_flow.cpp
     src/host/capture_toolbar_flow.cpp
     src/host/smart_capture_flow.cpp
+    src/host/hotkey_lifecycle_flow.cpp
     src/host/editor_flow.cpp
     src/host/stitch_flow.cpp
     src/host/stitch_live_flow.cpp

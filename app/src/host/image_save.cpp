@@ -35,11 +35,30 @@ int qualityFor(const QString& format) {
 ///
 /// 用 DestinationOver(画在已有内容**下面**)而不是 SourceOver:后者会在
 /// 半透明笔画上再叠一层白,把标注冲淡。
+///
+/// ⚠️ **必须检查 QPainter 是否激活**(2026-11-02 闪退修复,docs/29 §3)。
+///
+/// `QImage out(image.size(), ...)` 在**尺寸为空或分配失败**时返回 null image,
+/// 此时 `QPainter p(&out)` 的 begin() 失败、p 处于未激活状态;后续
+/// `setCompositionMode` / `fillRect` 作用在未激活 painter 上会写空指针 →
+/// **0xC0000005**,进程直接消失。
+///
+/// 真实触发路径:长截图(拼接上限 30000px)或超大选区存 JPEG/WEBP 时,
+/// 这次临时分配才真正会失败 —— 用户感知就是"某些操作下 Nextboard 突然闪退",
+/// 而崩溃日志里没有任何异常前兆。
+///
+/// 现在的契约:分配失败就**返回原图**(调用方随后会走 save 失败分支给出可读
+/// 错误),而不是让进程崩掉。alpha 没被铺平会导致 JPEG 透明区变黑,但那是
+/// "可见的降级",远好于"静默崩溃"。
 QImage flattenOntoWhite(const QImage& image) {
+    if (image.isNull() || image.size().isEmpty()) return image;
     QImage out(image.size(), QImage::Format_ARGB32_Premultiplied);
-    out.fill(Qt::transparent);
+    // allocation failure → null image → painter would be inactive
+    if (out.isNull()) return image;
     {
         QPainter p(&out);
+        // 双保险:即使 image 非空,底层分配仍可能失败(超大图/显存受限)
+        if (!p.isActive()) return image;
         p.drawImage(0, 0, image);
         p.setCompositionMode(QPainter::CompositionMode_DestinationOver);
         p.fillRect(out.rect(), Qt::white);
