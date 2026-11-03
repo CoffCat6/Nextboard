@@ -2,6 +2,190 @@
 
 > 按里程碑记录关键决策与实测数据,保持第一代 phase 文档的习惯。
 
+## 2026-11-03 外部审查报告处置(docs/code-review-2026-11-03.md)
+
+> 外部审查给出 37 项发现。**先核对,再修**:核实后发现报告最关键的证据链
+> ("静默崩溃现场")站不住,故先补观测能力,再修真实缺陷。
+
+### 一、对报告本身的修正(重要,影响后续所有判断)
+
+| 报告结论 | 核实结果 |
+| --- | --- |
+| 「最后写入 14:25 的日志无 [CRASH] → 进程静默死亡,是 abort 类死法」 | **不成立**。该日志所属进程(PID 22792)在审查期间**仍在运行**且持锁 `clipboard.db`/`nextboard.log`。统计 49 个会话:**8 个以剪贴板重试结尾、8 个有 [CRASH] 块,两个集合完全不相交** —— 前者是本机被结束进度的正常签名。 |
+| 「fail-fast / abort」 | 日志中 `0xC0000409` 与 `std::terminate` 出现次数均为 **0**;8 个崩溃块全是 `0xC0000005`。 |
+| 「Retrying to obtain clipboard 是核心侧证据」 | 该字符串**不在仓库源码里**,只在 `qwindows.dll`(`QWindowsClipboardRetrievalMimeData`)。它是宿主直用 Qt 剪贴板产生的,核心走 clipboard-win 不产生这句。 |
+
+**教训**:宿主日志此前**没有时间戳**(格式仅 `[LEVEL] msg`),"日志停住"无法区分"进程死了"
+与"进程活着只是没写"。这正是误判的直接成因 —— 已修(见下)。
+
+### 二、已修(按报告编号)
+
+固定项(另有回归/变异测试):
+
+- **#1 畸形 CF_DIB → panic 穿 `extern "system"` → abort**(clip.rs):掩码区改为先验长度
+  (`header_size >= 52` 需 `dib.len() >= 56`);行宽/总长改 checked 运算;wndproc 的
+  `WM_CLIPBOARDUPDATE` 分支整体包 `catch_unwind`(OS 回调路径此前完全没有 panic 边界)。
+  启动路径的 `expect` 改 `log::error!` + 返回,避免静默杀死监听线程(#18)。
+  *回归*:`decode_dib_rejects_truncated_header_without_panicking` 等 3 条;**变异验证**:
+  还原旧代码后该测试确实 panic 在 `range end index 56 out of range`。
+- **#2 备份导入路径穿越**(backup_export.rs):新增 `safe_blob_rel()` 净化库内
+  `blob_path` 列(拒绝绝对/含 `..`),`copy_blob()` 再加规范化后 `starts_with` 兜底。
+  越界项跳过并计入 `blob_missing`、blob_path 置空,不静默丢弃。
+  *回归*:`import_rejects_path_traversal_in_blob_path_column`;**变异验证**:关掉两道防护后
+  测试报出 `escaped.png` 确实被写到 blobs 之外。
+- **#3 单实例门禁失效**(main.cpp):`SingleInstance` 提到 `main()` 作用域(原在 `if` 块里,
+  块结束即 `ReleaseMutex`,早于 `QApplication` 构造)。
+  **并接通唤起链路**(报告未发现的部分):`WM_APP_ACTIVATE` 此前**全仓无接收方**
+  (`ActivateFilter` 从未实例化);且广播对 `Qt::Tool` 主面板**实测收不到**。
+  改为 PanelWindow::nativeEvent 认领 + HWND 经命名共享节定点投递。
+  *实测*:`--hidden` 启动后面板不可见;第二次启动 **23ms 退出**,面板变可见。
+- **#4 `INITIALIZED` 提前置位**(ffi.rs):改 CAS + 失败路径放回 false;新增
+  `SHUTDOWN_DONE`,shutdown 后明确拒绝再 init(OnceLock 不可清空,否则是僵尸态)。
+- **#5/#N3 FFI 串行化只覆盖 1/5 入口**:锁从 `AsyncCall::run()` 的**函数级 static**
+  上移为 `CoreBridge::ffiMutex()`,12 个 nb_* 入口全部持有(含 UI 线程同步 `call`,
+  原先连名义串行都没有)。已核对无嵌套加锁路径(Qt6 QMutex 非递归)。
+- **#7 QImage/QPainter 判空**:`annotation_engine::compose` ×2、`pin_window` 显示缓存、
+  `quick_commands::hIconToImage`(含 w/h 为 0)、死代码 `maskedBase()` 一并补齐。
+- **#9 OCR 预览窗泄漏**:`closeEvent` 改进 `deleteLater()` 并置空三个成员。
+- **#10 日志处理器非线程安全**:加 `QMutex`;崩溃路径用 `tryLock`(**不能**阻塞等锁,
+  崩在写日志里就是死锁)。**并补行级时间戳**(`yyyy-MM-dd HH:mm:ss.zzz`),崩溃条目同样带。
+- **#11 `VkKeyScanW == -1` 未校验**:0xFF 会被当成合法 vk,失败归因成"被其他程序占用"。
+- **#12 热键 id 与实例绑定**:改进程级原子计数器(验收流的临时实例不再注销主实例热键)。
+- **#13/#14 托盘菜单泄漏 + 二级菜单重名**:`~Tray` 显式 delete(父对象只能是 QWidget*,
+  不能 `new QMenu(this)`);便签菜单改名 `nbTrayNoteMenu` 并同步 QSS。
+- **#16 设置落盘竞态**:tmp 名带 uuid + `SAVE_LOCK`(中毒恢复),rename 前先删旧文件。
+- **#17 `limit` 无钳制**:`clamp(0,1000)`、offset `max(0)`(`LIMIT -1` = 无上限)。
+- **#19 Mutex 中毒映射为永久错误**:DB 锁、长截图会话表改 `PoisonError::into_inner` 恢复
+  (与 translate/http.rs 同策略)。
+- **#20 未 checked 乘法**:`write_rgba_to_clipboard` 与 `encode_png_with` 拉齐口径。
+- **#23 `QHash::operator[]` 隐式插入 + 引用失效**:改 `value()` + 判空。
+- **#24 `changed()` 零订阅**:接到 `Tray::refreshNoteSubmenu`(菜单未展开时忽略),
+  并在头文件如实标注历史状态。
+- **#29 死代码标注**:`runAfterDestroyed` 明确标注当前无调用点,
+  避免后人误以为有现存路径依赖。(`maskedBase` 已补判空,见 #7。)
+- **#28 CoInitializeEx 未配对**:加 `ComGuard`(S_FALSE 也算增加引用计数,需配对;
+  `RPC_E_CHANGED_MODE` 不算初始化,不能减)。
+- **#33 缺 `busy_timeout`**:`store::open` 设 3s(单实例失效时两进程共库不再直接 SQLITE_BUSY)。
+- **N2(#报告未发现)宿主直用 Qt 剪贴板**:`pin_window`(文本+图片)、`note_window` 改走
+  `CoreBridge::copyTextToClipboard / copyRgbaToClipboard`。这既是 `Retrying to obtain
+  clipboard` 噪声的真实来源,也是"复制了却静默失败、还弹成功提示"的根因 —— 失败路径
+  现在明说失败。
+- **N7 产品路径无 context 的 `singleShot`**:hotkeys/tray/quick_commands/auto_paste 统一带 `qApp`。
+
+### 三、第二轮补齐(#6/#8/#15/#19余/#20余/#21/#22/#25/#26/#27/#30/#31/#32/#34/#35/#36/#37)
+
+- **#32 贴图没有屏幕增删重夹**:PinWindow::reclampToCurrentScreen() + CoreFacade::reclampAllPins(),
+  接到 main.cpp 的 screenAdded/screenRemoved。便签早就有这条,贴图是**唯一空白**;而贴图
+  是 Qt::Tool、不占任务栏、不进 Alt+Tab、托盘无列表 —— 副屏拔掉后用户**无法自救**。
+  这是上一轮判断"唯一值得优先补"的一项。
+- **#6 auto_paste 注释/实现矛盾**:按注释描述的现象改**实现** —— SendInput 拆成两批
+  (按下 2 个 → Sleep(3) → 抬起 2 个),并区分"按下失败就不再投抬起"与"抬起失败要补投"
+  (后者会让目标应用认为 Ctrl 一直按着)。
+- **#21 zip bomb 总量上限**:新增 MAX_UNPACK_BYTES(2GB)+ copy_with_budget() 按块累计,
+  越界立刻中止并删半截文件(原先 io::copy 拿不到增量,等返回时磁盘已写满)。
+- **#22 事务前搬文件**:blob 改成"先记清单、tx.commit() 成功后再搬"。
+- **#35 长截图会话无回收**:Session.last_used + SESSION_IDLE_TTL(5min),在 with_sessions
+  里顺带回收僵尸会话(宿主崩溃/强杀时永远不会有人来 abort)。
+- **#36 响应上限是"读完才查"**:WinHTTP 路径按**剩余预算**截断单块分配;SOCKS5 路径从
+  read_to_string() 改为增量读、逐块累计(与 WinHTTP 口径拉齐)。
+- **#34 无名显示器取错屏**:新增 pick_target_index(),capture() 按下标回到 Monitor::all()
+  的原始 Vec,不再"用选中的 name 再 find 一次"(name 为空时会取到第一台空名显示器)。
+- **#19 余量**:ocr/rapid.rs 三处(SESSION 锁)全部改为中毒恢复。
+- **#20 余量**:capture.rs / qr.rs / ocr/system.rs / ocr/preprocess.rs 的 width*height*4
+  与 write_rgba_to_clipboard 拉齐 checked 口径。
+- **#30 QAction 泄漏**:rebuildActions() 先取 actions() 再 clear()(顺序反了等于没取),
+  逐个 deleteLater() 并回收四个旧 QActionGroup。
+- **#31 applyTopmost 的 winId() 兜底**:改成 if (!m_cachedHwnd) return; —— 该文件已记载
+  "创建期调 winId 会递归 CreateWindowEx",兜底等于给将来留一个已知崩溃。
+- **#37 年份绑定无响应式依赖**:new Date() 提到 refreshYears(),在 setFromMs(每次打开
+  选择器)刷新,不再靠 ±3 年余量硬撑。
+- **#15 互斥量名未含数据目录**:新增 appDataDirEarly()(Win32 取 exe 路径,不依赖
+  QCoreApplication —— 门禁跑在 QApplication 之前)+ FNV-1a 摘要拼进互斥量名。
+  两个不同 --data-dir 的合法实例不再互相挡掉。
+- **#27 截图无防抖**:hidePanelThenCapture 加 250ms 窗口(略大于 150ms 延迟)。
+- **#25 capture_toolbar_flow 的 lp 未判空** + **#26 验收流静默 quit**:新增
+  flowAbortAndQuit() —— 流程跑不完**计一条失败**并打 RESULT 行,而不是"什么都不说就退出"
+  (那是假绿)。已接入 log_rotate / smart_capture / stitch / stitch_live / capture_toolbar
+  的提前退出分支。
+- **#8 note_flow.cpp 的窗口存活**:新增 requireWindow() 守卫,在 9 处回调入口显式判空并
+  计失败。**没有**把 context 换成 window(那会让定时器静默失效,正是 #26 那类假绿)。
+
+### 三之二、`--capture-toolbar-flow` 偶发 0xC0000374:已定位到范围,根因未最终确定
+
+现象:断言全过、`RESULT failures = 0` 照常打印,崩溃发生在**退出阶段**;
+进程以 `0xC0000374`(STATUS_HEAP_CORRUPTION)结束,**无 `[CRASH]` 条目**
+(该状态由 CRT 在 free 时报告并走 fast-fail,绕过 `SetUnhandledExceptionFilter`)。
+复现条件:无间隔连跑同一流程,概率约 3%-13%(基线代码同样崩 —— 见下"对照实验")。
+
+**已用仪器化测量排除/确认的事实**(全部是一次性埋点,验证后已移除):
+
+1. **不是退出期残留的异步任务导致**(虽确有其事):埋点显示退出时线程池恒有 1 个活跃 worker,
+   例如 `WORKER enter call:"ocr_entry"` 之后 389ms 才退出(`EXIT after-exec` 之后),
+   且该 worker 收尾要 `QMetaObject::invokeMethod(&CoreFacade::instance(), …)` ——
+   对处于析构期的静态单例投递事件。已在 `main` 里 `waitForDone(5000)` 修掉(**保留**),
+   但**崩溃率没有下降**,故它不是本次崩溃的成因。
+2. **不是业务执行期的写越界/双重释放**:在 `RESULT` 之后、`exec()` 返回之后各调一次
+   `HeapValidate(GetProcessHeap())`,**崩溃样本与正常样本全是 `OK`**。
+   → 损坏只可能发生在 `exec()` 返回**之后**的拆卸期。
+3. **不是我的改动引入的**:把全部改动 `git stash`、重建**原始代码**,无间隔连跑 30 次
+   同样崩 1 次(1/30);改动版为 1/30~4/30,与基线同一水平。
+
+**已做的针对性修复(保留,均有独立价值)**:
+
+- `main.cpp`:`QThreadPool::globalInstance()->waitForDone(5000)` —— 之前全仓**没有任何**,
+  而 `ffi.rs` 的 `nb_shutdown` 注释明确要求"确认没有任何 `nb_call` 在执行时"才可调用,
+  这条契约从未被满足。修后退出时序正确。
+- `main.cpp`:`QApplication` 改为堆分配且**故意不析构**。Qt 要求"所有 QObject 必须在
+  QApplication 之前销毁",而本进程的 `CoreFacade`(QObject 单例)、`g_overlays`、若干 static
+  QImage 都是排在 main 之后的静态对象。改后栈上 QApplication 不再抢先析构。
+  (这块改善后崩溃率 1/30,但未归零。)
+
+**为什么停在这里**:剩下的手段都需要环境前置条件,当前会话做不到 ——
+
+- **PageHeap**:`gflags /p /enable nextboard.exe /full` 需要管理员(已实测 `IsAdmin=False`,
+  写 IFEO 被拒)。有它才能把"潜伏越界"变成确定性崩溃并直接给出越界的那次写。
+- **minidump / WerFault 全量转储**:同样走 HKLM 配置,需要管理员。
+- **cdb 抓栈**:已试,但调试器改变时序后 1 次未复现(崩溃率本就 3%-13%);
+  且 release 产物没生成 PDB(`build_dbg` 有,但那次链接的 manifest 步骤失败,exe 是新的、PDB 是本轮的)。
+
+**建议的下一步(任一即可定案)**:
+
+1. 以管理员执行 `gflags /p /enable nextboard.exe /full`,再跑 20 次
+   `--capture-toolbar-flow`;PageHeap 会把越界写立刻变成 AV 并给出精确栈。
+   用完记得 `gflags /p /disable nextboard.exe`。
+2. 或用 `build_dbg`(RelWithDebInfo,有 PDB)在 cdb 下循环跑,直到命中:
+   `cdb -g -G -c "sxd *; sxe c0000374; g; .ecr; kb; q" nextboard.exe --capture-toolbar-flow`。
+3. 或按流程分段二分:临时把 B11(OCR 面板)/B12(二维码)/B13(翻译)各自 `return` 掉,
+   每版跑 30 次比对崩溃率,把范围压到单个功能点。
+### 三之三、仍未修(如实保留)
+
+- **docs/29 缺失**:被 14 处代码注释引用;未知是有意清理还是丢失,需仓库所有者确认。
+- **上面那条 0xC0000374**:已证明是既存问题,但根因未定位(见三之二)。
+### 四、验收(第二轮完成后的最终状态)
+
+- `cargo test -p nbcore`:**408 passed / 0 failed / 8 ignored**(含新增 5 条回归;
+  其中 2 条做过**变异验证** —— 把修复还原成旧代码后测试确实失败)。
+- 验收流 **18 条全部退出码 0**、无失败断言:`--hotkey-lifecycle-flow` / `--restore-flow` /
+  `--text-edit-flow` / `--log-rotate-flow` / `--note-flow` / `--todo-flow` /
+  `--settings-flow` / `--clear-done-flow` / `--clear-all-flow` / `--update-flow` /
+  `--capture-toolbar-flow` / `--smart-capture-flow` / `--quick-commands-flow` /
+  `--editor-flow` / `--stitch-flow` / `--stitch-live-flow` / `--autostart-flow` /
+  `--dump-monitors`。
+- 单实例链路**真机验证**:见 §二 #3(第二次启动 23ms 退出、已有实例面板
+  `IsWindowVisible` 由 false 变 true)。
+
+**踩坑记录(本轮新增)**:
+
+1. 二进制曾长期停留在修复提交之前(`nextboard.exe` mtime 2026-11-02 < `ee7c5de`
+   2026-11-03),导致"已修根因"无法验证。已完整重建(app + core)。
+2. 改 `tray.hpp` 后 `main.cpp.obj` 是旧对象(按旧头编出了隐式析构),出现 `LNK2005`
+   重复定义 —— 需 touch `main.cpp` 强制重编。
+3. Qt 6 的 `QMutex` **没有** `Recursive` 成员(递归版是独立的 `QRecursiveMutex`)。
+   加锁时先确认没有嵌套进入,再决定用哪个类型 —— 这个约束正好帮我们守住不嵌套。
+4. `QList` 没有 `operator+`,合并两个 `actions()` 只能用 `+=`。
+5. 嵌套 lambda 只能捕获**外层已捕获**的变量;要往下传就得在外层取成局部量再按值传。
+6. 命名共享节对象在**最后一个句柄关闭时即销毁**:发布 HWND 后不能立刻 `CloseHandle`,
+   否则第二个实例 `OpenFileMapping` 必然失败(表现为"唤起仍无反应")。
 ## 2026-10-05 S1(nbcore.dll)完成
 
 ### 环境(S0)
