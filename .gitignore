@@ -490,3 +490,5 @@ app/build_dbg/qml/QtQuick/Templates/qmldir
 app/build_dbg/qml/QtQuick/Templates/qtquicktemplates2plugin.dll
 app/build_dbg/qmltypes/nextboard_foreign_types.txt
 app/build_dbg/styles/qmodernwindowsstyle.dll
+# Linux 迁移编译普查产出(tools/linux_census.sh,docs/29 §8.3)——脚本只读源码、只写这里
+census/

@@ -34,6 +34,7 @@ Windows 桌面一体化效率板:**剪贴板历史 + 截图(框选/全屏/编辑
 | [docs/19-scrolling-capture-plan.md](./docs/19-scrolling-capture-plan.md) | 滚动长截图:设计与分阶段实现(S1–S6 全部落地) |
 | [docs/20-todo-sticky-note.md](./docs/20-todo-sticky-note.md) | 待办贴屏(桌面便签):数据模型(v7)、FFI 契约、窗口与贴边/半隐藏设计、实现记录与踩坑 |
 | [docs/21-todo-title-note.md](./docs/21-todo-title-note.md) | 待办「标题 + 备注」分离:数据模型(v8)、FTS 纳入备注、编辑卡片/列表/便签三处口径 |
+| [docs/29-linux-migration.md](./docs/29-linux-migration.md) | Linux 迁移:平台耦合面盘点、硬阻断清单、X11/Wayland 策略决策、M0–M4 里程碑与逐文件 checklist |
 | [docs/theme.md](./docs/theme.md) | 视觉规范:色板、尺度、组件语言(Theme.qml 的出处) |
 | [docs/progress.md](./docs/progress.md) | 逐日开发记录与实测数据(踩坑与结论的唯一权威来源) |
 
