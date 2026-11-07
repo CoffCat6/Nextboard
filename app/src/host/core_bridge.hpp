@@ -3,7 +3,24 @@
 
 #include <QtGlobal>
 
+#if defined(Q_OS_WIN)
 #include <windows.h>
+#else
+// 非 Windows(M0b):Win32 句柄概念由 void* 等价物承载 ——
+// HWND 仅作"通知目标"占位(M1 重设计为 fd/回调,docs/29 §5.2);
+// UINT 仅供下方 WM_APP_* 常量保持与 core.rs 的同步契约字面不变;
+// HMODULE = dlopen 句柄(void*)。
+using HWND = void*;
+using UINT = unsigned int;
+using HMODULE = void*;
+#endif
+
+// 调用约定:Win32 显式 __cdecl;Unix 默认约定即为 extern "C" 语义。
+#if defined(Q_OS_WIN)
+#define NBCALL __cdecl
+#else
+#define NBCALL
+#endif
 
 #include <QString>
 #include <QVector>
@@ -17,56 +34,56 @@
 
 class QScreen;
 
-using NbInit = int(__cdecl*)(const char*);
-using NbCallFn = int(__cdecl*)(const char*, const char*, char**);
-using NbFreeString = void(__cdecl*)(char*);
-using NbFreeBuffer = void(__cdecl*)(unsigned char*, unsigned long long);
-using NbAbiVersion = unsigned(__cdecl*)();
-using NbVersion = unsigned(__cdecl*)();
-using NbShutdown = void(__cdecl*)();
-using NbCaptureMonitor = int(__cdecl*)(unsigned, unsigned char**, unsigned*, unsigned*);
+using NbInit = int(NBCALL*)(const char*);
+using NbCallFn = int(NBCALL*)(const char*, const char*, char**);
+using NbFreeString = void(NBCALL*)(char*);
+using NbFreeBuffer = void(NBCALL*)(unsigned char*, unsigned long long);
+using NbAbiVersion = unsigned(NBCALL*)();
+using NbVersion = unsigned(NBCALL*)();
+using NbShutdown = void(NBCALL*)();
+using NbCaptureMonitor = int(NBCALL*)(unsigned, unsigned char**, unsigned*, unsigned*);
 /// 按宿主屏幕描述配对捕获(多屏遮罩的正确入口,见 capture.rs 的 match_monitor)。
-using NbCaptureMonitorMatched = int(__cdecl*)(const char*, int, int, unsigned, unsigned, float,
+using NbCaptureMonitorMatched = int(NBCALL*)(const char*, int, int, unsigned, unsigned, float,
                                               unsigned char**, unsigned*, unsigned*);
-using NbCaptureCrop = int(__cdecl*)(const unsigned char*, unsigned long long,
+using NbCaptureCrop = int(NBCALL*)(const unsigned char*, unsigned long long,
                                     unsigned, unsigned, int, int, unsigned, unsigned,
                                     unsigned char**, unsigned*, unsigned*);
 /// OCR(RGBA 直入):出参为 JSON 字符串,宿主以 nb_free_string 释放。
-using NbOcrRgba = int(__cdecl*)(const unsigned char*, unsigned long long,
+using NbOcrRgba = int(NBCALL*)(const unsigned char*, unsigned long long,
                                 unsigned, unsigned, char**);
 /// 二维码解码(RGBA 直入):出参为 JSON 字符串({"found":…,"text":…}),
 /// 宿主以 nb_free_string 释放 —— 与 NbOcrRgba 同一口径。
-using NbQrDecodeRgba = int(__cdecl*)(const unsigned char*, unsigned long long,
+using NbQrDecodeRgba = int(NBCALL*)(const unsigned char*, unsigned long long,
                                      unsigned, unsigned, char**);
 /// 长截图开始会话(固化显示器/选区/上限):失败时 out_err 带**可读错误文案**
 /// (宿主以 nb_free_string 释放;成功时不写出参)。
-using NbStitchBegin = int(__cdecl*)(const char*, const char*, int, int, unsigned, unsigned,
+using NbStitchBegin = int(NBCALL*)(const char*, const char*, int, int, unsigned, unsigned,
                                     float, long long, long long, long long, char**);
 /// 长截图吸收一帧(RGBA 直入,不走 base64):出参为小 JSON(位移/总高/结论/判定数值)。
-using NbStitchAppend = int(__cdecl*)(const char*, const unsigned char*, unsigned long long,
+using NbStitchAppend = int(NBCALL*)(const char*, const unsigned char*, unsigned long long,
                                      unsigned, unsigned, char**);
 /// 长截图取回结果:out_png 走 nb_free_buffer,out_meta 走 nb_free_string。
-using NbStitchFinish = int(__cdecl*)(const char*, unsigned char**, unsigned long long*, char**);
+using NbStitchFinish = int(NBCALL*)(const char*, unsigned char**, unsigned long long*, char**);
 /// 长截图取回结果(RGBA 直通道,可选导出):产物为原始 RGBA 字节,免掉
 /// "拼完编码 → 宿主解码"的整图编解码往返;旧核心没有时回退 NbStitchFinish。
-using NbStitchFinishRgba = int(__cdecl*)(const char*, unsigned char**, unsigned long long*,
+using NbStitchFinishRgba = int(NBCALL*)(const char*, unsigned char**, unsigned long long*,
                                          unsigned*, unsigned*, char**);
 /// 长截图丢弃会话(幂等)。
-using NbStitchAbort = int(__cdecl*)(const char*);
+using NbStitchAbort = int(NBCALL*)(const char*);
 /// 按屏幕描述**直接捕获显示器内的一个矩形**(设备像素,相对该屏左上角)。
 /// 长截图逐帧采集走这条:免掉"整屏捕获 + 裁剪 + 格式转换"的三次大拷贝。
-using NbCaptureMonitorRegionMatched = int(__cdecl*)(const char*, int, int, unsigned, unsigned,
+using NbCaptureMonitorRegionMatched = int(NBCALL*)(const char*, int, int, unsigned, unsigned,
                                                    float, unsigned, unsigned, unsigned, unsigned,
                                                    unsigned char**, unsigned*, unsigned*);
 /// 截图入库(RGBA 直入,不走 base64/PNG):出参为**裸**小 JSON {"entry": …|null}。
-using NbIngestCaptureRgba = int(__cdecl*)(const unsigned char*, unsigned long long,
+using NbIngestCaptureRgba = int(NBCALL*)(const unsigned char*, unsigned long long,
                                           unsigned, unsigned, const char*, char**);
 /// v2:多一个来源应用参数(docs/25)。旧核心无此导出 → 回退 v1。
-using NbIngestCaptureRgba2 = int(__cdecl*)(const unsigned char*, unsigned long long,
+using NbIngestCaptureRgba2 = int(NBCALL*)(const unsigned char*, unsigned long long,
                                            unsigned, unsigned, const char*, const char*,
                                            char**);
 /// 把宿主内存里的 RGBA 直接写进系统剪贴板(CF_DIBV5,不经 PNG/base64)。
-using NbCopyRgbaToClipboard = int(__cdecl*)(const unsigned char*, unsigned long long,
+using NbCopyRgbaToClipboard = int(NBCALL*)(const unsigned char*, unsigned long long,
                                             unsigned, unsigned);
 
 namespace nb {
@@ -121,6 +138,10 @@ public:
 
     /// 更新 nbcore 的通知 HWND(主面板窗口创建后调用;此前通知被丢弃)。
     void setNotifyHwnd(HWND hwnd);
+#if !defined(Q_OS_WIN)
+    /// Linux(M1/R3):登记核心通知 fd(宿主持读端;核心写 4 字节消息 id)。
+    void setNotifyFd(int fd);
+#endif
 
     bool ok() const { return m_callFn != nullptr; }
 

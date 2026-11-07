@@ -25,7 +25,9 @@
 #include <QAbstractNativeEventFilter>
 #include <QTimer>
 
+#if defined(Q_OS_WIN)
 #include <windows.h>
+#endif
 
 namespace nb {
 namespace {
@@ -48,6 +50,7 @@ void hkCheck(bool ok, const QString& what) {
 /// 这里换一个更直接的做法:记录"我们的哨兵过滤器"在 WM_HOTKEY 时是否被调用过。
 /// 过滤器是链式的,Qt 会依次调用直到有人返回 true。若 HotkeyFilter 已被摘掉,
 /// 哨兵就能收到消息。
+#if defined(Q_OS_WIN)
 class SentinelFilter : public QAbstractNativeEventFilter {
 public:
     bool sawHotkey = false;
@@ -84,10 +87,19 @@ void postNativeHotkey(int id) {
         d->filterNativeEvent(QByteArrayLiteral("windows_generic_MSG"), &msg, &r);
     }
 }
+#endif  // Q_OS_WIN(SentinelFilter / postNativeHotkey 为 Windows 路径专用)
 
 } // namespace
 
 void runHotkeyLifecycleFlow(PanelWindow& panel) {
+#if !defined(Q_OS_WIN)
+    // Linux(M0b):全局热键为桩(注册走"失败项"通道),WM_HOTKEY 生命周期
+    // 验收是 Windows 专属路径 —— 随平台跳过;X11 热键接入(M3)后按 XCB
+    // 事件重写同等断言。
+    Q_UNUSED(panel);
+    qInfo() << "HOTKEY-LIFECYCLE  非平台部分,跳过";
+    return;
+#else
     QTimer::singleShot(1200, qApp, [&panel] {
         CoreBridge& core = CoreBridge::instance();
 
@@ -139,6 +151,7 @@ void runHotkeyLifecycleFlow(PanelWindow& panel) {
         qInfo() << "HOTKEY-LIFECYCLE  RESULT failures =" << g_hkFailures;
         QApplication::quit();
     });
+#endif  // Q_OS_WIN
 }
 
 } // namespace nb

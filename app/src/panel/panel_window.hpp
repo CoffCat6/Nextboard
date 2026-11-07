@@ -9,6 +9,7 @@ class QHBoxLayout;
 class QTimer;
 class QQuickWidget;
 class QQuickItem;
+class QSocketNotifier;
 
 namespace nb {
 
@@ -177,6 +178,12 @@ public:
 
     /// 给单实例过滤器用的 HWND 唤起对接(内部实现细节)。
     HWND nativeHandle() const;
+#if !defined(Q_OS_WIN)
+    /// Linux(M1/R3):建立核心通知通道 —— 宿主建管道,写端经 nb_set_notify_fd
+    /// 交核心,读端接 QSocketNotifier;读到消息 id 后 emit 与 Windows nativeEvent
+    /// 分支相同的信号(clipChanged / todoDue)。每次启动只调一次(窗口创建后)。
+    void setupCoreNotifyChannel();
+#endif
 
 protected:
     void showEvent(QShowEvent* e) override;
@@ -258,6 +265,13 @@ private:
     Mode m_mode = Mode::List;
     /// nativeEvent 用的 HWND 缓存(创建期间禁止 winId() 调用,防递归)。
     HWND m_cachedHwnd = nullptr;
+#if !defined(Q_OS_WIN)
+    /// Linux(M1/R3)核心通知通道:读端接 QSocketNotifier;写端交核心后
+    /// **刻意不关闭**(与 Windows 句柄同生命周期语义 = 进程级)。
+    int m_notifyReadFd = -1;
+    int m_notifyWriteFd = -1;
+    QSocketNotifier* m_notifyNotifier = nullptr;
+#endif
     /// 尺寸落库的防抖计时器(鼠标拖动缩放期间不写库)。
     QTimer* m_sizeSaveTimer = nullptr;
     /// 是否正处于"程序自己设尺寸"的过程 —— 期间的 resizeEvent 不算用户操作。

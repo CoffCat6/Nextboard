@@ -32,7 +32,8 @@ std::atomic<int> g_nextHotkeyId{1};
 
 constexpr int kHotkeyIdBase = 0xB000;
 
-bool parseComboImpl(const QString& combo, UINT* modifiers, UINT* vk) {
+#if defined(Q_OS_WIN)
+bool parseComboImpl(const QString& combo, unsigned* modifiers, unsigned* vk) {
     // 形如 "Ctrl+Shift+V";与第一代 hotkey.rs 的解析语义对齐(宽松:大小写/顺序不敏感)
     UINT mods = 0;
     UINT key = 0;
@@ -60,6 +61,15 @@ bool parseComboImpl(const QString& combo, UINT* modifiers, UINT* vk) {
     *vk = key;
     return true;
 }
+#else
+// Linux(M0b):组合键解析暂无消费者(注册为桩);保留平台对称签名。
+bool parseComboImpl(const QString& combo, unsigned* modifiers, unsigned* vk) {
+    Q_UNUSED(combo);
+    Q_UNUSED(modifiers);
+    Q_UNUSED(vk);
+    return false;
+}
+#endif
 
 /// 截图防抖窗口:上一次热键触发后这么久内不再起新会话。
 ///
@@ -94,7 +104,7 @@ void hidePanelThenCapture(PanelWindow& panel, CaptureIntent intent,
 } // namespace
 
 // 静态成员实现(头文件里声明为 static;自由函数接到成员签名)
-bool Hotkeys::parseCombo(const QString& combo, UINT* modifiers, UINT* vk) {
+bool Hotkeys::parseCombo(const QString& combo, unsigned* modifiers, unsigned* vk) {
     return parseComboImpl(combo, modifiers, vk);
 }
 
@@ -125,6 +135,7 @@ public:
         Q_UNUSED(result);
         // 宿主已析构(Hotkeys 是栈对象,退出期先走):直接放行,绝不碰 m_owner。
         if (m_owner.isNull()) return false;
+#if defined(Q_OS_WIN)
         if (eventType == "windows_generic_MSG") {
             auto* msg = static_cast<MSG*>(message);
             if (msg->message == WM_HOTKEY) {
@@ -132,6 +143,11 @@ public:
                 return true;
             }
         }
+#else
+        // Linux(M0b):X11 XCB 事件分派随 M3 热键接入(docs/29 §5.2);当前为直通。
+        Q_UNUSED(eventType);
+        Q_UNUSED(message);
+#endif
         return false;
     }
 private:
@@ -183,7 +199,9 @@ Hotkeys::Hotkeys(PanelWindow& panel, CoreBridge& core, QObject* parent)
 }
 
 Hotkeys::~Hotkeys() {
+#if defined(Q_OS_WIN)
     for (int id : m_registered.keys()) ::UnregisterHotKey(nullptr, id);
+#endif
     // ⚠️ 顺序很重要:显式摘掉过滤器,**再**让 m_filter 析构。
     //    HotkeyFilter 的析构里也做了一次(冗余保险),但这里显式摘更清楚 ——
     //    读者不该靠"某个成员析构顺带做的事"来理解退出安全性。
@@ -193,7 +211,9 @@ Hotkeys::~Hotkeys() {
 void Hotkeys::applyFromSettings() {
     // 先撤销既有注册:改设置后重新应用时必须先清干净 —— registerAction 每次分配
     // 新 id,不清理的话旧组合键会一直留在系统里(改了等于没改,还多占一个组合键)。
+#if defined(Q_OS_WIN)
     for (int id : m_registered.keys()) ::UnregisterHotKey(nullptr, id);
+#endif
     m_registered.clear();
     m_failures.clear();
 
@@ -220,7 +240,15 @@ void Hotkeys::applyFromSettings() {
 }
 
 void Hotkeys::registerAction(Action action, const QString& combo) {
-    UINT mods = 0, vk = 0;
+#if !defined(Q_OS_WIN)
+    // Linux(M0b):全局热键暂未接入 —— X11 XGrabKey / portal GlobalShortcuts 在
+    // M3(docs/29 §5.2/§8)。走同一"失败项"通道给可读提示(降级契约),注册表
+    // 语义与 Windows 保持对称:该动作不可用,不影响其他动作。
+    Q_UNUSED(action);
+    m_failures.append(QStringLiteral("%1(Linux 全局热键暂未接入)").arg(combo));
+    return;
+#else
+    unsigned mods = 0, vk = 0;
     if (!parseCombo(combo, &mods, &vk)) {
         m_failures.append(QStringLiteral("%1(格式非法)").arg(combo));
         qWarning() << "热键格式非法,跳过:" << combo;
@@ -247,6 +275,7 @@ void Hotkeys::registerAction(Action action, const QString& combo) {
     }
     m_registered.insert(id, action);
     qInfo() << "热键已注册:" << combo;
+#endif  // Q_OS_WIN
 }
 
 } // namespace nb

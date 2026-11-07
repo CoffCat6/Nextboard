@@ -2,9 +2,9 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 版本 | v1.2(2026-11-04:编译普查已执行,实测结论见 §4.3;2026-11-03:三决策点拍板,§8.3 第一步计划) |
-| 日期 | 2026-11-04 |
-| 状态 | 盘点+普查完成,静态结论经实测确认零漏报;**下一步 = spike 1(arboard)/ spike 2(xcap)→ M0** |
+| 版本 | v1.4(2026-11-07:Spike 2 屏幕采集完成——WSLg 拒 GetImage,结论 §12.2;Spike 1 剪贴板 §12.1;2026-11-04:编译普查 §4.3) |
+| 日期 | 2026-11-07 |
+| 状态 | 盘点+普查+Spike 1/2 完成;**下一步 = 搭 KDE VM(M2 前置,提前于原计划)→ M0**;遗留复测项集中在 VM(§12.1/§12.2) |
 | 关联 | [01-architecture.md](./01-architecture.md)(其 §"非目标"声明需随本迁移修订)· [04-build-package-release.md](./04-build-package-release.md)(打包链重建)· [08-rapidocr-engine.md](./08-rapidocr-engine.md)(OCR 引擎平移)· [19-scrolling-capture-plan.md](./19-scrolling-capture-plan.md)(长截图受 §5.3 影响) |
 | 一句话 | 把"Windows 优先、全量 Win32 无条件编译"的现状梳理成:**两个 Rust 编译硬阻断 + 一个 C++ 平台抽象层 + 一条全新构建分发链**,按 M0–M4 五步在 Linux 复刻 X11 全功能版,Wayland 逐项降级。 |
 
@@ -299,7 +299,7 @@ Wayland 原生截图/PipeWire 作为二期评估项(取决于 xcap 上游或自�
 
 | 环境 | 定位 | 能验证 | 不能验证 |
 | --- | --- | --- | --- |
-| WSL2 fedoraremix(已有) | 日常普查 + CLI spike | WSLg 自带 XWayland:X11 路径的采集/热键/剪贴板 demo | SNI 托盘、portal、真 Wayland 会话、DE 差异 |
+| WSL2 fedoraremix(已有) | 日常普查 + CLI spike | WSLg 自带 XWayland:剪贴板/热键 demo、Qt 窗口渲染;**采集不可测**(WSLg 的 RDP 型 XWayland 拒绝 GetImage,见 §12.2) | SNI 托盘、portal、真 Wayland 会话、DE 差异、**屏幕采集** |
 | Docker Desktop(已有) | Rust 普查基线容器(ubuntu:22.04) | **AppImage 基线 glibc(2.35)下 libnbcore.so 编译实测** | GUI 全部 |
 | 真机/VM:KDE + GNOME | DE 级验证(每里程碑一次) | 托盘、portal、Wayland 降级清单逐项验收 | — |
 
@@ -331,13 +331,30 @@ Wayland 原生截图/PipeWire 作为二期评估项(取决于 xcap 上游或自�
 
 ## 9. 迁移里程碑 M0–M4
 
+> **2026-11-07 调整**:M0 拆为 M0a(core 编译门)与 M0b(宿主平台化)。原 M0 验收"骨架可运行"依赖 `libnbcore.so` 可加载,而 core 离编译通过只差 20 个错误点(普查实测),故把"最小编译门"提前——剪贴板/HTTP 以可读错误桩降级(M1 再接 arboard/ureq),**Windows 行为零影响**(全部改动在 cfg(not(windows)) 分支或无条件无行为差异处)。
+
 | 里程碑 | 内容 | 验收门 | 前置 |
 | --- | --- | --- | --- |
-| **M0 可编译** | 平台目录拆分(`platform_win/`、`platform_linux/`)+ A 档全量替换(单实例/自启/路径/内存探针/崩溃诊断/圆角)+ CMake 平台条件化 + build.sh | Linux 上 app 骨架(托盘/面板空壳)可运行;Windows 侧行为不变(回归现有验收流) | §8.3 编译普查(§12 spike 0) |
-| **M1 core 编译** | R2(http→ureq,rustls)+ R1 选型落地(剪贴板子系统)+ `libnbcore.so` + 通知协议重设计(§5.2) | nbcore-tests 在 Linux 全绿;剪贴板文本/图片入库双向;WM_APP 四事件经新通道送达面板 | R1 选型 spike(§12.1) |
+| **M0a core 编译门(2026-11-07 ✅)** | 修复普查 20 错误点:3 个 cfg 缺陷(`clip.rs:141` 改用 `core::SHUTDOWN`、`ffi.rs:99`/`core.rs` CoreConfig 字段无条件化、`ocr/system.rs` AppError 导入)+ clip.rs 读写 5 函数 not(windows) 桩(可读错误)+ http.rs WinHTTP 整模块门控(send 非 Windows 降级错误)+ clipboard-win 移入 target 门控依赖 + **B3/B4 路径语义加固**(`safe_blob_rel` 显式拒绝反斜杠;盘符路径测试平台化)+ 17 个 Windows 专属行为用例随平台门控 | Linux:`cargo check` 零错误、`libnbcore.so`(8.7MB)、ctypes 冒烟 abi=1/version=100、**单测 376 passed / 0 failed**;Windows:`cargo check` 零回归、单测 407 passed + 1 个**既有**环境性失败(`send_dispatches_socks5_through_ureq`,经 git stash 基线复证实证非本次回归,与本机 DNS/代理环境相关) | Spike 1/2 |
+| **M0b 宿主平台化(2026-11-07 ✅)** | **17 个 C++ 文件平台化**(模式统一:`#if defined(Q_OS_WIN)` 原样保留 + `#else` Linux 实现/桩):core_bridge(dlopen/dlsym)、app_paths、memory_probe、single_instance(QLockFile+QLocalServer+信号)、auto_start(XDG)、main 崩溃诊断(backtrace+dladdr+sigaction)、hotkeys(接口去 Win32 + 降级通道)、auto_paste(桩)、quick_commands(Linux 重写)、smart_capture(段式拆分,UIA 降级空候选)、capture_session、window_effects(no-op)、stitch_hud/stitch_live_flow/smart_capture_flow/hotkey_lifecycle_flow(验收门控)、panel_window(nativeEvent 拆分 + WindowDeactivate 失焦)、note_window(startSystemResize 缩放);CMake 条件化(五系统库/部署/OCR 资产/RPATH)+ **build.sh**(仿 build.ps1) | **验收达成:WSL 里 `nextboard` 完整启动**——libnbcore.so 加载成功、nb_init=0、QML 面板显示(软件渲染)、单实例锁/数据目录就位、build.sh 全新构建 130/130 全绿。已知项(非阻塞):① WSLg 无 SNI 宿主,托盘注册失败(KDE VM 验证);② TranslateView 的 `ContextMenu.menu` 附加属性 Qt 6.8 不可用(6.9 特性,待兼容小修);③ Windows MSVC 全量回归**已通过**(2026-11-07:build.ps1 完整链路 cargo+MSVC+链接+部署全绿;期间 nextboard.exe 被运行中实例占用致 LNK1104,属环境占用非代码问题) | M0a |
+| **M1 core 接入(2026-11-07 ✅ R1/R2/R3 全部完成)** | **R2 ✅**:ureq_http 模块(直连/HTTP 代理/环境变量系统代理)+ 非 2xx 语义对齐 + **socks5h 隐私修复(↑K1)**。**R1 ✅**:clip.rs 五函数 arboard 真实现(文本/位图读写;文件条目降级二期)+ **轮询监听线程**(300ms/单例驻线程/内容哈希防抖/入库管线与 Windows 共用尾部);E2E 实证:spike 写入 → 轮询命中 → DB 入库。**R3 ✅**:通知协议 `nb_set_notify_fd`(核心写 4 字节消息 id 到管道)+ 宿主 QSocketNotifier 读出 → emit 与 Windows nativeEvent 同组信号;E2E 实证:通道就绪日志 + 入库 + stderr 干净。**部署坑**:libnbcore 拷贝 POST_BUILD→ALL(重链接才触发,纯 Rust 改动不生效,与 OCR 资产同教训) | Linux `cargo test` **402 passed / 0 failed** + 运行期双 E2E;Windows **408 passed / 0 failed**(R1/R3 全在 cfg 分支,零回归) | M0b;VM 复测项可并行 |
 | **M2 截图闭环** | xcap Linux 实测/显示器配对重验(B2)+ 遮罩/全屏/框选/编辑器/贴图/剪贴板写入 | 截图→编辑→复制/贴图/入库全链路;多屏;DPR 变化夹回 | M1 |
 | **M3 集成件** | 热键(X11)+ 自动粘贴(XTest)+ 智能框选窗口级 + HUD(穿透/排除捕获 X11)+ 长截图 | 热键唤起/收起;自动粘贴 E2E;滚动长截图 X11 全链路;Wayland 会话降级清单逐项验收 | M2 |
 | **M4 分发** | B1(默认 OCR 档)+ libonnxruntime.so 打包 + AppImage(/deb)+ .desktop/图标 + tools 重写 + B3/B4 数据清洗工具 | AppImage 冒烟(全新装/升级/卸载);OCR 三入口;体积预算重算留痕 | M3 |
+
+
+### 9.1 已知项与遗留(随里程碑滚动更新)
+
+| # | 项 | 根因/状态 | 处置 |
+| --- | --- | --- | --- |
+| K1 | ~~Windows `send_dispatches_socks5_through_ureq` 单测失败~~ **已解决(2026-11-07 M1/R2)** | **根因修正:非环境问题**——ureq 对 `socks5://` 把目标主机名做**本地 DNS 解析**(主机名泄漏),`.invalid` 必失败;`socks5h://`(主机名由代理端解析)ureq 原生支持,socks.rs 已切换并补注释 | **隐私契约修复**;Windows 回归 **408 passed / 0 failed**(此前唯一的失败测试转绿) |
+| K2 | WSLg 托盘 StatusNotifierItem 注册失败 | WSLg 无 SNI 宿主 | KDE VM 验证 |
+| K3 | **QML 的 Qt 6.9-only API 系统性兼容问题**(2026-11-07 实测展开):① TranslateView 的 `ContextMenu.menu`(已修:TapHandler+popup,6.5~6.9 全兼容);② SettingsPageTranslate 的 `onTextEdited`(6.8 报 non-existent,待查——同 API 在 6.9 正常,Windows 截图完美);③ 预计还有后续页面逐个暴露。**根因决策点**:WSL 系统 Qt=6.8 vs 项目工具链 Qt 6.9(README/build.ps1)。已装 aqtinstall Qt 6.9.0(`~/Qt/6.9.0/gcc_64`),但运行期有三层解析要一致(lib 二进制层 LD_LIBRARY_PATH ✓、QML 插件层 qt.conf/QML2_IMPORT_PATH ✓、仍段错误——疑混装残余,待 gdb);或走 6.8 全兼容审计(逐页磨)。**当前态**:REQUIRES 回到 6.5 + TranslateView 已修,SettingsView 链式失败 | 二选一:A) 6.8 全兼容审计(逐页修,WSL 系统包即可);B) WSL 全面切 aqt Qt 6.9(qt.conf+LD_LIBRARY_PATH+gdb 查段错误)——**推荐 A**,理由:Windows 6.9 不动零风险,6.8 兼容同时收紧了项目声明下限的真实性 | 进行中 |
+| K4 | Linux ORT so 未入仓 | thirdparty 仅 win-x64 | M4 补 linux-x64 |
+| K5 | Linux 智能框选/热键/自动粘贴为降级桩 | M2(X11 EWMH/AT-SPI)/M3(XGrabKey/XTest)接入 | 里程碑内 |
+| K6 | Linux 首跑截图后退出期 `malloc_consolidate(): unaligned fastbin chunk` | 截图流程已产出;崩溃在退出清理期(疑似静态 Qt 对象/QML 环境销毁序,与 main.cpp 记载的 0xC0000374 同族) | 待查(M0b 遗留) |
+| K7 | 单实例 QLocalServer `listen: Name error` | 首跑出现一次;socket 名=短哈希,疑 /tmp 残留或 QLocalServer 平台细节 | 待查(M0b 遗留) |
+
 
 横切:文档同步 —— 修订 `docs/01-architecture.md:23`("Linux/macOS 为非目标" → "Linux = 二类平台,X11 全功能 / Wayland 按能力降级");progress.md 按里程碑记录踩坑。
 
@@ -414,12 +431,61 @@ Wayland 原生截图/PipeWire 作为二期评估项(取决于 xcap 上游或自�
 | # | Spike | 验证点 | 产出判据 |
 | --- | --- | --- | --- |
 | 0 | **编译普查**(`tools/linux_census.sh`,零代码改动) | cargo check/test + cmake/ninja 的真实阻塞清单;环境指纹(glibc/Qt 版本) | **已完成(2026-11-04)→ §4.3**,M0 排期确认 |
-| 1 | **arboard 双协议** | X11 与 Wayland(KDE)下文本/位图写入读取、剪贴板变更通知可行性与语义 | 通知方式、位图格式、超时行为记录;能否支撑监听线程 |
-| 2 | xcap Linux | 多屏枚举 name 语义、DPR、与 QScreen::name() 配对、采集性能 | B2 契约能否沿用/如何改 |
+| 1 | **arboard 双协议** | X11 与 Wayland(KDE)下文本/位图写入读取、剪贴板变更通知可行性与语义 | **X11 腿已完成(2026-11-07)→ §12.1**;Wayland 腿待 KDE VM |
+| 2 | xcap Linux | 多屏枚举 name 语义、DPR、与 QScreen::name() 配对、采集性能 | **WSLg 部分完成(2026-11-07)→ §12.2**:枚举/契约✅,像素级验证待 KDE VM |
 | 3 | ORT Linux | libonnxruntime.so(1.28/api-28)+ 现有四件模型跑通 det/cls/rec,精度与耗时 vs Windows | 体积、基线 glibc |
 | 4 | X11 热键 | XGrabKey 经 Qt native event filter 的最小 demo(修饰符组合、冲突检测) | IPlatformHotkeys 接口定稿 |
 | 5 | AT-SPI2 调研 | Chromium/GTK/Qt 的元素树导出程度、与 UIA 能力对照 | 智能框选二期能否立项 |
 | 6 | 打包链 | linuxdeploy + Qt 6.9 AppImage 最小可运行包(Qt Quick/QML 插件齐全) | M4 骨架与体积预算 |
+
+### 12.1 Spike 1 结论(2026-11-07,WSLg:X11=XWayland / Wayland=Weston)
+
+**读写层:arboard X11 选型成立;Wayland 受合成器限制不可用(预期内,不阻塞 v1 的 X11 基线)**
+
+| 项 | X11(XWayland) | Wayland(Weston) |
+| --- | --- | --- |
+| 文本 set/get | ✅ | ❌ |
+| 位图 set/get | ✅;X11 target = `image/png`(+SAVE_TARGETS),xclip 读到合法 PNG 魔数 | ❌ |
+| 跨进程互访 | ✅(xclip 作裁判) | ❌ wl-copy/wl-paste **静默挂死** → Weston 未实现 zwlr_data_control |
+| arboard 后端选择 | ✅ | ❌(wayland 后端失败后**静默回退 X11**,最终报"X11 超时"——错误被掩盖;R1 接口要显式选后端、避免误诊) |
+
+**监听层 = R1 的真正工作量(arboard 无监听 API,需自建)**
+
+| 候选 | 实测 |
+| --- | --- |
+| X11 XFixes 事件 | ❌ WSLg XWayland 上**零事件**(xclip / arboard 两种所有权来源均试)→ 判为 WSLg 特有,**真 X11 待 KDE VM 复测** |
+| Wayland data-control 事件 | 无协议支撑(Weston),VM 复测 |
+| **轮询(200ms 步进)** | ✅ **当下唯一可用通道**:t≈1.0s 的变化在下一个 200ms 步进内捕捉 |
+
+**R1 设计结论(选型定稿输入)**:
+1. 读写层选 arboard(X11 路径);位图走 PNG 编码(无 CF_DIBV5 直写等价物,编码内存/CPU 开销入 R1 评估);
+2. 监听接口按"**事件优先、轮询兜底**"双通道抽象:X11 监听器做成可插拔,探测不到事件(WSLg/XWayland)自动降级轮询,保证任何环境可用;
+3. X11 选择所有权由常驻进程持有——与 Nextboard 常驻形态天然匹配;WSLg 的剪贴板缓存行为(源进程退出后文本仍可读、位图不可读)记录备查,真机以 VM 实测为准;
+4. spike 代码存 `census/spikes/clip-spike/`(gitignore 内,主工程零改动),报告 `census/spike1-report.md`。
+
+> 待办(随 KDE VM):① XFixes 事件复测 ② arboard Wayland 后端(KDE 实现 data-control,预期可用)③ 多屏与 DPI 下的位图语义。
+
+### 12.2 Spike 2 结论(2026-11-07,WSLg:X11=XWayland / Wayland=Weston)
+
+**核心发现:WSLg 的 XWayland 是 RDP 镜像后端,服务端拒绝 GetImage——root 与普通窗口皆拒,xwd 独立复现(`BadMatch, X_GetImage`),非 xcap 缺陷。像素级采集验证必须 KDE VM。**
+
+| 项 | 结果 |
+| --- | --- |
+| 显示器枚举 | ✅ name = XRandR 输出名(`XWAYLAND0/1/2`),几何/scale/freq/primary/is_builtin 可得 |
+| B2 配对契约 | **方向明确**:Qt X11 的 `QScreen::name()` 与 xcap 同源(都是 XRandR 输出名),配对比 Windows 的 `\\.\DISPLAYn` 更直接;WSLg 虚拟布局下几何重叠失真,真机复测 |
+| root/全屏采集 | ❌ 服务端拒绝 GetImage(xwd 独立复现)→ WSLg 平台限制;真 X11 上 GetImage(root) 是 xwd/scrot/import 全生态的基础路径,**预期可用,VM 必测** |
+| capture_region / 30 帧性能 / DPR | ⏸ 被同一限制挡住,未测 |
+| 窗口枚举(z 序) | ❌ `_NET_CLIENT_LIST_STACKING` 缺失(WSLg 无 WM)→ 智能框选空候选降级契约再次生效;真 KDE 预期可用 |
+| 窗口级捕获 | ⏸ 同 root;xcap 源码(0.9.8 `xorg_capture.rs`)确认其 X11 实现是标准 `GetImage ZPixmap` 路径,含 8/16/24/32bpp 解码 |
+| Wayland 腿 | ❌ monitors 失败 + shot 挂死(Weston 无 zwlr_screencopy,预期内;xcap 的 Wayland 路径依赖 wlroots 系协议) |
+
+**对里程碑的影响**:
+1. M2 风险定性从"xcap 可能不支持 Linux"降为"WSLg 测不了,真 X11 预期可行(标准路径),VM 必测"——**KDE VM 从 M3 前提前为 M2 前必建**(§8.3 环境矩阵已修正);
+2. 智能框选在无 WM 环境(WSLg)走空候选降级,与 Wayland 降级策略同构,设计不用改。
+
+**环境清单增量(Fedora 系,M0/M2 构建+链接需要)**:`dnf install mesa-libgbm-devel mesa-libEGL-devel xclip wl-clipboard xrandr xwininfo xwd`(并入 §4.3 的清单)。
+
+> 原始产物:`census/spike2-run.log`、`census/spike2-rootdiag.log`;spike 代码 `census/spikes/capture-spike/`。
 
 ---
 

@@ -1400,6 +1400,12 @@ fn safe_blob_rel(stored: &str) -> Option<PathBuf> {
     if stored.trim().is_empty() {
         return None;
     }
+    // 反斜杠一律拒绝:zip 规范的分隔符是 '/',且导入前的规范化已把 blob 路径
+    // 统一为正斜杠;Linux 上 '\' 是普通字符,"C:\Windows\x.png" 会成为合法的
+    // 怪文件名 —— 虽无穿越风险,但破坏"干净相对路径"契约(docs/29 §5.4 B4)。
+    if stored.contains('\\') {
+        return None;
+    }
     let path = Path::new(stored);
     if path.is_absolute() || path.has_root() {
         return None;

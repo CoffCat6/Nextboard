@@ -234,7 +234,10 @@ Item {
                 }
                 TextArea {
                     id: cuHeaders
-                    onTextEdited: view.scheduleSave()
+                    // 2026-11-07 跨版本改写:TextArea.textEdited 是 Qt 6.9 新增
+                    // (6.8 报 non-existent,docs/29 §9.1 K3);`onTextChanged +
+                    // editing 守卫`在 6.5~6.9 全平台等价"用户编辑才保存"。
+                    onTextChanged: if (editing) view.scheduleSave()
                     wrapMode: TextArea.WrapAnywhere
                     placeholderText: "Content-Type: application/json"
                     // 技术字段:请求头逐行 "Name: Value",等宽才对齐
@@ -269,7 +272,8 @@ Item {
                 }
                 TextArea {
                     id: cuBody
-                    onTextEdited: view.scheduleSave()
+                    // 同 cuHeaders:TextArea.textEdited 为 Qt 6.9-only,跨版本改写
+                    onTextChanged: if (editing) view.scheduleSave()
                     wrapMode: TextArea.WrapAnywhere
                     placeholderText: "{\"text\": [\"${text}\"], \"target_lang\": \"${to}\"}"
                     // 技术字段:JSON 模板,等宽缩进与引号/括号配对最受益

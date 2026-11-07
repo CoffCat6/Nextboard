@@ -23,7 +23,15 @@
 #include <cstdlib>
 #include <exception>
 
+#if defined(Q_OS_WIN)
 #include <windows.h>
+#else
+// Linux(M0b):崩溃诊断 = backtrace()+dladdr(等价 Windows 的"模块+偏移"口径)
+// + POSIX 信号(SIGSEGV/SIGABRT/SIGBUS/SIGFPE/SIGILL)等价 SetUnhandledExceptionFilter。
+#include <dlfcn.h>
+#include <execinfo.h>
+#include <signal.h>
+#endif
 
 // 数据/日志目录(exe 同级 data/)的单一来源;下面的日志处理器要用,故先于代码段引入
 #include "host/app_paths.hpp"
@@ -110,9 +118,11 @@ namespace {
 
 // ntdll 的公开导出,但 <windows.h> 不声明它(在 winternl.h 里,而那个头会带来
 // 一堆和 Qt 冲突的宏)。手写声明比 include 更省事,签名与 ntdll 一致。
+#if defined(Q_OS_WIN)
 extern "C" __declspec(dllimport) unsigned short __stdcall RtlCaptureStackBackTrace(
     unsigned long FramesToSkip, unsigned long FramesToCapture, void** BackTrace,
     unsigned long* BackTraceHash);
+#endif
 
 void appendCrashLog(const QString& text) {
     // ⚠️ 崩溃路径**不能**阻塞等 g_logMutex:若崩溃线程此刻正持有它(崩在
@@ -143,6 +153,7 @@ void appendCrashLog(const QString& text) {
 /// 拿到的返回地址配合"模块+偏移"就能在下次崩溃时直接对上是哪个函数调用路径。
 ///
 /// 地址本身因 ASLR 每次不同,所以每帧都换算成"模块名+模块内偏移"再打印。
+#if defined(Q_OS_WIN)
 void appendStackTrace() {
     void* frames[32] = {};
     const USHORT n = ::RtlCaptureStackBackTrace(1, 32, frames, nullptr);
@@ -207,6 +218,57 @@ LONG WINAPI unhandledExceptionFilter(EXCEPTION_POINTERS* info) {
     appendStackTrace();                 // 栈回溯:下次崩溃能直接对上调用路径
     return EXCEPTION_EXECUTE_HANDLER;   // 记完即终止,不再弹系统崩溃框
 }
+#else
+void appendStackTrace() {
+    // Linux(M0b):backtrace + dladdr —— dladdr 给出 dli_fname/dli_fbase,
+    // 与 Windows 分支"模块名 + 模块内偏移"完全同口径。
+    void* frames[32] = {};
+    const int n = ::backtrace(frames, 32);
+    if (n <= 0) {
+        appendCrashLog(QStringLiteral("  <栈回溯为空>"));
+        return;
+    }
+    appendCrashLog(QStringLiteral("  栈回溯(%1 帧,模块内偏移):").arg(n));
+    for (int i = 0; i < n; ++i) {
+        Dl_info info{};
+        QString one;
+        if (::dladdr(frames[i], &info) && info.dli_fname) {
+            const uintptr_t base = reinterpret_cast<uintptr_t>(info.dli_fbase);
+            const uintptr_t at = reinterpret_cast<uintptr_t>(frames[i]);
+            one = QStringLiteral("    #%1 %2+0x%3")
+                      .arg(i)
+                      .arg(QFileInfo(QString::fromLocal8Bit(info.dli_fname)).fileName())
+                      .arg(at - base, 0, 16);
+        }
+        if (one.isEmpty()) {
+            one = QStringLiteral("    #%1 <非镜像地址 %2>")
+                      .arg(i).arg(reinterpret_cast<quintptr>(frames[i]), 0, 16);
+        }
+        appendCrashLog(one);
+    }
+}
+
+/// POSIX 致命信号兜底:与 unhandledExceptionFilter 同角色。记日志 + 栈后
+/// 恢复默认处置并重发,保留核心转储/退出码语义(SIGSEGV 类默认动作 = core)。
+void posixCrashHandler(int sig) {
+    appendCrashLog(QStringLiteral("致命信号 sig=%1").arg(sig));
+    appendStackTrace();
+    ::signal(sig, SIG_DFL);
+    ::raise(sig);
+}
+
+void installPosixCrashHandlers() {
+    for (const int sig : {SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL}) {
+        struct sigaction sa {};
+        sa.sa_handler = posixCrashHandler;
+        sigemptyset(&sa.sa_mask);
+        // SA_RESETHAND:进 handler 即恢复默认,防同一信号再入死循环;
+        // SA_NODEFER:配合 RESETHAND,重发走默认处置。
+        sa.sa_flags = SA_RESETHAND | SA_NODEFER;
+        ::sigaction(sig, &sa, nullptr);
+    }
+}
+#endif  // Q_OS_WIN / Linux
 
 void onTerminate() {
     appendCrashLog(QStringLiteral("std::terminate(未捕获的 C++ 异常 / noexcept 违反)"));
@@ -337,7 +399,11 @@ int main(int argc, char* argv[]) {
     // 必须在装日志处理器之前建好,否则首条日志无处可写(表现为"静默无日志")。
     const bool dataDirReady = nb::ensureAppDataDir();
     qInstallMessageHandler(fileMessageHandler);
+#if defined(Q_OS_WIN)
     ::SetUnhandledExceptionFilter(unhandledExceptionFilter);
+#else
+    installPosixCrashHandlers();
+#endif
     std::set_terminate(onTerminate);
     qInfo() << "Nextboard starting, appDir =" << QCoreApplication::applicationDirPath();
     if (dataDirReady) qInfo() << "data dir =" << nb::appDataDir();
@@ -665,11 +731,23 @@ int main(int argc, char* argv[]) {
 
     // nbcore 通知 HWND = 主面板窗口;WM_APP → PanelWindow::clipChanged
     // → ClipEntryModel::refresh(200ms 去抖)。
+#if defined(Q_OS_WIN)
     core.setNotifyHwnd(panel.nativeHandle());
+#else
+    // Linux(M1/R3):通知走管道 fd —— 核心写消息 id,面板 QSocketNotifier
+    // 读到后 emit 同一组信号(clipChanged / todoDue),UX 链路与 Windows 等价。
+    panel.setupCoreNotifyChannel();
+#endif
     // 发布本实例的面板 HWND:被拒绝的第二个实例据此刻点投递 WM_APP_ACTIVATE。
     // 必须在这里(窗口已创建、nativeHandle() 有效)而不是更早 —— 早于窗口创建的
     // winId() 会递归触发 CreateWindowEx(见 panel_window.cpp 的警告)。
     singleInstance.publishWindow(panel.nativeHandle());
+#if !defined(Q_OS_WIN)
+    // Linux(M0b):QLocalServer 通道的唤起请求 → 与 Windows 的 WM_APP_ACTIVATE
+    // 分支同语义(延后一拍 showAtCursor,理由见 panel_window.cpp 该分支注释)。
+    QObject::connect(&singleInstance, &SingleInstance::activateRequested, &panel,
+                     [&panel] { QTimer::singleShot(0, &panel, [&panel] { panel.showAtCursor(); }); });
+#endif
 
     // ---- 桌面便签(docs/20-todo-sticky-note.md)----
     // 启动恢复:只为 todo_note.visible=1 的行建窗(visible=0 是"几何记忆")。

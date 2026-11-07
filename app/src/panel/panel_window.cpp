@@ -25,7 +25,14 @@
 #include <QVariant>
 #include <QWindow>
 
+#if defined(Q_OS_WIN)
 #include <windows.h>
+#else
+// Linux(M1/R3)核心通知通道:pipe + fcntl + QSocketNotifier
+#include <fcntl.h>
+#include <QSocketNotifier>
+#include <unistd.h>
+#endif
 
 namespace nb {
 namespace {
@@ -109,8 +116,16 @@ void PanelWindow::applyTopmost() {
     //    将来更早的调用路径都会复活那个已记载过的崩溃。缓存没有就什么也不做:
     //    置顶是视觉修饰,漏一次远好于递归创建窗口。
     if (!m_cachedHwnd) return;
+#if defined(Q_OS_WIN)
     ::SetWindowPos(m_cachedHwnd, topmost ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+#else
+    // Linux(M0b):置顶暂缓 —— X11 走 _NET_WM_STATE_ABOVE property(免重建,
+    // M2 补),Wayland 无全局置顶(降级);setWindowFlag 会重建窗口,两平台
+    // 都不采用(理由同上)。
+    Q_UNUSED(topmost);
+    qDebug() << "applyTopmost: Linux 暂未接入置顶(M2/X11 property)";
+#endif
 }
 
 /// 读回用户上次调过的列表尺寸。
@@ -358,6 +373,46 @@ HWND PanelWindow::nativeHandle() const {
     return reinterpret_cast<HWND>(winId());
 }
 
+#if !defined(Q_OS_WIN)
+void PanelWindow::setupCoreNotifyChannel() {
+    // 建管道:核心持写端(写 4 字节消息 id),本窗口持读端(QSocketNotifier)。
+    int fds[2];
+    if (::pipe(fds) != 0) {
+        qWarning() << "panel: 创建核心通知管道失败,实时刷新将不可用(M1/R3)";
+        return;
+    }
+    m_notifyReadFd = fds[0];
+    m_notifyWriteFd = fds[1];
+    // 读端非阻塞:activated 后循环 read 到 EAGAIN 为止,不挂 UI 线程;
+    // 写端 CLOEXEC:子进程(若有)不继承核心的通知通道。
+    ::fcntl(m_notifyReadFd, F_SETFL, ::fcntl(m_notifyReadFd, F_GETFL) | O_NONBLOCK);
+    ::fcntl(m_notifyWriteFd, F_SETFD, FD_CLOEXEC);
+    // 写端**刻意不关闭**(成员持有):与核心进程级生命周期一致(Windows 句柄同语义)。
+    m_notifyNotifier = new QSocketNotifier(m_notifyReadFd, QSocketNotifier::Read, this);
+    connect(m_notifyNotifier, &QSocketNotifier::activated, this, [this] {
+        // 读尽本批事件:每次 4 字节消息 id(机器字节序,核心 to_ne_bytes 写入)
+        quint32 msg = 0;
+        while (::read(m_notifyReadFd, &msg, sizeof(msg)) == sizeof(msg)) {
+            switch (msg) {
+                case nb::WM_APP_CLIP_CHANGED:
+                case nb::WM_APP_SETTINGS_CHANGED:
+                    // 设置变化也刷新一次(监听开关等影响列表)—— 与 Windows 分支同口径
+                    emit clipChanged();
+                    break;
+                case nb::WM_APP_TODO_DUE:
+                    emit todoDue();
+                    break;
+                default:
+                    break;  // ACTIVATE 走单实例 QLocalServer 通道,不经核心
+            }
+        }
+    });
+    // 写端交给核心(n nb_set_notify_fd);此后核心 notify → notifier → 信号。
+    m_core.setNotifyFd(m_notifyWriteFd);
+    qInfo() << "panel: 核心通知通道就绪(pipe + QSocketNotifier)";
+}
+#endif
+
 void PanelWindow::startSystemMove() {
     // 只移动窗口,不记录位置:拖动是临时挪动,下次呼出仍按光标摆位(见 placeAtCursor)
     if (QWindow* handle = windowHandle()) {
@@ -366,11 +421,17 @@ void PanelWindow::startSystemMove() {
     // 兜底:合成长按标题栏。无边框窗口走 WS_POPUP,部分环境下 Qt 的
     // startSystemMove 会被平台拒绝(false),此时用 Win32 的老办法照样能进入
     // 系统的模态移动循环(ReleaseCapture 必须先做,否则系统不会接管)。
+#if defined(Q_OS_WIN)
     const HWND hwnd = m_cachedHwnd ? m_cachedHwnd : reinterpret_cast<HWND>(winId());
     if (hwnd) {
         ::ReleaseCapture();
         ::SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
     }
+#else
+    // Linux(M0b):X11/Wayland 下 startSystemMove 由平台支持,失败仅记日志
+    // (没有 Win32 模态移动循环的等价物;拖动失败可接受,下一次呼出重摆)。
+    qDebug() << "startSystemMove: 平台未接受,跳过拖动";
+#endif
 }
 
 void PanelWindow::setPinned(bool pinned) {
@@ -582,6 +643,17 @@ void PanelWindow::showEvent(QShowEvent* e) {
 }
 
 bool PanelWindow::nativeEvent(const QByteArray& eventType, void* message, qint64* result) {
+#if !defined(Q_OS_WIN)
+    // Linux(M0b):WM_* 分发全部为 Windows 路径(nativeEvent 语义)——
+    //   · 失焦自动隐藏改走 event() 的 WindowDeactivate(见 event());
+    //   · nbcore 通知四分支随 M1 通知协议(nb_set_notify_fd)重接;
+    //   · NCHITTEST 边缘缩放/WM_ACTIVATE 由 Qt 层承担。
+    // X11 平台的 XCB 事件(如有需要)在 M2+ 按 eventType == "xcb_generic_event_t" 加。
+    Q_UNUSED(eventType);
+    Q_UNUSED(message);
+    Q_UNUSED(result);
+    return QWidget::nativeEvent(eventType, message, result);
+#else
     if (eventType == "windows_generic_MSG") {
         auto* msg = static_cast<MSG*>(message);
         // ⚠️ 此处禁止调用 winId():窗口创建期间(WM_NCCREATE 等)调用会递归触发
@@ -641,11 +713,18 @@ bool PanelWindow::nativeEvent(const QByteArray& eventType, void* message, qint64
         }
     }
     return QWidget::nativeEvent(eventType, message, result);
+#endif  // Q_OS_WIN
 }
 
 bool PanelWindow::event(QEvent* e) {
     if (e->type() == QEvent::WinIdChange) {
         m_cachedHwnd = reinterpret_cast<HWND>(winId());
+#if !defined(Q_OS_WIN)
+    } else if (e->type() == QEvent::WindowDeactivate) {
+        // Linux(M0b):失焦自动隐藏 —— 与 Windows nativeEvent 的 WM_ACTIVATE
+        // WA_INACTIVE 分支同语义(Qt 层事件,跨平台等价物)。
+        m_blurTimer->start();
+#endif
     } else if (e->type() == QEvent::Hide) {
         // 面板收起 → 通知 QML 收掉瞬时 UI(右键菜单/屏障),避免下次呼出时残留
         emit panelHidden();

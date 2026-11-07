@@ -2599,8 +2599,18 @@ mod tests {
         assert!(settings.validate().is_ok(), "空 = 默认目录,合法");
         settings.data_dir = "relative/path".into();
         assert!(settings.validate().is_err(), "相对路径应被拒绝");
-        settings.data_dir = "D:/absolute".into();
-        assert!(settings.validate().is_ok());
+        // B3(docs/29 §5.4):盘符路径是否"绝对"取决于平台 —— Windows 存量配置
+        // 的 "D:/..." 在 Linux 上恰是相对路径,跨系统搬数据时需清洗。
+        #[cfg(windows)]
+        {
+            settings.data_dir = "D:/absolute".into();
+            assert!(settings.validate().is_ok());
+        }
+        #[cfg(not(windows))]
+        {
+            settings.data_dir = "D:/absolute".into();
+            assert!(settings.validate().is_err(), "盘符路径在 Linux 是相对路径(B3)");
+        }
     }
 
     #[test]

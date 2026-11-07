@@ -17,6 +17,11 @@ Item {
     id: root
     focus: true
 
+    // 文本右键菜单(docs/17):实例挂在页根下,target 分别指向原文/译文框
+    // (2026-11-07 跨版本改写,原 ContextMenu.menu 附加属性为 Qt 6.9-only,见下)。
+    TextEditMenu { id: inputMenu; target: input }
+    TextEditMenu { id: outputMenu; target: output }
+
     /// 翻译进行中:结果区显示细进度条,主按钮进入等待态(§35,不用大 Spinner)。
     property bool translating: false
 
@@ -290,8 +295,16 @@ Item {
                         selectedTextColor: Theme.colors.accentText
                         // 右键菜单:整体替换 Basic 风格默认的 TextEditingContextMenu
                         // (英文标签 + 应用字体 14px + Basic 原生样式)。
-                        // ⚠️ 菜单不能带 id,否则破坏 ContextMenu 的懒加载。
-                        ContextMenu.menu: TextEditMenu { target: input }
+                        // ⚠️ 2026-11-07 跨版本改写:`ContextMenu.menu` 附加属性是
+                        //    Qt 6.9 新增(6.5~6.8 下该类型不存在,**整个文件加载失败**,
+                        //    连累 Main.qml —— docs/29 §9.1 K3)。改为 TapHandler +
+                        //    显式 popup,6.5~6.9 全兼容。6.9 Basic 样式自带的默认
+                        //    菜单由 attached 机制触发,TapHandler 不与之互斥的风险
+                        //    在 Windows 6.9 上人工复验(若双弹,再按平台分流)。
+                        TapHandler {
+                            acceptedButtons: Qt.RightButton
+                            onTapped: inputMenu.popup()
+                        }
                         // Esc 不在此处理:让它冒泡到 Main.qml 的根,由那里的分层逻辑
                         // 统一决定(先关本页浮层 → 再退出翻译页 → 再收起面板)。
                         Keys.onPressed: function(event) {
@@ -480,7 +493,10 @@ Item {
                         selectionColor: Theme.colors.accentSoft
                         selectedTextColor: Theme.colors.textPrimary
                         // 只读框:右键菜单只给「复制 / 全选」(TextEditMenu 按 readOnly 分流)
-                        ContextMenu.menu: TextEditMenu { target: output }
+                        TapHandler {
+                            acceptedButtons: Qt.RightButton
+                            onTapped: outputMenu.popup()
+                        }
                     }
                 }
 

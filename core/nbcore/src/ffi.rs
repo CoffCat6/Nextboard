@@ -92,7 +92,7 @@ pub unsafe extern "C" fn nb_init(config_json: *const c_char) -> i32 {
         let notify_hwnd =
             (cfg.get("notify_hwnd").and_then(|v| v.as_u64()).unwrap_or(0)) as usize;
         #[cfg(not(windows))]
-        let notify_hwnd = 0u64;
+        let notify_hwnd = 0usize;
 
         crate::core::Core::init(CoreConfig {
             data_dir,
@@ -210,6 +210,18 @@ pub unsafe extern "C" fn nb_free_buffer(ptr: *mut u8, len: usize) {
 #[no_mangle]
 pub unsafe extern "C" fn nb_set_notify_hwnd(hwnd: u64) {
     crate::core::set_notify_hwnd(hwnd as usize);
+}
+
+/// 登记通知通道(非 Windows,M1/R3):宿主持**读端**,核心把通知消息 id
+/// (4 字节,机器字节序)写入该 fd;宿主 QSocketNotifier 读到后按拉模式回查。
+/// Windows 侧无此导出(走 nb_set_notify_hwnd)。
+///
+/// # Safety
+/// fd 须为宿主持有的可写管道/eventfd 写端,且宿主保证其存活至 nb_shutdown。
+#[cfg(not(windows))]
+#[no_mangle]
+pub extern "C" fn nb_set_notify_fd(fd: i32) {
+    crate::core::set_notify_fd(fd);
 }
 
 /// 关闭核心:停监听、落盘设置。进程退出前调用;此后 nb_call 返回"未初始化"。

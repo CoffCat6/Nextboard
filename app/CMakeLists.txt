@@ -17,15 +17,22 @@ if(NOT DEFINED Qt6_DIR)
     set(Qt6_DIR "D:/Qt/6.9.0/msvc2022_64/lib/cmake/Qt6")
 endif()
 
-# ---- nbcore(Rust DLL)导入库 ----
+# ---- nbcore(Rust 核心库)产物存在性检查(仅警告;显式加载在运行期解析)----
 set(NBCORE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../core/target/release" CACHE PATH "nbcore release output")
-set(NBCORE_LIB "${NBCORE_DIR}/nbcore.dll.lib")
+if(WIN32)
+    set(NBCORE_LIB "${NBCORE_DIR}/nbcore.dll.lib")
+else()
+    set(NBCORE_LIB "${NBCORE_DIR}/libnbcore.so")
+endif()
 if(NOT EXISTS "${NBCORE_LIB}")
-    message(WARNING "nbcore.dll.lib not found at ${NBCORE_LIB} — build core first: cd core && cargo build --release")
+    message(WARNING "nbcore library not found at ${NBCORE_LIB} — build core first: cd core && cargo build --release")
 endif()
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets Quick QuickControls2 QuickWidgets)
 
+# REQUIRES 6.5(QML 侧已做跨版本兼容,见 TranslateView.qml 2026-11-07 的
+# ContextMenu.menu → TapHandler 改写 —— 该附加属性是 Qt 6.9-only,曾致 6.8 下
+# 整个 Main.qml 加载失败,docs/29 §9.1 K3)。上调下限前先把 QML 回到 6.5 口径。
 qt_standard_project_setup(REQUIRES 6.5)
 qt_policy(SET QTP0004 NEW)
 
@@ -149,17 +156,24 @@ target_link_libraries(nextboard PRIVATE
     Qt6::Quick
     Qt6::QuickControls2
     Qt6::QuickWidgets
-    dwmapi.lib
-    # 智能框选的元素级探测(UI Automation):窗口级(S1)不依赖它,
-    # 但同一文件里编译,链接期必须解析 COM 符号
-    ole32.lib
-    oleaut32.lib
-    uiautomationcore.lib
-    # GetProcessMemoryInfo 的兜底依赖(PSAPI_VERSION>=2 时由 kernel32 提供,写上无副作用)
-    psapi.lib
 )
-# nbcore 走纯显式加载(LoadLibrary + GetProcAddress,见 core_bridge.cpp):
-# 隐式链接 nbcore.dll.lib 时,Rust cdylib 的 CRT/线程局部状态与 Qt 静态初始化
+# Windows 系统库(Linux 无对应物,各能力在源码层按平台拆分,docs/29 §5):
+#   dwmapi               → 窗口圆角(window_effects)
+#   ole32/oleaut32/uiautomationcore → 智能框选元素级探测(UIA;窗口级 S1 不依赖,
+#                          但同一文件里编译,链接期必须解析 COM 符号)
+#   psapi                → GetProcessMemoryInfo 兜底依赖(PSAPI_VERSION>=2 时由
+#                          kernel32 提供,写上无副作用)
+if(WIN32)
+    target_link_libraries(nextboard PRIVATE
+        dwmapi.lib
+        ole32.lib
+        oleaut32.lib
+        uiautomationcore.lib
+        psapi.lib
+    )
+endif()
+# nbcore 走纯显式加载(Windows LoadLibrary / Linux dlopen,见 core_bridge.cpp):
+# 隐式链接 nbcore 导入库时,Rust cdylib 的 CRT/线程局部状态与 Qt 静态初始化
 # 顺序存在冲突(实测 nb_init 内 0xC0000005),显式加载则一切正常。
 
 # MSVC /utf-8:源码为 UTF-8(含中文字面量)
@@ -174,17 +188,47 @@ endif()
 # 避免版本号在 CMake 与 C++ 里各写一份而对不上。
 target_compile_definitions(nextboard PRIVATE NB_APP_VERSION="${PROJECT_VERSION}")
 
+# Linux(M0b):libnbcore.so 部署到可执行文件同目录,dlopen 以运行目录解析 ——
+# $ORIGIN RPATH 兜住"从任意工作目录启动"的场景(dlopen 的依赖搜索不含 CWD)。
+# 另:Qt 运行库也要能找到 —— aqtinstall 自装 Qt 不在 ld 搜索路径,不写 RPATH
+# 的话运行期会解析到系统发行版 Qt(版本不一致 → QML 模块错位,实测 ContextMenu
+# 附加类型在 6.8 缺失致 TranslateView 加载失败;docs/29 §9.1 K3)。
+if(UNIX AND NOT APPLE)
+    get_filename_component(NB_QT_PREFIX "${Qt6Core_DIR}/../../.." ABSOLUTE)
+    set_target_properties(nextboard PROPERTIES
+        BUILD_RPATH "\$ORIGIN;${NB_QT_PREFIX}/lib")
+endif()
+
 # 更新检查地址(docs/07-auto-update.md §5):S6.4 v1 的**唯一配置点**,留空 = 功能禁用
 # (设置页「检查更新」可见但禁用并说明原因)。发布渠道定了填 GitHub releases/latest 或
 # 自建 manifest 的 https 地址,重编即生效 —— 不做成用户设置项,免得多个入口对不上。
 set(NB_UPDATE_CHECK_URL "" CACHE STRING "更新检查地址(留空 = 检查更新功能禁用)")
 target_compile_definitions(nextboard PRIVATE NB_UPDATE_CHECK_URL="${NB_UPDATE_CHECK_URL}")
 
-# ---- 部署:运行所需 DLL 拷贝到输出目录 ----
-add_custom_command(TARGET nextboard POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${NBCORE_DIR}/nbcore.dll" "$<TARGET_FILE_DIR:nextboard>"
-    COMMENT "Deploy nbcore.dll"
-)
+# ---- 部署:运行所需核心库拷贝到输出目录(平台各取其库)----
+# ⚠️ 必须用 add_custom_target(ALL) 而非 POST_BUILD(2026-11-07 实测踩到,
+# 与下方 OCR 资产同一条经验):POST_BUILD 只在目标**重链接**时执行 ——
+# 只改 Rust 侧(core/libnbcore)不触发 C++ 重链接,旧核心库会一直留在输出目录,
+# 表现为"改了 Rust 代码但行为纹丝不动"。
+if(WIN32)
+    add_custom_target(nb_deploy_core ALL
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${NBCORE_DIR}/nbcore.dll" "$<TARGET_FILE_DIR:nextboard>"
+        COMMENT "Deploy nbcore.dll"
+        VERBATIM
+    )
+else()
+    # Linux(M0b):libnbcore.so 由 M0a 的 cargo build --release 产出;
+    # 运行期 core_bridge 以 dlopen("libnbcore.so") 加载,须与可执行文件同目录
+    # ($ORIGIN RPATH 见下方 target 的 BUILD_RPATH 设置)。
+    add_custom_target(nb_deploy_core ALL
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${NBCORE_DIR}/libnbcore.so" "$<TARGET_FILE_DIR:nextboard>"
+        COMMENT "Deploy libnbcore.so"
+        VERBATIM
+    )
+endif()
+add_dependencies(nb_deploy_core nextboard)
 
 # ---- OCR 运行期资产(RapidOCR 引擎)---------------------------------------------
 # 三样必须与 nextboard.exe / nbcore.dll **同目录**,缺一不可:
@@ -200,15 +244,28 @@ set(NB_THIRDPARTY "${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty")
 #    ninja 报 "no work to do",资产**不会被恢复**(构建图中没有这条规则)。
 #    而这两个资产是**拷贝进来的输入**(非构建产物),恰恰最容易被误删/过期。
 #    挂在 ALL 上可保证每次构建都校验一次,代价仅一次 copy_if_different。
-add_custom_target(nb_deploy_ocr_assets ALL
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${NB_THIRDPARTY}/ort/onnxruntime.dll" "$<TARGET_FILE_DIR:nextboard>"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:nextboard>/models/ocr"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
-            "${NB_THIRDPARTY}/models/ocr" "$<TARGET_FILE_DIR:nextboard>/models/ocr"
-    COMMENT "Deploy OCR assets (onnxruntime.dll + models/ocr)"
-    VERBATIM
-)
+if(WIN32)
+    add_custom_target(nb_deploy_ocr_assets ALL
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${NB_THIRDPARTY}/ort/onnxruntime.dll" "$<TARGET_FILE_DIR:nextboard>"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:nextboard>/models/ocr"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
+                "${NB_THIRDPARTY}/models/ocr" "$<TARGET_FILE_DIR:nextboard>/models/ocr"
+        COMMENT "Deploy OCR assets (onnxruntime.dll + models/ocr)"
+        VERBATIM
+    )
+else()
+    # Linux(M0b):ORT 的 libonnxruntime.so 尚未入仓(thirdparty 只有 win-x64 的
+    # dll,M4 补 linux-x64 so);模型文件跨平台,照常部署 —— OCR 首次使用时引擎
+    # 加载失败会走可读错误(与"系统后端不可用"同一降级口径)。
+    add_custom_target(nb_deploy_ocr_assets ALL
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:nextboard>/models/ocr"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
+                "${NB_THIRDPARTY}/models/ocr" "$<TARGET_FILE_DIR:nextboard>/models/ocr"
+        COMMENT "Deploy OCR assets (models/ocr;Linux ORT so 待 M4)"
+        VERBATIM
+    )
+endif()
 add_dependencies(nb_deploy_ocr_assets nextboard)
 
 # QML 模块资源的 rcc 输出随 nextboard 目标自动重建;Sciter 时代的 panel HTML

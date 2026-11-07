@@ -492,3 +492,6 @@ app/build_dbg/qmltypes/nextboard_foreign_types.txt
 app/build_dbg/styles/qmodernwindowsstyle.dll
 # Linux 迁移编译普查产出(tools/linux_census.sh,docs/29 §8.3)——脚本只读源码、只写这里
 census/
+
+# QML LSP 本机配置(qmlls 自动生成,含本机路径)
+app/.qmlls.ini

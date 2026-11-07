@@ -150,6 +150,26 @@ pub fn spawn_fake_proxy() -> (u16, std::thread::JoinHandle<String>) {
         // 客户端报 0x80072F78（ERROR_HTTP_INVALID_SERVER_RESPONSE）——已实测踩到过。
         let raw = read_full_request(&mut sock);
         let request_line = raw.lines().next().unwrap_or_default().to_owned();
+
+        // CONNECT 隧道(2026-11-07):ureq 对 http:// 目标经 HTTP 代理也可能走
+        // CONNECT(而非 WinHTTP 的正向转发绝对形式)。握手 → 隧道内读真实请求
+        // → 记录**隧道内**请求行 → 在隧道里应答。返回值语义不变("客户端真实
+        // 请求的请求行"),外层断言按平台分别匹配绝对/原始形式。
+        if request_line.starts_with("CONNECT") {
+            let _ = sock.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n");
+            let _ = sock.flush();
+            let inner_raw = read_full_request(&mut sock);
+            let inner_line = inner_raw.lines().next().unwrap_or_default().to_owned();
+            let body = r#"{"via":"proxy"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(response.as_bytes());
+            let _ = sock.flush();
+            return inner_line;
+        }
+
         let body = r#"{"via":"proxy"}"#;
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",

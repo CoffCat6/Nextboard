@@ -83,7 +83,13 @@ pub(super) fn send(req: &HttpRequest, endpoint: &ProxyEndpoint) -> AppResult<Htt
     Ok(HttpResponse { status, body })
 }
 
-/// 组装代理串：`socks5://[user:pass@]host:port`。
+/// 组装代理串：`socks5h://[user:pass@]host:port`。
+///
+/// ⚠️ **必须用 socks5h 而非 socks5**(2026-11-07,M1/R2 实测):ureq 对 `socks5://`
+/// 会把目标主机名先做**本地 DNS 解析**再交给代理 —— 主机名泄漏给本地解析器,
+/// 违反 phase8 R7 的隐私契约(目标域名只应让代理解析)。`socks5h://`(h = hostname
+/// 由代理端解析)ureq 原生支持,端到端测试(send_dispatches_socks5_through_ureq
+/// 用 .invalid 域名)已验证。此前该测试在 Windows 上的"环境性失败"实为同一根因。
 ///
 /// 主机与用户名的合法性由设置校验层保证（`validate_proxy_manual` 的字符白名单），
 /// 这里不再重复校验——但**不打印**该串（含凭据）。
@@ -94,11 +100,13 @@ fn build_proxy_uri(endpoint: &ProxyEndpoint) -> String {
         .as_ref()
         .map(|ProxyAuth { username, password }| format!("{username}:{password}@"))
         .unwrap_or_default();
-    format!("socks5://{credentials}{host}:{}", endpoint.port)
+    format!("socks5h://{credentials}{host}:{}", endpoint.port)
 }
 
 /// 把 ureq 的错误转成用户可读的文案（不回显代理串与凭据）。
-fn map_ureq_error(err: ureq::Error) -> AppError {
+/// 非 Windows 的直连/HTTP 代理传输（`http.rs` 的 `ureq_http` 模块）复用同一映射,
+/// 保持两条 ureq 路径的错误文案一致。
+pub(super) fn map_ureq_error(err: ureq::Error) -> AppError {
     let message = match err {
         // 4xx/5xx 被 ureq 默认转为错误；这里仍按状态码语义交给上层统一处理
         ureq::Error::StatusCode(code) => {
@@ -143,7 +151,8 @@ mod tests {
     #[test]
     fn proxy_uri_without_auth() {
         let e = endpoint(ProxyKind::Socks5, "127.0.0.1", 1080, None);
-        assert_eq!(build_proxy_uri(&e), "socks5://127.0.0.1:1080");
+        // socks5h = 主机名由代理端解析(隐私契约,见 build_proxy_uri 注释)
+        assert_eq!(build_proxy_uri(&e), "socks5h://127.0.0.1:1080");
     }
 
     #[test]
@@ -154,13 +163,13 @@ mod tests {
             1080,
             Some(("user", "pass")),
         );
-        assert_eq!(build_proxy_uri(&e), "socks5://user:pass@proxy.local:1080");
+        assert_eq!(build_proxy_uri(&e), "socks5h://user:pass@proxy.local:1080");
     }
 
     #[test]
     fn proxy_uri_never_changes_scheme() {
-        // 防御：无论 host 被污染成什么，都不得改变 scheme（依赖校验层白名单 + 此处只拼 socks5://）
+        // 防御：无论 host 被污染成什么，都不得改变 scheme（依赖校验层白名单 + 此处只拼 socks5h://）
         let e = endpoint(ProxyKind::Socks5, "http://evil", 80, None);
-        assert!(build_proxy_uri(&e).starts_with("socks5://"));
+        assert!(build_proxy_uri(&e).starts_with("socks5h://"));
     }
 }

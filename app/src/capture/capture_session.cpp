@@ -38,7 +38,11 @@
 #include <QTimer>
 #include <QUuid>
 
+#if defined(Q_OS_WIN)
 #include <windows.h>
+#else
+#include <QFile>
+#endif
 
 namespace nb {
 
@@ -59,6 +63,7 @@ QString g_sourceOwnerExe;
 
 /// HWND → 所属进程 exe 文件名(小写);失败返回空串。
 /// 限权打开(ProcessQueryLimitedInformation)对大多数进程足够;系统进程会失败 → 空。
+#if defined(Q_OS_WIN)
 QString hwndToExeName(HWND hwnd) {
     DWORD pid = 0;
     GetWindowThreadProcessId(hwnd, &pid);
@@ -73,6 +78,14 @@ QString hwndToExeName(HWND hwnd) {
     const QString full = QString::fromWCharArray(buf, static_cast<qsizetype>(len));
     return full.mid(full.lastIndexOf('\\') + 1).toLower();
 }
+#else
+// Linux(M0b):Win32 HWND 不存在 —— 来源应用解析改走 X11 窗口 id(M2,
+// _NET_WM_PID + /proc/<pid>/exe,docs/29 §5.2);Wayland 无枚举 → 来源为空
+// (卡片隐藏"来自 x",降级契约)。当前签名保留 quintrick 形参占位。
+QString hwndToExeName(quintptr /*nativeHandle*/) {
+    return {};
+}
+#endif
 
 /// 剔除已销毁的遮罩;返回是否仍有活跃遮罩(即会话进行中)。
 bool pruneOverlays() {
@@ -1739,12 +1752,14 @@ void OverlayWidget::mouseReleaseEvent(QMouseEvent* e) {
         m_candidatePhysical = m_lastCandidatePhysical;
         ++m_smartAccepts;
         // 来源应用(docs/25):被采纳的候选窗口,窗口存活时立刻解析 exe 名
+#if defined(Q_OS_WIN)
         {
             const QVector<int> stack = hoverStack(e->pos());
             if (!stack.isEmpty())
                 g_sourceOwnerExe = hwndToExeName(reinterpret_cast<HWND>(
                     m_candidates.at(stack.first()).windowId));
         }
+#endif
         const QRect picked = m_selection.normalized();
         // 采纳后**保留候选**:用户点「完成」之前还想看/想换,光标一动就更新。
         if (!picked.isEmpty()) {
@@ -1769,6 +1784,7 @@ void OverlayWidget::mouseReleaseEvent(QMouseEvent* e) {
     // 排除自身遮罩(遮罩盖满全屏,不排除的话永远命中自己)。
     // 注意 WindowFromPoint 会命中**透明遮罩下**的窗口吗?会 —— 遮罩是 WS_EX_LAYERED
     // + 全绘制,WindowFromPoint 按 hit-test 走,遮罩自身会被命中;故必须排除。
+#if defined(Q_OS_WIN)
     {
         const QPoint center = m_selection.center();
         const QPoint centerGlobal = mapToGlobal(center);
@@ -1782,6 +1798,11 @@ void OverlayWidget::mouseReleaseEvent(QMouseEvent* e) {
         if (hit != nullptr && !isSelfOverlay)
             g_sourceOwnerExe = hwndToExeName(hit);
     }
+#else
+    // Linux(M0b):X11 命中探测与来源解析随 M2 接入(见 hwndToExeName 注释);
+    // 当前来源为空 → 卡片不显示"来自 x"(降级契约)。
+    g_sourceOwnerExe.clear();
+#endif
     // 两种出口(直通已删,2026-11-01):
     //   1) 长截图意图 → 直接进长截图就绪态(用户已明确要长截图);
     //   2) 其余 → 保留选区 + 浮出工具栏(docs/14 §16),确认交给浮条/Enter/双击。

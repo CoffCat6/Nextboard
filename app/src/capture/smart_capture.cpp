@@ -9,15 +9,20 @@
 #include <QScreen>
 #include <QStringList>
 
+#if defined(Q_OS_WIN)
 #include <dwmapi.h>
 #include <windows.h>
 
 // UIA 元素级(S3)。只在 probeElementAt 里用到;窗口级(S1)完全不碰 COM ——
 // 这样"元素探测失败/超时"永远不会影响"至少还能按窗口框"。
 #include <UIAutomation.h>
+#endif
 
 namespace nb::smart {
 
+// Windows 段一:窗口枚举助手(isShellClass/可见矩形/cloaked/EnumCtx/ComGuard)
+// 与 probeWindows —— 全部依赖 Win32/DWM/COM,Linux 走文件尾的降级桩。
+#if defined(Q_OS_WIN)
 namespace {
 
 /// 候选窗口的最小边长(物理像素)。
@@ -176,6 +181,7 @@ QVector<Candidate> probeWindows() {
     // EnumWindows 本身就是 z 序(顶层在前),正是命中测试想要的顺序。
     return out;
 }
+#endif  // Q_OS_WIN(段一:枚举助手 + probeWindows)
 
 QSize screenPhysicalSize(QScreen* screen, const QImage& frozen) {
     if (!frozen.isNull()) return frozen.size();
@@ -278,6 +284,9 @@ QVector<int> candidatesAt(const QVector<Candidate>& list, const QRect& screenPhy
     return hits;
 }
 
+// Windows 段二:元素级 UIA(worthProbing / probeElementAt / dumpElementTree /
+// buildElementSnapshot)—— 依赖 COM/CUIAutomation。
+#if defined(Q_OS_WIN)
 bool worthProbing(quintptr windowId) {
     if (!windowId) return false;
     // 注意:这里**只按类名排除已知无 UIA 树的实现**,不做"是否响应"的探测 ——
@@ -314,11 +323,15 @@ namespace {
 /// 最大深度。实测最深 20(Telegram Web 的 RawView),再往下是文本 run,
 /// 框住单个字符没有意义。
 constexpr int kProbeMaxDepth = 20;
-/// "明显小于窗口"的判据(物理像素)。差得比这还小就等于没细化:
-/// Chromium 的外壳 Pane 常只比窗口小 2px(2077x1388 vs 2078x1390),
-/// 旧实现用严格 `>=` 判"与窗口等大",恰好漏掉这种。
+#endif  // 段二常量(仅 Windows UIA 用)
+
+// "明显小于窗口"的判据(物理像素)。差得比这还小就等于没细化:
+// Chromium 的外壳 Pane 常只比窗口小 2px(2077x1388 vs 2078x1390),
+// 旧实现用严格 `>=` 判"与窗口等大",恰好漏掉这种。
+// ⚠️ 放在平台门控外:elementAtSnapshot(跨平台纯函数)也用它。
 constexpr int kMinShrinkPhys = 8;
 
+#if defined(Q_OS_WIN)
 /// 一次 DFS 的产出。
 struct DfsResult {
     QRect best;          // 最深且明显小于窗口的命中(绝对物理像素)
@@ -810,6 +823,17 @@ QVector<ElementNode> buildElementSnapshot(quintptr windowId, int maxNodes, int b
     }
     return out;
 }
+#else
+// Linux(M0b):窗口枚举与 UIA 元素级未接入 —— 全部走**降级契约**(头注释:
+// 失败返回空表,不报错不阻塞,退化成纯手动框选)。Wayland 无枚举能力;
+// X11 窗口级(EWMH)与 AT-SPI2 元素级分别在 M2 / M2 二期接入(docs/29 §5.3)。
+QVector<Candidate> probeWindows() { return {}; }
+bool worthProbing(quintptr) { return false; }
+QVector<Candidate> probeElementAt(quintptr, const QPoint&, qreal, int, int, int,
+                                  ProbeStats*) { return {}; }
+QStringList dumpElementTree(quintptr, int, int) { return {}; }
+QVector<ElementNode> buildElementSnapshot(quintptr, int, int, ProbeStats*) { return {}; }
+#endif  // Q_OS_WIN(段二:元素级 UIA)
 
 int elementAtSnapshot(const QVector<ElementNode>& nodes, const QRect& winPhysical,
                       const QPoint& cursor, int minSize, bool allowEqualWin) {

@@ -3,20 +3,29 @@
 #include <QCoreApplication>
 #include <QDebug>
 #include <QDir>
-#include <QVarLengthArray>
+#include <QFile>
+#include <QFileInfo>
+#include <QTextStream>
 
+#if defined(Q_OS_WIN)
 #include <windows.h>
+#include <QVarLengthArray>
+#endif
 
 namespace nb::auto_start {
+
+/// 开机自启必须静默:带 `--hidden` 启动,主面板不弹出、不抢焦点(docs/04 §8 D11)。
+/// Windows 与安装器写 Run 键的形态保持一致(tools/installer.nsi 的 SecAutoStart),
+/// Linux 与 XDG autostart 的 Exec 形态保持一致 —— 否则"安装器开的自启不弹面板、
+/// 应用内开的自启弹面板"——同一功能两种行为。
+constexpr char kHiddenArg[] = " --hidden";
+
+#if defined(Q_OS_WIN)
+
 namespace {
 
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kValueName[] = L"Nextboard";
-
-/// 开机自启必须静默:带 `--hidden` 启动,主面板不弹出、不抢焦点(docs/04 §8 D11)。
-/// 与安装器写 Run 键的形态保持一致(tools/installer.nsi 的 SecAutoStart),
-/// 否则"安装器开的自启不弹面板、应用内开的自启弹面板"——同一功能两种行为。
-constexpr char kHiddenArg[] = " --hidden";
 
 QString commandLine() {
     // 引号包裹:路径含空格时 Run 键按整条命令解析,不包裹会被拆成 exe + 参数。
@@ -137,5 +146,128 @@ bool debugWriteRawCommandLine(const QString& command) {
     ::RegCloseKey(key);
     return rc == ERROR_SUCCESS;
 }
+
+#else  // ---- Linux(M0b):XDG autostart(~/.config/autostart/nextboard.desktop)----
+
+namespace {
+
+/// 自启入口文件;enabled() = 文件存在且未被 Hidden 禁用。
+QString desktopFilePath() {
+    return QDir::home().filePath(QStringLiteral(".config/autostart/nextboard.desktop"));
+}
+
+QString commandLine() {
+    // Exec 形态与 Windows 同构:路径引号包裹,--hidden 在引号外;
+    // Linux 路径分隔符本就是 '/',toNativeSeparators 为恒等变换,这里显式不调用。
+    return QStringLiteral("\"%1\"%2")
+        .arg(QCoreApplication::applicationFilePath(), QString::fromLatin1(kHiddenArg));
+}
+
+/// 写入标准 Desktop Entry(Enabled/Disabled 共用一个模板,Hidden 字段区分)。
+bool writeDesktopEntry(const QString& execCommand) {
+    const QString path = desktopFilePath();
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+        qWarning() << "auto_start: 写 autostart .desktop 失败:" << path
+                   << file.errorString();
+        return false;
+    }
+    QTextStream out(&file);
+    out.setEncoding(QStringConverter::Utf8);
+    out << QStringLiteral("[Desktop Entry]\n"
+                          "Type=Application\n"
+                          "Name=Nextboard\n"
+                          "Comment=Clipboard history & screenshot board\n"
+                          "Exec=%1\n"
+                          "Hidden=false\n"
+                          "X-GNOME-Autostart-enabled=true\n")
+               .arg(execCommand);
+    out.flush();
+    return file.error() == QFileDevice::NoError;
+}
+
+/// 读回当前登记的 Exec(文件不存在 / 无 Exec → 空串)。
+QString registeredCommandLine() {
+    QFile file(desktopFilePath());
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) return QString();
+    while (!file.atEnd()) {
+        const QByteArray line = file.readLine();
+        if (line.startsWith("Exec=")) {
+            return QString::fromUtf8(line.mid(5)).trimmed();
+        }
+    }
+    return QString();
+}
+
+} // namespace
+
+bool enabled() {
+    QFile file(desktopFilePath());
+    if (!file.exists()) return false;
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) return false;
+    while (!file.atEnd()) {
+        const QByteArray line = file.readLine().trimmed();
+        // Hidden=true 是 XDG 的"用户已停用"语义;其它程序可能改写该字段。
+        if (line == "Hidden=true") return false;
+    }
+    return true;
+}
+
+bool setEnabled(bool enable) {
+    if (!enable) {
+        // 删除时文件不存在也算成功(幂等),与 Windows 分支的 ERROR_FILE_NOT_FOUND 口径一致
+        const QString path = desktopFilePath();
+        if (QFile::exists(path) && !QFile::remove(path)) {
+            qWarning() << "auto_start: 删除 autostart .desktop 失败:" << path;
+            return false;
+        }
+    } else if (!writeDesktopEntry(commandLine())) {
+        return false;
+    }
+    // 回读复核:与 Windows 分支同哲学 —— 写"成功"不等于生效(只读文件系统等)
+    if (enabled() != enable) {
+        qWarning() << "auto_start: 操作后回读不一致(期望" << enable << ",实际" << enabled()
+                   << ")—— autostart 文件可能被只读挂载或权限拦截";
+        return false;
+    }
+    return true;
+}
+
+bool refreshCommandLineIfStale() {
+    if (!enabled()) return false;
+    const QString current = registeredCommandLine();
+    if (current == commandLine()) return false;   // 已是最新形态
+
+    // ⚠️ 只升级**指向本 exe** 的自启项(与 Windows 分支同一守卫,理由同):
+    //    dev 构建跑一次不能把用户安装的自启改指向构建目录。
+    const QString exePath = QCoreApplication::applicationFilePath();
+    if (!current.contains(exePath, Qt::CaseInsensitive)) {
+        qInfo() << "auto_start: autostart 指向其它安装,跳过命令行升级:" << current;
+        return false;
+    }
+
+    if (!writeDesktopEntry(commandLine())) {
+        qWarning() << "auto_start: 自启命令行升级失败(仍为旧值)";
+        return false;
+    }
+    qInfo() << "auto_start: 已把 autostart Exec 升级为当前形态";
+    return true;
+}
+
+QString debugRegisteredCommandLine() {
+    return registeredCommandLine();
+}
+
+QString debugExpectedCommandLine() {
+    return commandLine();
+}
+
+bool debugWriteRawCommandLine(const QString& command) {
+    // 验收辅助:把给定命令行写成当前自启项(Linux 侧等价于"直接改 Exec")
+    return writeDesktopEntry(command);
+}
+
+#endif  // Q_OS_WIN / Linux
 
 } // namespace nb::auto_start

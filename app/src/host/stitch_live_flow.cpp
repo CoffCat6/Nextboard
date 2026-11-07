@@ -231,6 +231,7 @@ void runStitchLiveFlow() {
             }
 
             // ④ 跳过"窗口区域"这套机制:v2 不再设 SetWindowRgn
+#if defined(Q_OS_WIN)
             {
                 const HWND hwnd = reinterpret_cast<HWND>(overlay->winId());
                 const HRGN rgn = ::CreateRectRgn(0, 0, 0, 0);
@@ -240,6 +241,10 @@ void runStitchLiveFlow() {
                         << "(v1 曾是 COMPLEXREGION 的挖洞区域)";
                 // 遮罩隐藏时无关紧要;这条只作信息,不进断言 —— 真正的判据是①。
             }
+#else
+            // Linux(M0b):Win32 区域探针无对应物(验收诊断信息,非断言),跳过。
+            qInfo() << "STITCH-LIVE  overlay window region probe: 非平台部分,跳过";
+#endif
 
             // ⑤ 选区里看到的是**真实页面**:直接读屏幕像素与页面自报的颜色比对
             //

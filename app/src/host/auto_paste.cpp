@@ -7,7 +7,9 @@
 #include <QJsonObject>
 #include <QTimer>
 
+#if defined(Q_OS_WIN)
 #include <windows.h>
+#endif
 
 namespace nb {
 namespace {
@@ -21,6 +23,7 @@ namespace {
 /// 按下与抬起**分两批**投递,中间让出一拍(实现见下)。
 /// 一次性投 4 个事件时,部分应用(实测 Electron 系与部分远程桌面客户端)只能看到
 /// "已按下"而看不到配对抬起,结果是 Ctrl 卡住 —— 这里必须真的有两批,否则注释在撒谎。
+#if defined(Q_OS_WIN)
 void sendCtrlV() {
     constexpr WORD kScanCtrl = 0x1D;
     constexpr WORD kScanV = 0x2F;
@@ -68,6 +71,7 @@ void sendCtrlV() {
         qInfo() << "auto-paste: 已投出 Ctrl+V(按下/抬起分两批)";
     }
 }
+#endif  // Q_OS_WIN
 
 } // namespace
 
@@ -81,6 +85,7 @@ void pasteToForegroundIfEnabled(int delayMs) {
     // 延后一拍:此刻面板可能还在收起过程中(hide() 之后前台窗口需要一两拍才拿到
     // 焦点)。面板仍是前台时投键 = 粘到面板自己身上(搜索框多一段文本)。
     QTimer::singleShot(delayMs > 0 ? delayMs : 1, qApp, [] {
+#if defined(Q_OS_WIN)
         // 再确认一次:若这期间又有本进程的窗口拿到前台(例如用户手快又按了热键),
         // 就不该投键 —— 否则粘到的是面板自己。
         const HWND foreground = ::GetForegroundWindow();
@@ -91,6 +96,12 @@ void pasteToForegroundIfEnabled(int delayMs) {
             return;
         }
         sendCtrlV();
+#else
+        // Linux(M0b):键盘注入暂未接入 —— X11 走 XTest(M3),Wayland 无全局注入
+        // 能力(降级为"仅复制",docs/29 §5.3)。开关语义保留,此处只记一条日志:
+        // 用户感知为"复制了但没自动粘",与功能关闭时一致。
+        qInfo() << "auto-paste: Linux 暂未接入自动粘贴注入(M3/X11),仅保留复制";
+#endif
     });
 }
 

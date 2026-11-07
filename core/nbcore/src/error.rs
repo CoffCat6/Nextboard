@@ -12,8 +12,15 @@ pub enum AppError {
     Json(#[from] serde_json::Error),
     #[error("IO 错误:{0}")]
     Io(#[from] std::io::Error),
+    // 平台门控:Windows 用 clipboard-win 的 ErrorCode;其他平台用字符串
+    // (M1 接入 arboard 后统一为平台无关错误源;错误码保持 "ClipboardWin"
+    //  不变,宿主侧提示逻辑无需分平台)。
+    #[cfg(windows)]
     #[error("剪贴板错误:{0}")]
     ClipboardWin(#[from] clipboard_win::ErrorCode),
+    #[cfg(not(windows))]
+    #[error("剪贴板错误:{0}")]
+    ClipboardWin(String),
     #[error("图片处理错误:{0}")]
     Image(#[from] image::ImageError),
     #[error("屏幕捕获错误:{0}")]

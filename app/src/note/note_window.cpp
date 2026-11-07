@@ -32,6 +32,8 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QScreen>
+// Linux(M0b)startSystemResize 需要 QWindow 完整类型(Windows 路径不经此处)
+#include <QWindow>
 #include <QSignalBlocker>
 #include <QTextEdit>
 #include <QTimer>
@@ -351,10 +353,16 @@ void NoteWindow::setTopMost(bool on) {
     //    正在输入的便签会丢位置/焦点/编辑状态。SetWindowPos 只改 Z 序。
     // 未建原生窗口时(构造期)先不动 Z 序:showEvent 会再调一次。
     // 这里刻意**不**为了拿句柄去 winId() —— 那会在构造链上创建窗口。
+#if defined(Q_OS_WIN)
     const HWND hwnd = reinterpret_cast<HWND>(m_cachedHwnd);
     if (!hwnd) return;
     ::SetWindowPos(hwnd, on ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+#else
+    // Linux(M0b):置顶暂缓 —— 同 panel_window 的口径(X11 property M2 补;
+    // Wayland 降级;不重建窗口)。
+    qDebug() << "setTopMost: Linux 暂未接入置顶(M2/X11 property), on =" << on;
+#endif
 }
 
 void NoteWindow::refreshAffordances() {
@@ -851,6 +859,7 @@ void NoteWindow::endDrag() {
 
 void NoteWindow::mousePressEvent(QMouseEvent* e) {
     if (e->button() == Qt::LeftButton) {
+#if defined(Q_OS_WIN)
         // 缩放把手:四边/四角(无边框窗口没有非客户区,自己算命中)
         const int hit = framelessResizeHitTest(this, reinterpret_cast<HWND>(winId()),
                                                [&] {
@@ -864,6 +873,26 @@ void NoteWindow::mousePressEvent(QMouseEvent* e) {
             e->accept();
             return;
         }
+#else
+        // Linux(M0b):边缘缩放走 QWindow::startSystemResize —— 命中判据与
+        // Windows 的 framelessResizeHitTest 同一套(6 逻辑像素边框),
+        // 但 Qt 版本在本地面坐标系,无 MAKELPARAM/物理坐标换算。
+        // 松手收尾:Windows 由 WM_EXITSIZEMOVE 收尾;Linux 的系统缩放结束后
+        // 由 Resize 事件自然落位,snap 在下一次拖动/重夹时补偿(M0b 可接受)。
+        if (!isMaximized()) {
+            const int b = 6;
+            const QPoint p = e->position().toPoint();
+            Qt::Edges edges;
+            if (p.x() < b) edges |= Qt::LeftEdge;
+            if (p.x() >= width() - b) edges |= Qt::RightEdge;
+            if (p.y() < b) edges |= Qt::TopEdge;
+            if (p.y() >= height() - b) edges |= Qt::BottomEdge;
+            if (edges != 0 && windowHandle() && windowHandle()->startSystemResize(edges)) {
+                e->accept();
+                return;
+            }
+        }
+#endif
         // 标题条 = 拖动热区;正文区不拖动(否则选字/点击都会被当成拖窗口)
         if (e->position().y() < kNoteShadowMargin + kHeaderH) {
             beginDrag(e->globalPosition().toPoint());
@@ -1239,6 +1268,14 @@ bool NoteWindow::event(QEvent* e) {
 }
 
 bool NoteWindow::nativeEvent(const QByteArray& eventType, void* message, qint64* result) {
+#if !defined(Q_OS_WIN)
+    // Linux(M0b):WM_EXITSIZEMOVE 收尾(系统缩放后夹回+吸附)是 Windows 路径 ——
+    // Linux 的系统缩放经 startSystemResize,落位由 Resize 事件自然完成;
+    // snap 补偿口径见 mousePressEvent 的 Linux 分支注释。
+    Q_UNUSED(message);
+    Q_UNUSED(result);
+    return QWidget::nativeEvent(eventType, message, result);
+#else
     if (eventType != "windows_generic_MSG") {
         return QWidget::nativeEvent(eventType, message, result);
     }
@@ -1258,6 +1295,7 @@ bool NoteWindow::nativeEvent(const QByteArray& eventType, void* message, qint64*
         });
     }
     return QWidget::nativeEvent(eventType, message, result);
+#endif  // Q_OS_WIN
 }
 
 void NoteWindow::reclampToCurrentScreen() {

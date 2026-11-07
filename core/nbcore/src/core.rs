@@ -43,8 +43,39 @@ pub fn notify_host(msg: u32) {
     }
 }
 
+// Linux(M1/R3):通知走 **管道 fd**(宿主持读端接 QSocketNotifier,核心写 4 字节
+// 消息 id)。信号语义与 Windows 的 PostMessageW 完全一致:不阻塞、不携带指针、
+// 消息只是"该回查了"的信号,payload 由宿主拉模式回取。
 #[cfg(not(windows))]
-pub fn notify_host(_msg: u32) {}
+static NOTIFY_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+/// 运行期更新通知 fd(FFI nb_set_notify_fd 调用;负数 = 通知丢弃)。
+#[cfg(not(windows))]
+pub fn set_notify_fd(fd: i32) {
+    use std::sync::atomic::Ordering;
+    NOTIFY_FD.store(fd, Ordering::SeqCst);
+}
+
+#[cfg(not(windows))]
+pub fn notify_host(msg: u32) {
+    use std::sync::atomic::Ordering;
+
+    let fd = NOTIFY_FD.load(Ordering::SeqCst);
+    if fd < 0 {
+        return;
+    }
+    let bytes = msg.to_ne_bytes();
+    // SAFETY: fd 由宿主经 nb_set_notify_fd 登记且保持打开(进程级生命周期);
+    // 用 ManuallyDrop 包装避免 File 析构关闭宿主的 fd。
+    // 写失败(EPIPE 宿主已退 / 非阻塞满)一律静默 —— 通知是信号,不是必须送达的数据。
+    let mut file = std::mem::ManuallyDrop::new(unsafe {
+        std::fs::File::from_raw_fd(fd)
+    });
+    let _ = std::io::Write::write_all(&mut *file, &bytes);
+}
+
+#[cfg(not(windows))]
+use std::os::unix::io::FromRawFd;
 
 #[cfg(windows)]
 static NOTIFY_HWND: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -63,7 +94,8 @@ pub fn set_notify_hwnd(_hwnd: usize) {}
 #[derive(Debug, Clone)]
 pub struct CoreConfig {
     pub data_dir: PathBuf,
-    #[cfg(windows)]
+    /// Windows:宿主通知窗口句柄;其他平台传 0(通知走空实现)。
+    /// M1 重设计通知协议(nb_set_notify_fd)时本字段将随整体重构(docs/29 §5.2)。
     pub notify_hwnd: usize,
 }
 

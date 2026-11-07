@@ -26,7 +26,9 @@
 #include "panel/core_facade.hpp"
 #include "panel/panel_window.hpp"
 
+#if defined(Q_OS_WIN)
 #include <windows.h>
+#endif
 
 #include <QApplication>
 #include <QElapsedTimer>
@@ -1027,9 +1029,15 @@ void runSmartUiaFlow() {
             // Chromium 系(Chrome / Edge / Electron:VSCode、MarkText…)用同一套
             // 外壳结构:**顶层两个同尺寸 Pane,第 0 个是空壳**。这是 docs/26 那次
             // 缺陷的复发面,单独计数并**硬断言**(见本段末尾)。
+            bool isChromium = false;
+#if defined(Q_OS_WIN)
             wchar_t cls[256] = {0};
             ::GetClassNameW(reinterpret_cast<HWND>(w.id), cls, 255);
-            const bool isChromium = QString::fromWCharArray(cls) == QStringLiteral("Chrome_WidgetWin_1");
+            isChromium = QString::fromWCharArray(cls) == QStringLiteral("Chrome_WidgetWin_1");
+#else
+            // Linux(M0b):Win32 类名判定无对应物;AT-SPI 方案(M2 二期)另行判定。
+            Q_UNUSED(w);
+#endif
             const QStringList tree = smart::dumpElementTree(w.id, 4, 4);
             for (const QString& line : tree) qInfo() << "SMART-UIA   tree" << line;
             smart::ProbeStats st;
@@ -1161,6 +1169,7 @@ void runSmartLiveFlow() {
         //    被判成"不一致",boom,断言必红。这不是产品的 z 序错了,是验收自己
         //    制造了遮挡。判据:命中窗口的 PID == 本进程 → 这条样本跳过(记 skipped),
         //    因为"候选表里没有自己"正是被测的**另一条**正确行为。
+#if defined(Q_OS_WIN)
         {
             const DWORD selfPid = ::GetCurrentProcessId();
             int agree = 0;
@@ -1205,6 +1214,11 @@ void runSmartLiveFlow() {
                   QStringLiteral("EnumWindows 顺序与系统 WindowFromPoint 一致(不一致 %1)")
                       .arg(disagree));
         }
+#else
+        // Linux(M0b):z 序交叉验证依赖 EnumWindows/WindowFromPoint 同空间比对,
+        // Wayland 无窗口枚举(降级契约)—— 该验收项随平台跳过。
+        qInfo() << "SMART-LIVE  z序交叉验证:非平台部分,跳过";
+#endif
 
         // 真起一次会话。框选恒为浮条模式(regionAutoConfirm 已删),只看状态。
         nb::startCaptureSession(nb::CaptureIntent::Region);
@@ -1260,6 +1274,7 @@ void runSmartLiveFlow() {
             //   ① 遮罩自身窗口矩形(GetWindowRect)必须等于该屏的显示器矩形;
             //   ② 我们算出来的 screenPhysical 必须与它一致。
             // 两者任一不符,候选就会整体偏移 —— 表现是"框住的是隔壁屏那块"。
+#if defined(Q_OS_WIN)
             for (OverlayWidget* ov : overlays) {
                 QScreen* sc = ov->screen();
                 const HMONITOR mon = ::MonitorFromWindow(
@@ -1296,6 +1311,12 @@ void runSmartLiveFlow() {
                           .arg(win32Monitor.x()).arg(win32Monitor.y()));
                 Q_UNUSED(qtOriginBased);
             }
+#else
+            // Linux(M0b):Win32 虚拟桌面真值比对无对应物;Qt/屏幕的几何一致性
+            // 由 M2 的 capture.rs match_monitor 配对验收另行覆盖。
+            qInfo() << "SMART-LIVE  多屏几何三方一致性:非平台部分,跳过";
+            Q_UNUSED(overlays);
+#endif
 
             // ---- 多屏:鼠标离开某屏后,该屏的候选框必须消失 ----
             //

@@ -10,7 +10,9 @@
 #include <QPainter>
 #include <QTimer>
 
+#if defined(Q_OS_WIN)
 #include <windows.h>
+#endif
 
 namespace nb {
 namespace {

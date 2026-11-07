@@ -4,6 +4,9 @@
 //! **零行为变更**(纯搬迁)。
 
 use crate::error::AppResult;
+// 非 Windows 降级分支构造 AppError::Internal 用(Windows 分支走 mod platform 内部)
+#[cfg(not(windows))]
+use crate::error::AppError;
 
 use super::{LanguageChoice, Preprocess};
 
@@ -71,7 +74,7 @@ pub fn recognize_with_lines(
     #[cfg(not(windows))]
     {
         let _ = (rgba, width, height, language, preprocess);
-        Err(AppError::Internal("当前平台不支持 OCR".into()))
+        Err(AppError::Internal("当前平台不支持系统内置 OCR".into()))
     }
 }
 

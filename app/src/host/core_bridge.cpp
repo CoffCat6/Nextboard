@@ -11,7 +11,11 @@
 #include <QJsonDocument>
 #include <QScreen>
 
+#if defined(Q_OS_WIN)
 #include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 
 namespace nb {
 namespace {
@@ -43,14 +47,32 @@ CoreBridge& CoreBridge::instance() {
 
 bool CoreBridge::init(bool /*startHidden*/, QString* error) {
     qInfo() << "bridge: loading nbcore.dll";
+#if defined(Q_OS_WIN)
     m_dll = ::LoadLibraryW(L"nbcore.dll");
     if (!m_dll) {
         if (error) *error = QStringLiteral("加载 nbcore.dll 失败 (GetLastError=%1)").arg(::GetLastError());
         return false;
     }
+#else
+    // 非 Windows(M0b):与 Windows 同构的**显式加载**决策不变(dlopen + dlsym)。
+    // 依赖查找顺序:可执行文件同目录(RPATH $ORIGIN 由 CMake 部署目标保证)。
+    m_dll = ::dlopen("libnbcore.so", RTLD_NOW | RTLD_LOCAL);
+    if (!m_dll) {
+        const char* dler = ::dlerror();
+        if (error) {
+            *error = QStringLiteral("加载 libnbcore.so 失败: %1")
+                         .arg(dler ? QString::fromLocal8Bit(dler) : QStringLiteral("未知原因"));
+        }
+        return false;
+    }
+#endif
     qInfo() << "bridge: resolving exports";
-    auto resolve = [this](const char* name) {
+    auto resolve = [this](const char* name) -> QFunctionPointer {
+#if defined(Q_OS_WIN)
         return reinterpret_cast<QFunctionPointer>(::GetProcAddress(m_dll, name));
+#else
+        return reinterpret_cast<QFunctionPointer>(::dlsym(m_dll, name));
+#endif
     };
     m_init = reinterpret_cast<NbInit>(resolve("nb_init"));
     m_callFn = reinterpret_cast<NbCallFn>(resolve("nb_call"));
@@ -190,10 +212,23 @@ void CoreBridge::setNotifyHwnd(HWND hwnd) {
     if (!m_callFn) return;
     // 走 save_settings? 不 —— 通知 HWND 是运行期参数,用专门导出最干净;
     // v1 借道 settings 通道太重,直接加一个 nb_set_notify_hwnd 导出。
-    auto fn = reinterpret_cast<void(__cdecl*)(unsigned long long)>(
+    auto fn = reinterpret_cast<void(NBCALL*)(unsigned long long)>(
+#if defined(Q_OS_WIN)
         ::GetProcAddress(m_dll, "nb_set_notify_hwnd"));
+#else
+        ::dlsym(m_dll, "nb_set_notify_hwnd"));
+#endif
     if (fn) fn(reinterpret_cast<unsigned long long>(hwnd));
 }
+
+#if !defined(Q_OS_WIN)
+void CoreBridge::setNotifyFd(int fd) {
+    if (!m_callFn) return;
+    // Linux(M1/R3):与 setNotifyHwnd 同构的运行期登记(专门导出,不走 settings)。
+    auto fn = reinterpret_cast<void(NBCALL*)(int)>(::dlsym(m_dll, "nb_set_notify_fd"));
+    if (fn) fn(fd);
+}
+#endif
 
 QString CoreBridge::blobsDirAbs() {
     // 生效目录:自定义数据目录启用后,默认目录下没有 blobs

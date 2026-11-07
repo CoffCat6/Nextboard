@@ -1,10 +1,10 @@
-// 全局热键:RegisterHotKey 管理(多动作 → 多组合键,冲突回滚沿用第一代语义)。
+// 全局热键:Windows = RegisterHotKey 管理(多动作 → 多组合键,冲突回滚沿用第一代
+// 语义);Linux(M0b)= 桩 —— 注册走"失败项"通道给可读提示(X11 XGrabKey / portal
+// 在 M3 接入,docs/29 §5.2)。接口保持平台无关(不引平台头)。
 #pragma once
 
 #include <QObject>
 #include <QStringList>
-
-#include <windows.h>
 
 #include <QMap>
 
@@ -48,7 +48,8 @@ private:
 
 private:
     void registerAction(Action action, const QString& combo);
-    static bool parseCombo(const QString& combo, UINT* modifiers, UINT* vk);
+    // unsigned(= Win32 UINT,ABI 一致):接口层不引 windows.h 的做法
+    static bool parseCombo(const QString& combo, unsigned* modifiers, unsigned* vk);
 
     PanelWindow& m_panel;
     CoreBridge& m_core;

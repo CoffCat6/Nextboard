@@ -43,7 +43,8 @@
 
 #include <algorithm>
 
-#include <windows.h>
+// (M0b)windows.h 此前为残留 include:经查全文无 Win32 调用(历史断言已删),
+// 直接移除 —— Linux 侧无需任何替代。
 #include <QMouseEvent>
 #include <QScreen>
 #include <QThreadPool>

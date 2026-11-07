@@ -3,23 +3,38 @@
 #include <QDebug>
 #include <QDir>
 
+#if defined(Q_OS_WIN)
 #include <windows.h>
 
 #include "host/core_bridge.hpp"   // nb::WM_APP_ACTIVATE
+#else
+// Linux(M0b):门禁 = QLockFile(数据目录内,按 PID 判陈旧锁);
+// 唤起通道 = QLocalServer/QLocalSocket(socket 名 = 数据目录 FNV-1a 摘要)。
+// 语义与 Windows 版一一对应:不同数据目录互不阻挡;二次启动定点唤起。
+#include <QLocalServer>
+#include <QLocalSocket>
+#include <QLockFile>
+#endif
 
 namespace {
 
+#if defined(Q_OS_WIN)
 /// 共享节名:存放"已有实例的主面板 HWND"(见 activateExisting)。
 constexpr wchar_t kShmName[] = L"NextboardSingleInstanceHwnd";
+#endif
 
-/// 数据目录 → 互斥量名后缀(FNV-1a 32 位,8 位十六进制)。
+/// 数据目录 → 门禁/通道名后缀(FNV-1a 32 位,8 位十六进制)。
 ///
-/// 用例是"不同数据目录必须拿到不同互斥量",不是密码学 —— FNV-1a 足够且没有依赖。
+/// 用例是"不同数据目录必须拿到不同门禁",不是密码学 —— FNV-1a 足够且没有依赖。
 /// 先做路径规范化(小写 + 本地分隔符),否则 "D:/a/b" 与 "D:\a\b" 会算出两个名字,
 /// 而它们是同一个目录。
 QString dirHash(const QString& dir) {
-    const QString norm = QDir::cleanPath(dir).toLower().replace(QLatin1Char('/'),
-                                                              QLatin1Char('\\'));
+#if defined(Q_OS_WIN)
+    const QChar nativeSep = QLatin1Char('\\');
+#else
+    const QChar nativeSep = QLatin1Char('/');
+#endif
+    const QString norm = QDir::cleanPath(dir).toLower().replace(QLatin1Char('/'), nativeSep);
     quint32 h = 2166136261u;
     for (const QChar ch : norm) {
         h ^= static_cast<quint32>(ch.unicode());
@@ -28,21 +43,31 @@ QString dirHash(const QString& dir) {
     return QStringLiteral("%1").arg(h, 8, 16, QLatin1Char('0'));
 }
 
+#if !defined(Q_OS_WIN)
+/// ensure() 时写入的门禁键(publishWindow/activateExisting 复用);
+/// 进程级生命周期,static 存放与 Windows 版"句柄活到进程结束"的口径一致。
+QString g_instanceChannel;
+#endif
+
 }  // namespace
 
-// 唤起消息的接收方是 **PanelWindow::nativeEvent**(2026-11-03 接通)。
-// 此前这里有一个 ActivateFilter,但全仓从未实例化它 —— 消息广播出去无人认领,
-// 二次启动静默 return 0,用户看到的是"点了图标没反应"。改为在 PanelWindow 里
-// 直接认领:少一个对象、少一处生命周期配对(本模块此前已因生命周期问题崩过)。
+// 唤起的接收方:Windows = **PanelWindow::nativeEvent**(WM_APP_ACTIVATE 分支);
+// Linux = SingleInstance::activateRequested() 信号 → main.cpp → showAtCursor。
 
 SingleInstance::SingleInstance(QObject* parent) : QObject(parent) {}
 
 SingleInstance::~SingleInstance() {
+#if defined(Q_OS_WIN)
     if (m_mutex) ::ReleaseMutex(static_cast<HANDLE>(m_mutex));
     if (m_mutex) ::CloseHandle(static_cast<HANDLE>(m_mutex));
+#else
+    // QLockFile 析构即解锁;实例随进程退出,残锁由 PID 校验自动视为陈旧。
+    delete static_cast<QLockFile*>(m_mutex);
+#endif
 }
 
 bool SingleInstance::ensure(const QString& key, unsigned long* lastError) {
+#if defined(Q_OS_WIN)
     // ⚠️ 互斥量名必须**按数据目录**区分(2026-11-03,外部审查 #15)。
     // 原实现 `Q_UNUSED(key)` + 硬编码名字:"同一数据目录只允许一个实例"这个语义
     // 从来没实现过 —— 两个用**不同** --data-dir 的合法实例(验收 vs 用户实例,
@@ -59,9 +84,29 @@ bool SingleInstance::ensure(const QString& key, unsigned long* lastError) {
     const DWORD gle = ::GetLastError();
     if (lastError) *lastError = gle;
     return m_mutex && gle != ERROR_ALREADY_EXISTS;
+#else
+    // Linux(M0b):锁文件放数据目录内(key 即数据目录),目录可能尚未创建。
+    // staleLockTime(0) = 永不按时间判陈旧 —— 只信 PID 校验(QLockFile 在 Unix
+    // 侧把 PID+主机名写进锁文件,崩溃残留锁会被可靠识别),避免"慢启动 30s 内
+    // 被误判陈旧"的双开窗口。
+    QDir().mkpath(key);
+    auto* lock =
+        new QLockFile(key + QStringLiteral("/nextboard-single-instance.lock"));
+    lock->setStaleLockTime(0);
+    if (!lock->tryLock(0)) {
+        if (lastError) *lastError = 1;
+        delete lock;
+        return false;
+    }
+    m_mutex = lock;
+    g_instanceChannel = QStringLiteral("nextboard-si-%1").arg(dirHash(key));
+    if (lastError) *lastError = 0;
+    return true;
+#endif
 }
 
 void SingleInstance::publishWindow(void* rawHwnd) {
+#if defined(Q_OS_WIN)
     const HWND hwnd = static_cast<HWND>(rawHwnd);
     if (!hwnd) return;
     // 把本实例的主面板 HWND 写进命名共享节,供"被拒绝的第二个实例"定点投递。
@@ -85,9 +130,29 @@ void SingleInstance::publishWindow(void* rawHwnd) {
     // 由内核回收)。
     static const HANDLE kKept = mapping;
     Q_UNUSED(kKept);
+#else
+    Q_UNUSED(rawHwnd);
+    // Linux(M0b):QLocalServer 承担唤起通道。先清残留 socket 文件
+    // (崩溃后的 unix domain socket 会残留,不清则 listen 失败)。
+    QLocalServer::removeServer(g_instanceChannel);
+    auto* server = new QLocalServer(this);
+    if (!server->listen(g_instanceChannel)) {
+        qWarning() << "single-instance: QLocalServer 监听失败,二次启动唤起不可用:"
+                   << server->errorString();
+        return;
+    }
+    connect(server, &QLocalServer::newConnection, this, [this, server] {
+        while (QLocalSocket* conn = server->nextPendingConnection()) {
+            conn->readAll();  // 唤起信号不带 payload(与 WM_APP 消息同哲学)
+            conn->disconnectFromServer();
+            emit activateRequested();
+        }
+    });
+#endif
 }
 
 void SingleInstance::activateExisting() {
+#if defined(Q_OS_WIN)
     // 唤起已有实例:优先**定点投递**。
     //
     // ⚠️ 不要用 PostMessageW(HWND_BROADCAST, …)(2026-11-03 实测):
@@ -113,4 +178,17 @@ void SingleInstance::activateExisting() {
     // 兜底:共享节不存在(旧实例尚未发布 / 旧版本实例)或窗口已失效 ——
     // 仍然广播一次,不退化成"什么都不做"。
     ::PostMessageW(HWND_BROADCAST, nb::WM_APP_ACTIVATE, 0, 0);
+#else
+    // Linux(M0b):连已有实例的唤起通道;连不上 = 实例未发布通道(旧版本)
+    // 或恰好退出,与 Windows 广播兜底同样"不退化成崩溃"。
+    QLocalSocket socket;
+    socket.connectToServer(g_instanceChannel);
+    if (socket.waitForConnected(300)) {
+        socket.write("a");
+        socket.waitForBytesWritten(300);
+        socket.disconnectFromServer();
+        return;
+    }
+    qInfo() << "single-instance: 未发现可唤起的实例通道,直接退出";
+#endif
 }

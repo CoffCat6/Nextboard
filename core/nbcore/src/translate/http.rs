@@ -189,15 +189,19 @@ fn parse_url(url: &str) -> AppResult<Url> {
 }
 
 /// 会话缓存的句柄容器（不持有所有权、不 Drop 关闭 —— 进程级复用）。
+#[cfg(windows)]
 struct CachedSession(*mut core::ffi::c_void);
 
 // SAFETY: WinHTTP 会话句柄本身可跨线程并发使用（WinHTTP 官方线程安全声明），
 // 容器访问时序另由 Mutex 串行化。
+#[cfg(windows)]
 unsafe impl Send for CachedSession {}
 
 /// WinHTTP 句柄的 RAII 包装：非空即有效，`Drop` 时关闭。
+#[cfg(windows)]
 struct WinHttpHandle(*mut core::ffi::c_void);
 
+#[cfg(windows)]
 impl WinHttpHandle {
     /// 包住一个 API 返回的句柄；为 NULL 时返回携带 `GetLastError` 的错误。
     fn new(raw: *mut core::ffi::c_void, context: &str) -> AppResult<Self> {
@@ -213,6 +217,7 @@ impl WinHttpHandle {
     }
 }
 
+#[cfg(windows)]
 impl Drop for WinHttpHandle {
     fn drop(&mut self) {
         if self.0.is_null() {
@@ -227,12 +232,14 @@ impl Drop for WinHttpHandle {
 }
 
 /// 把 Win32 线程错误码转成可读的 `AppError`（不含请求内容，避免泄露密钥/原文）。
+#[cfg(windows)]
 fn last_error(context: &str) -> AppError {
     let err = windows::core::Error::from_thread();
     AppError::Translate(format!("{context}失败：{err}"))
 }
 
 /// 转为以 NUL 结尾的宽字符串（WinHTTP 的 `PCWSTR` 参数要求）。
+#[cfg(windows)]
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -242,16 +249,144 @@ fn wide(value: &str) -> Vec<u16> {
 /// 失败情形统一映射为 `AppError::Translate`（含可读原因），由命令层转给前端提示。
 pub fn send(req: &HttpRequest) -> AppResult<HttpResponse> {
     // SOCKS5 由 ureq 传输承担（WinHTTP 实测不支持，docs/phase8-proxy.md §2.1）；
-    // 其余（直连 / 系统代理 / HTTP 代理）走既有 WinHTTP 路径。
+    // 其余（直连 / 系统代理 / HTTP 代理）Windows 走 WinHTTP,非 Windows 走
+    // `ureq_http`(M1,R2:与 SOCKS5 同为 ureq,行为口径对齐,docs/29 §4.1)。
     match req.proxy.as_ref() {
         Some(ProxyConfig::Manual { endpoint, .. }) if endpoint.kind == ProxyKind::Socks5 => {
             socks::send(req, endpoint)
         }
-        _ => winhttp::send(req),
+        _ => {
+            #[cfg(windows)]
+            return winhttp::send(req);
+            #[cfg(not(windows))]
+            ureq_http::send(req)
+        }
+    }
+}
+
+/// 非 Windows(M1/R2)传输:直连 / HTTP 代理 / 系统代理,ureq 3.x 阻塞 API。
+///
+/// 与 WinHTTP 路径的行为口径(docs/29 §5.4 B5):
+///   * 直连 = `ProxyConfig::None`,忽略一切环境代理;
+///   * 手动 HTTP 代理 = `http://[user:pass@]host:port`(CONNECT 隧道);
+///   * **系统代理** = 环境变量 `http_proxy` / `https_proxy` / `all_proxy`
+///     (小写优先),未设置即直连 —— Linux 桌面没有 WinHTTP 式的系统代理发现;
+///   * 手动配置的 bypass 列表 v1 忽略(ureq 无逐目标 bypass;后续按需自实现)。
+#[cfg(not(windows))]
+mod ureq_http {
+    use std::time::Duration;
+
+    use super::{HttpMethod, HttpRequest, HttpResponse, ProxyConfig, ProxyKind, MAX_RESPONSE_BYTES};
+    use crate::error::{AppError, AppResult};
+    use super::socks::map_ureq_error;
+
+    /// 组装 HTTP 代理串:`http://[user:pass@]host:port`(不打印,含凭据)。
+    fn build_http_proxy_uri(
+        host: &str,
+        port: u16,
+        auth: Option<&super::ProxyAuth>,
+    ) -> String {
+        let credentials = auth
+            .as_ref()
+            .map(|super::ProxyAuth { username, password }| format!("{username}:{password}@"))
+            .unwrap_or_default();
+        format!("http://{credentials}{host}:{port}")
+    }
+
+    /// 系统代理(环境变量)发现:小写优先,顺序 http_proxy → https_proxy → all_proxy。
+    /// 只接受 `http://` 形态;socks 环境变量交给 SOCKS5 手动配置场景,这里不吞。
+    fn proxy_from_env() -> Option<ureq::Proxy> {
+        for key in ["http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
+            if let Ok(v) = std::env::var(key) {
+                let v = v.trim();
+                if v.starts_with("http://") || v.starts_with("https://") {
+                    if let Ok(p) = ureq::Proxy::new(v) {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    pub(super) fn send(req: &HttpRequest) -> AppResult<HttpResponse> {
+        let proxy = match req.proxy.as_ref() {
+            Some(ProxyConfig::Manual { endpoint, .. }) if endpoint.kind == ProxyKind::Http => {
+                Some(ureq::Proxy::new(&build_http_proxy_uri(
+                    &endpoint.host,
+                    endpoint.port,
+                    endpoint.auth.as_ref(),
+                )).map_err(|_| AppError::Translate("代理配置无效".into()))?)
+            }
+            // Socks5 在 send() 已分流,不会到这里;防御性直连
+            Some(ProxyConfig::Manual { .. }) => None,
+            Some(ProxyConfig::None) => None,
+            Some(ProxyConfig::System) | None => proxy_from_env(),
+        };
+        let agent = ureq::Agent::config_builder()
+            .proxy(proxy)
+            // 与 WinHTTP 语义对齐:4xx/5xx 是**正常响应**(provider 要读错误 body
+            // 做用户文案映射,如 openai 的鉴权错误)—— ureq 默认转 Err 会丢 body。
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(
+                req.timeout_secs.clamp(5, 120) as u64
+            )))
+            .build()
+            .new_agent();
+
+        // ureq 3.x typestate:GET 与 POST 构建器不同,分支内各自完成发送(与 socks.rs 同构)
+        let response = match req.method {
+            HttpMethod::Get => {
+                let mut request = agent.get(&req.url);
+                for (name, value) in &req.headers {
+                    request = request.header(name, value);
+                }
+                request.call()
+            }
+            HttpMethod::Post => {
+                let mut request = agent.post(&req.url);
+                for (name, value) in &req.headers {
+                    request = request.header(name, value);
+                }
+                if req.body.is_empty() {
+                    request.send(Vec::new())
+                } else {
+                    request.send(req.body.as_bytes())
+                }
+            }
+        }
+        .map_err(map_ureq_error)?;
+
+        let status = response.status().as_u16();
+        // 增量读 + 上限 + UTF-8 校验:与 socks.rs / WinHTTP 三条路径行为一致
+        let mut body = String::new();
+        {
+            use std::io::Read;
+            let mut reader = response.into_body().into_reader();
+            let mut buf = [0u8; 64 * 1024];
+            loop {
+                let n = reader
+                    .read(&mut buf)
+                    .map_err(|err| AppError::Translate(format!("读取响应内容失败：{err}")))?;
+                if n == 0 {
+                    break;
+                }
+                if body.len() + n > MAX_RESPONSE_BYTES {
+                    return Err(AppError::Translate(
+                        "响应内容过大，已中止（接口可能返回了非预期内容）".into(),
+                    ));
+                }
+                let piece = std::str::from_utf8(&buf[..n])
+                    .map_err(|_| AppError::Translate("响应内容不是合法 UTF-8".into()))?;
+                body.push_str(piece);
+            }
+        }
+        Ok(HttpResponse { status, body })
     }
 }
 
 /// WinHTTP 实现：直连 / 系统代理 / HTTP 代理（含认证与绕过列表）。
+#[cfg(windows)]
 mod winhttp {
     use windows::core::PCWSTR;
     use windows::Win32::Networking::WinHttp::{
@@ -548,6 +683,8 @@ mod winhttp {
     }
 }
 
+// 传输层用例:Windows 钉 WinHTTP 行为,非 Windows 钉 ureq_http(M1/R2)——
+// 同一组用例双平台各自验证本平台传输(环回服务器,语义一致)。
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -704,9 +841,16 @@ mod tests {
         let err =
             send(&loopback_request(port, HttpMethod::Post, "{}")).expect_err("无服务端时应报错");
         let message = err.to_string();
-        // 连接阶段的失败应带 WinHTTP 错误码，且**不得**被误报成 HTTP 状态类问题
-        // （状态码文案由 provider 层的 status_error 产生，send 只回报状态码）
+        // 连接阶段的失败应是**可读的网络层错误**，且**不得**被误报成 HTTP 状态类问题
+        // （状态码文案由 provider 层的 status_error 产生，send 只回报状态码）。
+        // Windows = WinHTTP 错误码(0x...)；非 Windows = ureq 的 io 文案(os error)。
+        #[cfg(windows)]
         assert!(message.contains("0x"), "应带 WinHTTP 错误码: {message}");
+        #[cfg(not(windows))]
+        assert!(
+            message.contains("refused") || message.contains("拒绝"),
+            "应带连接层错误文案: {message}"
+        );
         assert!(
             !message.contains("鉴权失败") && !message.contains("服务端错误"),
             "连接失败不应被误判为状态类错误: {message}"
@@ -748,10 +892,18 @@ mod tests {
             response.body, r#"{"via":"proxy"}"#,
             "响应应来自伪造代理，而非目标服务器"
         );
-        // 代理收到的是绝对形式请求行（HTTP 代理的约定形式）
+        // 代理看到的目标请求:Windows/WinHTTP = 正向转发**绝对形式**请求行;
+        // 非 Windows/ureq = CONNECT 隧道内的**原始形式**请求行(test_server 已支持
+        // 双形态)。两者同时证明"流量确实经过了配置的代理"。
+        #[cfg(windows)]
         assert!(
             seen_request_line.starts_with("POST http://proxy-test.invalid/v1/chat/completions"),
             "代理应看到绝对形式请求行: {seen_request_line}"
+        );
+        #[cfg(not(windows))]
+        assert!(
+            seen_request_line.starts_with("POST /v1/chat/completions"),
+            "隧道内应看到目标请求行: {seen_request_line}"
         );
     }
 

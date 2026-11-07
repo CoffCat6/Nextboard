@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use blake3::Hasher;
+#[cfg(windows)]
 use clipboard_win::formats;
 use log::{debug, error, info, warn};
 
@@ -134,15 +135,84 @@ fn monitor_thread() {
     }
 }
 
+// WM_CLIPBOARDUPDATE 处理的**入库尾部**:两条平台的监听通道共用
+// (Windows = 事件驱动;Linux = 轮询)。process 内部自带 blake3 去重,
+// 重复内容到这里会被静默拒绝,不会重复入库。
+fn ingest_clipboard_item(core: &Core, settings: &Settings, item: ClipItem, owner: Option<String>) {
+    let hash = item.hash();
+    match process(core, item, &hash, &settings, owner.as_deref()) {
+        Ok(_) => notify_host(WM_APP_CLIP_CHANGED),
+        Err(err) => warn!("剪贴板内容入库失败: {err}"),
+    }
+}
+
 #[cfg(not(windows))]
 fn monitor_thread() {
-    info!("剪贴板事件监听仅支持 Windows,线程空转");
-    loop {
-        if !crate::core::ready_flag() {
+    // Linux(M1/R1)监听 = **轮询通道**(docs/29 §12.1:事件优先、轮询兜底 ——
+    // XFixes 事件通道在 WSLg/XWayland 实测零事件,随 M3 与真机复测一起接入)。
+    // 设计要点:
+    //   * Clipboard **单例驻线程**(arboard X11 后端每次 new 会起服务线程,
+    //     每 300ms 重建 = 线程抖动,必须复用);
+    //   * 内容防抖用 blake3 哈希(与入库同口径),轮询没有 Windows 的序列号;
+    //   * 入库管线(process)与 Windows 逐行同构:过滤 → 去重 → 落盘 → 淘汰。
+    // ⚠️ Clipboard **单例驻线程**(arboard X11 后端每次 new 会起服务线程,
+    // 每 300ms 重建 = 线程抖动,必须复用);初始化失败是可读 error(立即刷盘)。
+    let mut cb = match arboard::Clipboard::new() {
+        Ok(c) => c,
+        Err(err) => {
+            error!("剪贴板监听初始化失败(arboard): {err}");
             return;
         }
-        std::thread::sleep(std::time::Duration::from_millis(500));
+    };
+    info!("剪贴板监听:轮询通道(arboard,300ms)");
+    let mut last_hash: Option<String> = None;
+    while !crate::core::SHUTDOWN.load(std::sync::atomic::Ordering::SeqCst) {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        if crate::core::SHUTDOWN.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        handle_clipboard_poll(&mut cb, &mut last_hash);
     }
+}
+
+/// 轮询单次消费:就绪/开关检查 → 读(arboard)→ 内容防抖 → 入库。
+#[cfg(not(windows))]
+fn handle_clipboard_poll(cb: &mut arboard::Clipboard, last_hash: &mut Option<String>) {
+    let Some(core) = try_core() else {
+        return;
+    };
+    let Ok(settings) = core.settings() else {
+        return;
+    };
+    if !settings.monitor_enabled {
+        return;
+    }
+    // 读:文本 → 位图(文件通道 text/uri-list 随二期接入)
+    let item = if let Ok(text) = cb.get_text() {
+        if !text.trim().is_empty() {
+            Some(ClipItem::Text(text))
+        } else {
+            None
+        }
+    } else if let Ok(img) = cb.get_image() {
+        Some(ClipItem::Image {
+            rgba: img.bytes.into_owned(),
+            width: img.width as u32,
+            height: img.height as u32,
+        })
+    } else {
+        None
+    };
+    let Some(item) = item else {
+        return;
+    };
+    let hash = item.hash();
+    if last_hash.as_deref() == Some(hash.as_str()) {
+        return;
+    }
+    *last_hash = Some(hash);
+    // 来源应用(docs/25):M2 接入(X11 _NET_WM_PID;Wayland 降级为空)
+    ingest_clipboard_item(core, &settings, item, None);
 }
 
 /// 当前剪贴板属主的应用 exe 文件名(小写,如 "chrome.exe");失败返回 None。
@@ -185,6 +255,7 @@ fn clipboard_owner_app() -> Option<String> {
 
 /// 完整路径 → 应用文件名(小写)。独立纯函数便于单测(属主采集本身依赖
 /// 真实剪贴板状态,无法在单测里模拟)。
+#[cfg(windows)]
 fn owner_app_name(full: &str) -> Option<String> {
     let name = full.rsplit(['\\', '/']).next()?.to_lowercase();
     if name.is_empty() { None } else { Some(name) }
@@ -219,11 +290,7 @@ fn handle_clipboard_update() {
     };
     // 属主在读取内容前采集(文档 docs/25 §2.1):广播到达即查,不依赖内容类型
     let owner = clipboard_owner_app();
-    let hash = item.hash();
-    match process(core, item, &hash, &settings, owner.as_deref()) {
-        Ok(_) => notify_host(WM_APP_CLIP_CHANGED),
-        Err(err) => warn!("剪贴板内容入库失败: {err}"),
-    }
+    ingest_clipboard_item(core, &settings, item, owner);
 }
 
 /// 一次剪贴板读取到的内容。
@@ -278,23 +345,47 @@ impl ClipItem {
 /// 文本/图片经 clipboard-win 直读(取代第一代的 tauri clipboard 插件——它只是
 /// arboard 的包装,而 clipboard-win 本就是直连 Win32 的既有依赖,减少一层)。
 pub fn read_current() -> Option<ClipItem> {
-    // 所有读取共用一次打开(带重试);clipboard-win 的 get_clipboard 内部自管打开/关闭
-    if let Ok(text) = clipboard_win::get_clipboard::<String, _>(formats::Unicode) {
-        if !text.trim().is_empty() {
-            return Some(ClipItem::Text(text));
+    // 所有读取共用一次打开(带重试);clipboard-win 的 get_clipboard 内部自管打开/关闭。
+    #[cfg(windows)]
+    {
+        if let Ok(text) = clipboard_win::get_clipboard::<String, _>(formats::Unicode) {
+            if !text.trim().is_empty() {
+                return Some(ClipItem::Text(text));
+            }
         }
-    }
-    if let Ok(paths) = clipboard_win::get_clipboard::<Vec<String>, _>(formats::FileList) {
-        let paths: Vec<String> = paths.into_iter().filter(|p| !p.is_empty()).collect();
-        if !paths.is_empty() {
-            return Some(ClipItem::File(paths));
+        if let Ok(paths) = clipboard_win::get_clipboard::<Vec<String>, _>(formats::FileList) {
+            let paths: Vec<String> = paths.into_iter().filter(|p| !p.is_empty()).collect();
+            if !paths.is_empty() {
+                return Some(ClipItem::File(paths));
+            }
         }
+        return read_image_from_clipboard().map(|(rgba, w, h)| ClipItem::Image {
+            rgba,
+            width: w,
+            height: h,
+        });
     }
-    read_image_from_clipboard().map(|(rgba, w, h)| ClipItem::Image {
-        rgba,
-        width: w,
-        height: h,
-    })
+    // Linux(M1/R1):arboard 直读 —— 文本 → 位图;文件(text/uri-list)arboard
+    // 无通道,文件条目在 Linux 暂不入库(二期接自定义格式)。
+    #[cfg(not(windows))]
+    {
+        let Ok(mut cb) = arboard::Clipboard::new() else {
+            return None;
+        };
+        if let Ok(text) = cb.get_text() {
+            if !text.trim().is_empty() {
+                return Some(ClipItem::Text(text));
+            }
+        }
+        if let Ok(img) = cb.get_image() {
+            return Some(ClipItem::Image {
+                rgba: img.bytes.into_owned(),
+                width: img.width as u32,
+                height: img.height as u32,
+            });
+        }
+        None
+    }
 }
 
 /// 读取 CF_DIB / CF_DIBV5 位图并解码为 RGBA(clipboard-win 无图片格式的高层封装,
@@ -322,11 +413,6 @@ fn read_image_from_clipboard() -> Option<(Vec<u8>, u32, u32)> {
             return Some((rgba, w, h));
         }
     }
-    None
-}
-
-#[cfg(not(windows))]
-fn read_image_from_clipboard() -> Option<(Vec<u8>, u32, u32)> {
     None
 }
 
@@ -933,6 +1019,7 @@ pub fn encode_png_with(rgba: &[u8], width: u32, height: u32, fast: bool) -> AppR
 /// `SetClipboardData` 序列在第一代实测稳定复现 os error 1418(写入中途剪贴板
 /// 打开状态丢失,微信等会碰剪贴板的程序易触发)。这里改为与文本写入同构的
 /// open(带重试)→ 单次 `SetClipboardData`;其余格式由系统为粘贴方自动合成。
+#[cfg(windows)]
 pub fn write_rgba_to_clipboard(rgba: &[u8], width: u32, height: u32) -> AppResult<()> {
     // checked 乘法,与 encode_png_with(:851-854)同口径:未检查的乘法在 debug 构建下
     // 会 panic(→ 若发生在 wndproc 线程即 abort),release 下静默回绕成错误的 expected。
@@ -954,6 +1041,32 @@ pub fn write_rgba_to_clipboard(rgba: &[u8], width: u32, height: u32) -> AppResul
     Ok(())
 }
 
+/// 非 Windows(M1/R1):arboard 直写位图(X11 → image/png target;Wayland →
+/// data-control)。尺寸校验与 Windows 分支同口径。
+#[cfg(not(windows))]
+pub fn write_rgba_to_clipboard(rgba: &[u8], width: u32, height: u32) -> AppResult<()> {
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or_else(|| {
+            crate::error::AppError::InvalidInput(format!("尺寸过大:{width}x{height}"))
+        })?;
+    if rgba.len() != expected {
+        return Err(crate::error::AppError::InvalidInput(format!(
+            "RGBA 长度 {} 与尺寸 {width}x{height} 不匹配",
+            rgba.len()
+        )));
+    }
+    let mut cb = arboard::Clipboard::new().map_err(clip_err)?;
+    cb.set_image(arboard::ImageData {
+        width: width as usize,
+        height: height as usize,
+        bytes: std::borrow::Cow::Borrowed(rgba),
+    })
+    .map_err(clip_err)?;
+    Ok(())
+}
+
 /// 把 PNG 字节写入系统剪贴板:解码一次后转交 [`write_rgba_to_clipboard`]。
 /// 已有 RGBA 的调用方(截图会话)应直接用 `write_rgba_to_clipboard`。
 pub fn write_png_to_clipboard(png: &[u8]) -> AppResult<()> {
@@ -962,24 +1075,66 @@ pub fn write_png_to_clipboard(png: &[u8]) -> AppResult<()> {
     write_rgba_to_clipboard(&img.to_rgba8().into_raw(), width, height)
 }
 
+/// 非 Windows(M1/R1)错误映射:arboard 错误 → AppError(文案可读,不回显内容)。
+#[cfg(not(windows))]
+fn clip_err(e: arboard::Error) -> crate::error::AppError {
+    crate::error::AppError::ClipboardWin(e.to_string())
+}
+
 /// 读取当前系统剪贴板中的图片(RGBA),供宿主"复制图片条目"使用。
 pub fn read_image_to_rgba() -> AppResult<Option<(Vec<u8>, u32, u32)>> {
-    Ok(read_image_from_clipboard())
+    #[cfg(windows)]
+    return Ok(read_image_from_clipboard());
+    #[cfg(not(windows))]
+    {
+        let mut cb = arboard::Clipboard::new().map_err(clip_err)?;
+        match cb.get_image() {
+            Ok(img) => Ok(Some((
+                img.bytes.into_owned(),
+                img.width as u32,
+                img.height as u32,
+            ))),
+            Err(arboard::Error::ContentNotAvailable) => Ok(None),
+            Err(e) => Err(clip_err(e)),
+        }
+    }
 }
 
 /// 把文本写入系统剪贴板(带打开重试)。
+#[cfg(windows)]
 pub fn write_text_to_clipboard(text: &str) -> AppResult<()> {
     let _clip = clipboard_win::Clipboard::new_attempts(10)?;
     clipboard_win::set(formats::Unicode, text)?;
     Ok(())
 }
 
+/// 非 Windows(M1/R1):arboard 直写文本。
+#[cfg(not(windows))]
+pub fn write_text_to_clipboard(text: &str) -> AppResult<()> {
+    let mut cb = arboard::Clipboard::new().map_err(clip_err)?;
+    cb.set_text(text).map_err(clip_err)?;
+    Ok(())
+}
+
 /// 读取系统剪贴板文本(带打开重试);非文本/空返回 Ok(None)。
+#[cfg(windows)]
 pub fn read_text_from_clipboard() -> AppResult<Option<String>> {
     match clipboard_win::get_clipboard::<String, _>(formats::Unicode) {
         Ok(text) if !text.is_empty() => Ok(Some(text)),
         Ok(_) => Ok(None),
         Err(err) => Err(err.into()),
+    }
+}
+
+/// 非 Windows(M1/R1):arboard 直读文本;空/非文本返回 Ok(None)。
+#[cfg(not(windows))]
+pub fn read_text_from_clipboard() -> AppResult<Option<String>> {
+    let mut cb = arboard::Clipboard::new().map_err(clip_err)?;
+    match cb.get_text() {
+        Ok(t) if !t.is_empty() => Ok(Some(t)),
+        Ok(_) => Ok(None),
+        Err(arboard::Error::ContentNotAvailable) => Ok(None),
+        Err(e) => Err(clip_err(e)),
     }
 }
 
@@ -989,6 +1144,7 @@ pub fn read_text_from_clipboard() -> AppResult<Option<String>> {
 /// set_file_list 自身不清剪贴板(NoClear),写入前必须 raw::empty(),
 /// 否则旧 CF_UNICODETEXT(如路径文本)残留,粘贴目标按优先级取到文本,
 /// 表现为"复制文件,粘出来的是路径"。文本/图片走的高层 set 是 DoClear,无此问题。
+#[cfg(windows)]
 pub fn write_files_to_clipboard(paths: &[String]) -> AppResult<()> {
     let _clip = clipboard_win::Clipboard::new_attempts(10)?;
     clipboard_win::raw::empty()?;
@@ -996,7 +1152,18 @@ pub fn write_files_to_clipboard(paths: &[String]) -> AppResult<()> {
     Ok(())
 }
 
+/// 非 Windows:文件条目暂为桩 —— Linux 的"复制文件"走 text/uri-list 自定义
+/// 格式,arboard 无该通道;文件条目在 Linux 暂不入库/不可写(二期接自定义格式,
+/// docs/29 §5.4 的降级口径)。
+#[cfg(not(windows))]
+pub fn write_files_to_clipboard(_paths: &[String]) -> AppResult<()> {
+    Err(crate::error::AppError::ClipboardWin(
+        "剪贴板文件写入在当前平台暂未实现(二期接入 text/uri-list)".into(),
+    ))
+}
+
 /// RGBA(上-下行序)转 CF_DIBV5 载荷:BITMAPV5HEADER + BGRA 像素(底行在前)。
+#[cfg(windows)]
 fn rgba_to_dibv5(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
     const HEADER_SIZE: usize = 124;
     let w = width as usize;
@@ -1061,6 +1228,7 @@ pub fn remove_blob(path: &Path) {
 #[cfg(test)]
 mod tests {
 
+    #[cfg(windows)]
     #[test]
     fn owner_app_name_extracts_and_lowercases() {
         assert_eq!(
@@ -1077,6 +1245,9 @@ mod tests {
     }
     use super::*;
 
+    // 以下用例钉的是 Windows 专属格式(CF_DIBV5/DIB 解码)的字节行为,
+    // 被测函数在非 Windows 为桩(M0a),故随平台门控。
+    #[cfg(windows)]
     #[test]
     fn dibv5_header_and_pixel_layout() {
         // 2x2 图:上行 (1,2,3,4)(5,6,7,8),下行 (9,10,11,12)(13,14,15,16)
@@ -1098,15 +1269,32 @@ mod tests {
 
     #[test]
     fn resolve_blob_path_handles_absolute_and_relative() {
-        let blobs = Path::new("C:/data/blobs");
-        assert_eq!(
-            resolve_blob_path(blobs, "C:/other/x.png"),
-            PathBuf::from("C:/other/x.png")
-        );
-        assert_eq!(
-            resolve_blob_path(blobs, "2026-10/x.png"),
-            blobs.join("2026-10/x.png")
-        );
+        // B4(docs/29 §5.4):legacy 绝对路径原样采用 —— 但"绝对"依平台而定,
+        // 各平台用各自的绝对路径断言同一语义(Windows 盘符 / Unix 根)。
+        #[cfg(windows)]
+        {
+            let blobs = Path::new("C:/data/blobs");
+            assert_eq!(
+                resolve_blob_path(blobs, "C:/other/x.png"),
+                PathBuf::from("C:/other/x.png")
+            );
+            assert_eq!(
+                resolve_blob_path(blobs, "2026-10/x.png"),
+                blobs.join("2026-10/x.png")
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            let blobs = Path::new("/data/blobs");
+            assert_eq!(
+                resolve_blob_path(blobs, "/other/x.png"),
+                PathBuf::from("/other/x.png")
+            );
+            assert_eq!(
+                resolve_blob_path(blobs, "2026-10/x.png"),
+                blobs.join("2026-10/x.png")
+            );
+        }
     }
 
     #[test]
@@ -1121,6 +1309,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
     fn write_rgba_to_clipboard_rejects_size_mismatch() {
         // 长度与尺寸不匹配时给出明确错误,而不是在 DIBV5 组装里越界
@@ -1236,6 +1425,7 @@ mod tests {
     /// `header_size = 52` 且载荷恰好 52 字节时切片越界 → panic → 穿出 wndproc 的
     /// `extern "system"` 边界 → **abort 整个进程**(不需要用户做任何事,别的应用往
     /// 剪贴板写一份畸形位图就够了)。这里把"宁可返回 None 也绝不 panic"钉死。
+    #[cfg(windows)]
     #[test]
     fn decode_dib_rejects_truncated_header_without_panicking() {
         // header_size = 52(V2 头),但只给了 52 字节 —— 掩码区不足 16 字节
@@ -1259,6 +1449,7 @@ mod tests {
     }
 
     /// 合法头不得因为上面的长度校验而回归:40 / 56 / 124 三种都要照常解析。
+    #[cfg(windows)]
     #[test]
     fn decode_dib_still_accepts_valid_headers() {
         // 40 字节头 + 1x1 的 32bpp 像素行(BI_RGB)
@@ -1282,6 +1473,7 @@ mod tests {
     }
 
     /// 尺寸溢出必须拒绝而不是 panic / 回绕。
+    #[cfg(windows)]
     #[test]
     fn decode_dib_rejects_overflowing_dimensions() {
         let mut dib = vec![0u8; 40 + 4];

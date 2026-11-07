@@ -15,16 +15,42 @@
 #include <QRegularExpression>
 #include <QVariantMap>
 #include <QVector>
+
+#if defined(Q_OS_WIN)
 #include <windows.h>
 #include <shellapi.h>
 #include <shobjidl.h>
 #include <objbase.h>
+#else
+// Linux(M0b):启动/图标/目录打开走 Qt 跨层(QDesktopServices/QProcess/
+// QFileIconProvider),与 ShellExecuteW "open" 同语义(docs/29 §5.3)。
+#include <QDesktopServices>
+#include <QFile>
+#include <QFileIconProvider>
+#include <QProcess>
+#include <QUrl>
+#endif
 
 namespace nb {
 namespace {
 
 using SystemEntry = struct { const char* key; const char* label; const char* exec; };
 
+/// 清理用户粘贴的目标:Windows "复制文件地址" 自带**首尾引号**;另有零宽
+/// 字符与首尾空白。不去引号的话,粘贴路径永远过不了扩展名检查(实测反馈:
+/// 删除后重新添加同一 exe 报"路径无效")。
+QString cleanTarget(const QString& target) {
+    QString t = target.trimmed();
+    while (t.startsWith('"') && t.endsWith('"') && t.length() >= 2)
+        t = t.mid(1, t.length() - 2).trimmed();
+    // 去零宽与 BOM 类字符
+    static const QRegularExpression invisible(
+        QStringLiteral("[\u200B\u200C\u200D\uFEFF]"));
+    t.remove(invisible);
+    return t;
+}
+
+#if defined(Q_OS_WIN)
 /// system 精选目录(docs/24 §5.1):target 存 key,执行串在这里 ——
 /// 新增系统页 = 表里加一行。ms-settings: 前缀的手填项不经本表,直接 ShellExecute。
 const SystemEntry kSystemEntries[] = {
@@ -59,20 +85,6 @@ bool isAllowedSystemTarget(const QString& target) {
     return false;
 }
 
-/// 清理用户粘贴的目标:Windows "复制文件地址" 自带**首尾引号**;另有零宽
-/// 字符与首尾空白。不去引号的话,粘贴路径永远过不了扩展名检查(实测反馈:
-/// 删除后重新添加同一 exe 报"路径无效")。
-QString cleanTarget(const QString& target) {
-    QString t = target.trimmed();
-    while (t.startsWith('"') && t.endsWith('"') && t.length() >= 2)
-        t = t.mid(1, t.length() - 2).trimmed();
-    // 去零宽与 BOM 类字符
-    static const QRegularExpression invisible(
-        QStringLiteral("[\u200B\u200C\u200D\uFEFF]"));
-    t.remove(invisible);
-    return t;
-}
-
 /// app 类型允许的目标形态:可执行扩展名或已存在目录(目录 = 资源管理器打开)。
 bool isValidAppTarget(const QString& target) {
     static const QRegularExpression ext(
@@ -82,7 +94,32 @@ bool isValidAppTarget(const QString& target) {
     if (ext.match(t).hasMatch()) return true;
     return QFileInfo::exists(t) && QFileInfo(t).isDir();
 }
+#else
+/// Linux(M0b):系统页表**最小起步** —— 只收录跨 DE 通用的 URI(xdg-open);
+/// KDE/GNOME 专属面板(gnome-control-center / systemsettings 模块)待
+/// DE 探测后在 M2/M4 充实。键名保持与用户设置兼容的命名风格。
+const SystemEntry kSystemEntries[] = {
+    {"trash",  "回收站",   "xdg-open trash:///"},
+};
 
+/// Linux 白名单:目录键;ms-settings: 是 Windows 注册表协议,不允许。
+bool isAllowedSystemTarget(const QString& target) {
+    for (const auto& e : kSystemEntries)
+        if (target == QLatin1String(e.key)) return true;
+    return false;
+}
+
+/// Linux 目标形态:.desktop 项 / 带可执行位的文件 / 目录(目录 = 文件管理器打开)。
+bool isValidAppTarget(const QString& target) {
+    const QString t = cleanTarget(target);
+    if (t.endsWith(QLatin1String(".desktop"), Qt::CaseInsensitive))
+        return QFileInfo::exists(t);
+    const QFileInfo fi(t);
+    return (fi.isFile() && fi.isExecutable()) || (fi.exists() && fi.isDir());
+}
+#endif
+
+#if defined(Q_OS_WIN)
 /// HICON → QImage(Qt6 无 QtWinExtras;ICONINFO + GetDIBits 手动转换)。
 /// alpha 预乘:PNG 保存需要非预乘;GetDIBits 的 32bpp 顶层位图在带 alpha 的
 /// 现代图标上已是预乘 ARGB —— 逐像素除回 alpha(未带 alpha 的旧图标 mask 全 1,
@@ -201,6 +238,26 @@ QString resolveLnkTarget(const QString& lnkPath) {
     link->Release();
     return out;
 }
+#else
+/// .desktop 解引用:读 Exec= 的第一个 token(docs/24 Q2 的 Linux 对应物)。
+/// 字段代码(%f/%u 等)剥掉;返回空串 = 解析失败。
+QString resolveDesktopTarget(const QString& desktopPath) {
+    QFile f(desktopPath);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return QString();
+    while (!f.atEnd()) {
+        const QByteArray line = f.readLine();
+        if (line.startsWith("Exec=")) {
+            QString exec = QString::fromUtf8(line.mid(5)).trimmed();
+            static const QRegularExpression fieldCode(QStringLiteral("\\s%[a-zA-Z]"));
+            exec.remove(fieldCode);
+            exec.remove(QLatin1Char('"'));
+            const int sp = exec.indexOf(QLatin1Char(' '));
+            return sp < 0 ? exec : exec.left(sp);
+        }
+    }
+    return QString();
+}
+#endif
 
 } // namespace
 
@@ -210,7 +267,7 @@ QuickCommands::QuickCommands(PanelWindow& panel, CoreBridge& core, QObject* pare
 }
 
 void QuickCommands::registerActions() {
-    // ---- 首批 6 动作(docs/24 §4.3):全部复用现有链路,零新逻辑 ----
+    // ---- 首批 6 动作(docs/24 §4.3):全部复用现有链路,零新逻辑,跨平台 ----
     // 新增动作 = 这里加一条 ActionEntry;设置页挑选列表自动跟随(catalog)。
     m_actions.insert(QStringLiteral("capture.region"),
                      {QStringLiteral("智能截屏"), QStringLiteral("capture"), true,
@@ -314,6 +371,7 @@ bool QuickCommands::appTargetValid(const QString& target) const {
     return isValidAppTarget(target);
 }
 
+#if defined(Q_OS_WIN)
 QString QuickCommands::appIconUrl(const QString& target) {
     // .lnk 先解引用到目标(IShellLink),之后与 .exe 同一条提取链;
     // 解析失败(目标已删/非文件系统目标)回退默认图标。
@@ -349,7 +407,31 @@ QString QuickCommands::appIconUrl(const QString& target) {
     if (!img.save(cachePath, "PNG")) return QString();
     return QUrl::fromLocalFile(cachePath).toString();
 }
+#else
+QString QuickCommands::appIconUrl(const QString& target) {
+    // Linux(M0b):QFileIconProvider 走主题图标体系(.desktop / 可执行文件 / 目录),
+    // 缓存口径与 Windows 一致(quick-icons/<md5>.png);取不到 → 空串,QML 回退默认图。
+    const QString t = cleanTarget(target.trimmed());
+    if (!QFileInfo::exists(t)) return QString();
+    const QString cacheName = QStringLiteral("quick-icons/%1.png")
+                                  .arg(QString::fromLatin1(
+                                      QCryptographicHash::hash(
+                                          t.toUtf8(), QCryptographicHash::Md5).toHex()));
+    const QString cachePath = nb::appDataFile(cacheName);
+    if (QFileInfo::exists(cachePath))
+        return QUrl::fromLocalFile(cachePath).toString();
 
+    const QIcon icon = QFileIconProvider().icon(QFileInfo(t));
+    if (icon.isNull()) return QString();
+    const QImage img = icon.pixmap(32, 32).toImage();
+    if (img.isNull()) return QString();
+    QDir().mkpath(QFileInfo(cachePath).absolutePath());
+    if (!img.save(cachePath, "PNG")) return QString();
+    return QUrl::fromLocalFile(cachePath).toString();
+}
+#endif
+
+#if defined(Q_OS_WIN)
 bool QuickCommands::shellOpen(const QString& target, const QString& args,
                               const QString& workdir) {
     const QString t = QDir::toNativeSeparators(target.trimmed());
@@ -368,6 +450,28 @@ bool QuickCommands::shellOpen(const QString& target, const QString& args,
     // SehellExecute 返回值 > 32 = 成功(Win32 约定);31 = 无关联等失败
     return reinterpret_cast<qintptr>(inst) > 32;
 }
+#else
+bool QuickCommands::shellOpen(const QString& target, const QString& args,
+                              const QString& workdir) {
+    const QString t = target.trimmed();
+    const QString a = args.trimmed();
+    const QFileInfo fi(t);
+    // 工作目录空 → target 所在目录;目录目标本身 → target(打开的就是它)
+    QString wd = workdir.trimmed();
+    if (wd.isEmpty()) {
+        wd = fi.isDir() ? t : fi.absolutePath();
+    }
+    // 目录与 .desktop:交给桌面环境关联打开(与 ShellExecute "open" 同语义)
+    if (fi.isDir() || t.endsWith(QLatin1String(".desktop"), Qt::CaseInsensitive)) {
+        return QDesktopServices::openUrl(QUrl::fromLocalFile(t));
+    }
+    // 可执行文件:args 原样进参数槽(**不经 shell**,与 Windows 分支同安全契约
+    // —— && / | / > 全部无效;想跑脚本就写个脚本文件再指向它)。
+    const QStringList argList =
+        a.isEmpty() ? QStringList{} : a.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    return QProcess::startDetached(t, argList, wd);
+}
+#endif
 
 bool QuickCommands::runApp(const QVariantMap& cmd) {
     // 执行时同样剥引号:校验与执行必须同一清洗口径,否则"校验过却启动失败"
@@ -396,10 +500,11 @@ bool QuickCommands::runSystem(const QVariantMap& cmd) {
             QStringLiteral("不支持的系统目标:%1").arg(target));
         return false;
     }
-    // 目录键 → 执行串;ms-settings: 前缀原样
+    // 目录键 → 执行串;平台 URI 前缀原样
     QString exec = quickSystemResolve(target);
     if (exec.isEmpty()) exec = target;
-    // msc/cpl/exe 走 ShellExecute(系统关联);URI 同样吃得到
+    // "exe args" 拆分后走 shellOpen(Windows = ShellExecute;Linux = xdg-open 进
+    // QProcess 参数槽 —— 表里的执行串本就是 "xdg-open <uri>" 形态)
     const int sp = exec.indexOf(QLatin1Char(' '));
     const QString exe = sp < 0 ? exec : exec.left(sp);
     const QString args = sp < 0 ? QString() : exec.mid(sp + 1);
