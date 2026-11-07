@@ -16,6 +16,7 @@
 // Linux(M3):XTest 注入 + 前台 PID 检查(EWMH)。fail-safe 原则见
 // pasteToForegroundIfEnabled 的 Linux 分支注释。
 #include <X11/Xlib.h>
+#include <X11/Xatom.h>
 #include <X11/keysym.h>
 #include <X11/extensions/XTest.h>
 #include <unistd.h>

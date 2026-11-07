@@ -354,7 +354,7 @@ Wayland 原生截图/PipeWire 作为二期评估项(取决于 xcap 上游或自�
 | K5 | Linux 智能框选/热键/自动粘贴为降级桩 | M2(X11 EWMH/AT-SPI)/M3(XGrabKey/XTest)接入 | 里程碑内 |
 | K6 | Linux 首跑截图后退出期 `malloc_consolidate(): unaligned fastbin chunk` | 截图流程已产出;崩溃在退出清理期(疑似静态 Qt 对象/QML 环境销毁序,与 main.cpp 记载的 0xC0000374 同族) | 待查(M0b 遗留) |
 | ~~K8~~ **已解决(2026-11-07)**:热键线程自有 X 连接(XOpenDisplay + XNextEvent 循环 + select 心跳),注册/解抓经命令队列同步等待(保留失败项 toast 语义),KeyPress 线程内匹配 → invokeMethod 队列投递;守护线程 detach 防 static 析构 terminate。**E2E:xdotool 注入 Ctrl+Shift+V → `热键触发: id=45057 action=0`**,5 热键注册全成功 |
-| K7 | 单实例 QLocalServer `listen: Name error` | 首跑出现一次;socket 名=短哈希,疑 /tmp 残留或 QLocalServer 平台细节 | 待查(M0b 遗留) |
+| ~~K7~~ **已解决(2026-11-07)**:根因 = `--data-dir` 实例的 ensure() 被跳过(不参与单实例门禁,Windows 同语义)→ 通道名为空 → `listen("")` 报 Name error;**并非残留/权限问题**。修复:publishWindow 空名守卫跳过发布(此类实例本无被唤起入口)。终验:--data-dir 路径 Name error 归零;默认路径 socket `/tmp/nextboard-si-<hash>` 成功创建;第二实例被拒+正常退出 |
 
 
 横切:文档同步 —— 修订 `docs/01-architecture.md:23`("Linux/macOS 为非目标" → "Linux = 二类平台,X11 全功能 / Wayland 按能力降级");progress.md 按里程碑记录踩坑。

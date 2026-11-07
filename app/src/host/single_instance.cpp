@@ -132,6 +132,13 @@ void SingleInstance::publishWindow(void* rawHwnd) {
     Q_UNUSED(kKept);
 #else
     Q_UNUSED(rawHwnd);
+    // K7(2026-11-07 修):`--data-dir` 实例的 ensure() 被跳过(不参与单实例
+    // 门禁,Windows 同语义)→ 通道名为空。此前直接 listen("") 报 Name error。
+    // 此类实例本就没有"被唤起"的入口(门禁未拒绝过任何人),跳过即正确。
+    if (g_instanceChannel.isEmpty()) {
+        qInfo() << "single-instance: --data-dir 实例不参与单实例门禁,跳过通道发布";
+        return;
+    }
     // Linux(M0b):QLocalServer 承担唤起通道。先清残留 socket 文件
     // (崩溃后的 unix domain socket 会残留,不清则 listen 失败)。
     QLocalServer::removeServer(g_instanceChannel);
