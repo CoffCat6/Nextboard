@@ -339,7 +339,7 @@ Wayland 原生截图/PipeWire 作为二期评估项(取决于 xcap 上游或自�
 | **M0b 宿主平台化(2026-11-07 ✅)** | **17 个 C++ 文件平台化**(模式统一:`#if defined(Q_OS_WIN)` 原样保留 + `#else` Linux 实现/桩):core_bridge(dlopen/dlsym)、app_paths、memory_probe、single_instance(QLockFile+QLocalServer+信号)、auto_start(XDG)、main 崩溃诊断(backtrace+dladdr+sigaction)、hotkeys(接口去 Win32 + 降级通道)、auto_paste(桩)、quick_commands(Linux 重写)、smart_capture(段式拆分,UIA 降级空候选)、capture_session、window_effects(no-op)、stitch_hud/stitch_live_flow/smart_capture_flow/hotkey_lifecycle_flow(验收门控)、panel_window(nativeEvent 拆分 + WindowDeactivate 失焦)、note_window(startSystemResize 缩放);CMake 条件化(五系统库/部署/OCR 资产/RPATH)+ **build.sh**(仿 build.ps1) | **验收达成:WSL 里 `nextboard` 完整启动**——libnbcore.so 加载成功、nb_init=0、QML 面板显示(软件渲染)、单实例锁/数据目录就位、build.sh 全新构建 130/130 全绿。已知项(非阻塞):① WSLg 无 SNI 宿主,托盘注册失败(KDE VM 验证);② TranslateView 的 `ContextMenu.menu` 附加属性 Qt 6.8 不可用(6.9 特性,待兼容小修);③ Windows MSVC 全量回归**已通过**(2026-11-07:build.ps1 完整链路 cargo+MSVC+链接+部署全绿;期间 nextboard.exe 被运行中实例占用致 LNK1104,属环境占用非代码问题) | M0a |
 | **M1 core 接入(2026-11-07 ✅ R1/R2/R3 全部完成)** | **R2 ✅**:ureq_http 模块(直连/HTTP 代理/环境变量系统代理)+ 非 2xx 语义对齐 + **socks5h 隐私修复(↑K1)**。**R1 ✅**:clip.rs 五函数 arboard 真实现(文本/位图读写;文件条目降级二期)+ **轮询监听线程**(300ms/单例驻线程/内容哈希防抖/入库管线与 Windows 共用尾部);E2E 实证:spike 写入 → 轮询命中 → DB 入库。**R3 ✅**:通知协议 `nb_set_notify_fd`(核心写 4 字节消息 id 到管道)+ 宿主 QSocketNotifier 读出 → emit 与 Windows nativeEvent 同组信号;E2E 实证:通道就绪日志 + 入库 + stderr 干净。**部署坑**:libnbcore 拷贝 POST_BUILD→ALL(重链接才触发,纯 Rust 改动不生效,与 OCR 资产同教训) | Linux `cargo test` **402 passed / 0 failed** + 运行期双 E2E;Windows **408 passed / 0 failed**(R1/R3 全在 cfg 分支,零回归) | M0b;VM 复测项可并行 |
 | **M2 截图闭环** | xcap Linux 实测/显示器配对重验(B2)+ 遮罩/全屏/框选/编辑器/贴图/剪贴板写入 | 截图→编辑→复制/贴图/入库全链路;多屏;DPR 变化夹回 | M1 |
-| **M3 集成件** | 热键(X11)+ 自动粘贴(XTest)+ 智能框选窗口级 + HUD(穿透/排除捕获 X11)+ 长截图 | 热键唤起/收起;自动粘贴 E2E;滚动长截图 X11 全链路;Wayland 会话降级清单逐项验收 | M2 |
+| **M3 集成件(进行中 2026-11-07)** | **热键 X11 ✅**:XGrabKey 全套(K8 线程方案)+ E2E(xdotool 注入触发实证)。**待做**:自动粘贴(XTest + 前台 PID 检查)、智能框选窗口级(EWMH)、HUD(穿透/排除捕获)、长截图链路 | 热键唤起/收起(WSLg 实证);自动粘贴 E2E;滚动长截图 X11 全链路;Wayland 会话降级清单逐项验收 | M2 |
 | **M4 分发** | B1(默认 OCR 档)+ libonnxruntime.so 打包 + AppImage(/deb)+ .desktop/图标 + tools 重写 + B3/B4 数据清洗工具 | AppImage 冒烟(全新装/升级/卸载);OCR 三入口;体积预算重算留痕 | M3 |
 
 
@@ -353,6 +353,7 @@ Wayland 原生截图/PipeWire 作为二期评估项(取决于 xcap 上游或自�
 | K4 | ~~Linux ORT so 未入仓~~ **已解决(2026-11-07 M2)** | `thirdparty/ort/onnxruntime-linux-x64-1.28.0/` 入仓(含 LICENSE);CMake Linux 部署分支:版本化 .so + `libonnxruntime.so`/`.1.28` 符号链接(Rust ORT_DYLIB 加载名对齐)。引擎级冒烟(ocr_bench @ 面板截图 800x600):**20 行 358 字符识别成功**,run1 827ms | 已闭环;**B1 同步修复**:默认引擎平台化(System 仅 Windows),存量 "system" 设置自动归一 RapidOCR |
 | K5 | Linux 智能框选/热键/自动粘贴为降级桩 | M2(X11 EWMH/AT-SPI)/M3(XGrabKey/XTest)接入 | 里程碑内 |
 | K6 | Linux 首跑截图后退出期 `malloc_consolidate(): unaligned fastbin chunk` | 截图流程已产出;崩溃在退出清理期(疑似静态 Qt 对象/QML 环境销毁序,与 main.cpp 记载的 0xC0000374 同族) | 待查(M0b 遗留) |
+| ~~K8~~ **已解决(2026-11-07)**:热键线程自有 X 连接(XOpenDisplay + XNextEvent 循环 + select 心跳),注册/解抓经命令队列同步等待(保留失败项 toast 语义),KeyPress 线程内匹配 → invokeMethod 队列投递;守护线程 detach 防 static 析构 terminate。**E2E:xdotool 注入 Ctrl+Shift+V → `热键触发: id=45057 action=0`**,5 热键注册全成功 |
 | K7 | 单实例 QLocalServer `listen: Name error` | 首跑出现一次;socket 名=短哈希,疑 /tmp 残留或 QLocalServer 平台细节 | 待查(M0b 遗留) |
 
 

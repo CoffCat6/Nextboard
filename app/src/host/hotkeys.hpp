@@ -1,6 +1,6 @@
-// 全局热键:Windows = RegisterHotKey 管理(多动作 → 多组合键,冲突回滚沿用第一代
-// 语义);Linux(M0b)= 桩 —— 注册走"失败项"通道给可读提示(X11 XGrabKey / portal
-// 在 M3 接入,docs/29 §5.2)。接口保持平台无关(不引平台头)。
+// 全局热键:Windows = RegisterHotKey;Linux(M3)= X11 XGrabKey(XWayland 兼容,
+// Wayland 原生会话走 XDG portal,后续按需接入 —— docs/29 §5.2/§8)。
+// 接口保持平台无关(不引平台头)。
 #pragma once
 
 #include <QObject>
@@ -35,7 +35,7 @@ public:
     ~Hotkeys() override;
 
 signals:
-    /// WM_HOTKEY 到达(hotkey id)。
+    /// WM_HOTKEY / X11 KeyPress 到达(hotkey id)。
     void hotkeyFired(int id);
 
 public slots:
@@ -44,16 +44,14 @@ public slots:
     void applyFromSettings();
 
 private:
-    // QWidget 无关:用 QAbstractNativeEventFilter 收 WM_HOTKEY 更直接
-
-private:
     void registerAction(Action action, const QString& combo);
-    // unsigned(= Win32 UINT,ABI 一致):接口层不引 windows.h 的做法
+    // unsigned(= Win32 UINT,ABI 一致):接口层不引平台头的做法。
+    // Linux:modifiers = X11 修饰掩码,vk = keysym。
     static bool parseCombo(const QString& combo, unsigned* modifiers, unsigned* vk);
 
     PanelWindow& m_panel;
     CoreBridge& m_core;
-    /// WM_HOTKEY 过滤器。**由本对象持有**(成员而非裸 new),生命周期严格跟随 ——
+    /// 事件过滤器。**由本对象持有**(成员而非裸 new),生命周期严格跟随 ——
     /// 详见 hotkeys.cpp 里 HotkeyFilter 的注释(2026-11-02 闪退修复)。
     /// 用 std::unique_ptr 而不是值成员:HotkeyFilter 的完整定义在本文件之外,
     /// 值成员需要完整类型。

@@ -171,6 +171,11 @@ if(WIN32)
         uiautomationcore.lib
         psapi.lib
     )
+else()
+    # Linux(M3):全局热键 XGrabKey(Xlib);xcb 事件头经 Qt 自带的 xcb 依赖可用,
+    # 但 keysym/XGrabKey 走 Xlib —— 链接 X11。
+    find_package(X11 REQUIRED)
+    target_link_libraries(nextboard PRIVATE X11::X11)
 endif()
 # nbcore 走纯显式加载(Windows LoadLibrary / Linux dlopen,见 core_bridge.cpp):
 # 隐式链接 nbcore 导入库时,Rust cdylib 的 CRT/线程局部状态与 Qt 静态初始化

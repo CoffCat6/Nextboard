@@ -14,6 +14,29 @@
 
 #include <atomic>
 
+#if defined(Q_OS_WIN)
+#include <windows.h>
+#else
+// Linux(M3)X11 热键:**专用线程自有 X 连接**(K8 定稿,docs/29 §9.1)——
+// Fedora 6.8 QtGui 无 QNativeInterface::QX11Application,拿不到 Qt 的 xcb
+// 连接;而 XGrabKey 的 KeyPress 事件只会送达**抓取方连接**,自建连接 +
+// 线程内 XNextEvent 循环是最干净的等价物(Wayland 原生会话后续走 portal)。
+// 结构:命令队列(Grab/Ungrab,同步等待结果,保留"失败项"toast 语义)
+// + select 轮询(X 事件 / 命令 / 100ms 心跳)。
+#include <X11/Xlib.h>
+#include <X11/keysym.h>
+
+#include <sys/select.h>
+
+#include <QHash>
+#include <QMutex>
+#include <QQueue>
+#include <QSharedPointer>
+#include <QWaitCondition>
+#include <mutex>
+#include <thread>
+#endif
+
 namespace nb {
 
 namespace {
@@ -62,14 +85,179 @@ bool parseComboImpl(const QString& combo, unsigned* modifiers, unsigned* vk) {
     return true;
 }
 #else
-// Linux(M0b):组合键解析暂无消费者(注册为桩);保留平台对称签名。
+// Linux(M3):解析为 X11 修饰掩码 + keysym(vk 参数承载 keysym)。
+// 修饰符映射:Ctrl=ControlMask Shift=ShiftMask Alt=Mod1Mask Win=Mod4Mask。
 bool parseComboImpl(const QString& combo, unsigned* modifiers, unsigned* vk) {
-    Q_UNUSED(combo);
-    Q_UNUSED(modifiers);
-    Q_UNUSED(vk);
-    return false;
+    unsigned mods = 0;
+    unsigned keysym = 0;
+    const QStringList parts = combo.split('+', Qt::SkipEmptyParts);
+    for (QString part : parts) {
+        part = part.trimmed().toLower();
+        if (part == "ctrl") mods |= ControlMask;
+        else if (part == "shift") mods |= ShiftMask;
+        else if (part == "alt") mods |= Mod1Mask;
+        else if (part == "win") mods |= Mod4Mask;
+        else if (part.length() == 1) {
+            // 与 Windows 分支同一防坑:解析不出的字符走"格式非法",不留模糊键
+            const KeySym sym = XStringToKeysym(part.toUpper().toUtf8().constData());
+            if (sym == NoSymbol) return false;
+            keysym = static_cast<unsigned>(sym);
+        }
+        else if (part.startsWith("f") && part.mid(1).toInt() >= 1 && part.mid(1).toInt() <= 24)
+            keysym = static_cast<unsigned>(XK_F1) + static_cast<unsigned>(part.mid(1).toInt() - 1);
+        else {
+            // 具名键(Home/End/PgUp…):直接查 keysym 表,查不到 = 格式非法
+            const KeySym sym = XStringToKeysym(part.toUpper().toUtf8().constData());
+            if (sym == NoSymbol) return false;
+            keysym = static_cast<unsigned>(sym);
+        }
+    }
+    if (mods == 0 || keysym == 0) return false;
+    *modifiers = mods;
+    *vk = keysym;
+    return true;
 }
-#endif
+
+// ---- X11 热键线程(K8):自有连接 + 命令队列 + 事件循环 --------------------
+//
+// 为什么是线程:XGrabKey 的 KeyPress 只送达**抓取方连接**;Qt 的 xcb 连接
+// 在本环境拿不到(QNativeInterface 头缺失),故热键线程自建连接、自读事件,
+// 命中的动作经 invokeMethod 队列投递回宿主(跨线程信号)。
+//
+// 生命周期:首个注册动作经 std::call_once 拉起,常驻到进程结束(XCloseDisplay
+// 即自动解除本连接的全部抓键);Hotkeys 实例析构只清**自己的**注册与 owner。
+
+struct X11HotkeyCmd {
+    enum Kind { Grab, UngrabAll } kind = Grab;
+    unsigned keysym = 0;   // Grab:目标 keysym
+    unsigned mods = 0;     // Grab:X11 修饰掩码
+    int id = 0;            // Grab:热键 id
+    bool done = false;     // 线程完成后置位(registerAction 同步等待)
+    bool ok = false;
+};
+
+QMutex g_x11Mutex;
+QWaitCondition g_x11Cond;
+QQueue<QSharedPointer<X11HotkeyCmd>> g_x11Cmds;
+/// id → (keycode, mods):解抓与事件反查的注册表(进程级,抓键本就是服务器全局)。
+QHash<int, QPair<unsigned, unsigned>> g_x11Grabs;
+/// (keycode<<16 | mods) → id:KeyPress 反查表。
+QHash<unsigned long, int> g_x11ByKey;
+Hotkeys* g_x11Owner = nullptr;   // 事件回调目标(活实例;析构时置空)
+std::thread g_x11Thread;
+std::once_flag g_x11Once;
+
+constexpr unsigned kLockCombos[] = {0u, Mod2Mask, LockMask, Mod2Mask | LockMask};
+constexpr unsigned kModsMask = ControlMask | ShiftMask | Mod1Mask | Mod4Mask;
+
+/// 锁位组合全抓(NumLock/CapsLock 开着时组合键才不失灵);任一被占即整体失败。
+bool grabWithLocks(Display* d, unsigned kc, unsigned mods) {
+    bool ok = true;
+    for (const unsigned lock : kLockCombos) {
+        if (XGrabKey(d, static_cast<int>(kc), mods | lock,
+                     DefaultRootWindow(d), True, GrabModeAsync, GrabModeAsync) == 0)
+            ok = false;
+    }
+    XSync(d, False);
+    if (!ok) {
+        for (const unsigned lock : kLockCombos)
+            XUngrabKey(d, static_cast<int>(kc), mods | lock, DefaultRootWindow(d));
+        XSync(d, False);
+    }
+    return ok;
+}
+
+void ungrabWithLocks(Display* d, unsigned kc, unsigned mods) {
+    for (const unsigned lock : kLockCombos)
+        XUngrabKey(d, static_cast<int>(kc), mods | lock, DefaultRootWindow(d));
+    XSync(d, False);
+}
+
+void x11_hotkey_thread() {
+    Display* d = XOpenDisplay(nullptr);
+    if (!d) {
+        QMutexLocker l(&g_x11Mutex);
+        qWarning() << "X11 热键线程: XOpenDisplay 失败,全局热键不可用";
+        // 失联状态下排空队列,让等待方拿到失败结果
+        while (!g_x11Cmds.isEmpty()) {
+            auto cmd = g_x11Cmds.dequeue();
+            cmd->done = true;
+            cmd->ok = false;
+        }
+        g_x11Cond.wakeAll();
+        return;
+    }
+    while (true) {
+        // 1) 命令(Grab / UngrabAll)
+        {
+            QMutexLocker l(&g_x11Mutex);
+            while (!g_x11Cmds.isEmpty()) {
+                auto cmd = g_x11Cmds.dequeue();
+                if (cmd->kind == X11HotkeyCmd::Grab) {
+                    const KeyCode kc = XKeysymToKeycode(d, static_cast<KeySym>(cmd->keysym));
+                    if (kc == 0) {
+                        cmd->ok = false;
+                    } else if (grabWithLocks(d, kc, cmd->mods)) {
+                        g_x11Grabs.insert(cmd->id, {kc, cmd->mods});
+                        g_x11ByKey.insert((static_cast<unsigned long>(kc) << 16) | cmd->mods,
+                                          cmd->id);
+                        cmd->ok = true;
+                    } else {
+                        cmd->ok = false;
+                    }
+                } else {
+                    // UngrabAll:解掉本连接的全部抓键并清注册表
+                    for (auto it = g_x11Grabs.constBegin(); it != g_x11Grabs.constEnd(); ++it)
+                        ungrabWithLocks(d, it.value().first, it.value().second);
+                    g_x11Grabs.clear();
+                    g_x11ByKey.clear();
+                    cmd->ok = true;
+                }
+                cmd->done = true;
+            }
+            g_x11Cond.wakeAll();
+        }
+        // 2) 事件:抓取方连接才会收到 XGrabKey 的 KeyPress
+        while (XPending(d) > 0) {
+            XEvent ev;
+            XNextEvent(d, &ev);
+            if (ev.type != KeyPress) continue;
+            const unsigned kc = static_cast<unsigned>(ev.xkey.keycode);
+            const unsigned mods = ev.xkey.state & kModsMask;
+            int id = -1;
+            Hotkeys* owner = nullptr;
+            {
+                QMutexLocker l(&g_x11Mutex);
+                auto it = g_x11ByKey.find((kc << 16) | mods);
+                if (it != g_x11ByKey.end()) id = it.value();
+                owner = g_x11Owner;
+            }
+            if (id >= 0 && owner) {
+                // 队列投递回宿主线程(hotkeyFired 的订阅在 Hotkeys 构造里)
+                QMetaObject::invokeMethod(
+                    owner, [owner, id] { emit owner->hotkeyFired(id); },
+                    Qt::QueuedConnection);
+            }
+        }
+        // 3) 心跳等待:X 事件 / 命令唤醒管道(命令由 100ms 轮询兜底处理)
+        fd_set rf;
+        FD_ZERO(&rf);
+        FD_SET(ConnectionNumber(d), &rf);
+        timeval tv{0, 100 * 1000};
+        ::select(ConnectionNumber(d) + 1, &rf, nullptr, nullptr, &tv);
+    }
+}
+
+void x11EnsureThread() {
+    std::call_once(g_x11Once, [] {
+        g_x11Thread = std::thread(x11_hotkey_thread);
+        // 常驻守护线程:static std::thread 在静态析构时若仍 joinable 会
+        // std::terminate —— 进程级生命周期,显式 detach。
+        g_x11Thread.detach();
+    });
+}
+
+#endif  // Linux 线程机制
 
 /// 截图防抖窗口:上一次热键触发后这么久内不再起新会话。
 ///
@@ -144,7 +332,8 @@ public:
             }
         }
 #else
-        // Linux(M0b):X11 XCB 事件分派随 M3 热键接入(docs/29 §5.2);当前为直通。
+        // Linux(M3):X11 事件在**热键线程自己的连接**上处理(K8 设计 ——
+        // XGrabKey 的 KeyPress 只送达抓取方连接),本过滤器对 X11 事件直通。
         Q_UNUSED(eventType);
         Q_UNUSED(message);
 #endif
@@ -163,6 +352,8 @@ Hotkeys::Hotkeys(PanelWindow& panel, CoreBridge& core, QObject* parent)
     qGuiApp->installNativeEventFilter(m_filter.get());
     connect(this, &Hotkeys::hotkeyFired, this, [this](int id) {
         if (!m_registered.contains(id)) return;
+        qInfo() << "热键触发: id =" << id
+                << "action =" << static_cast<int>(m_registered.value(id));
         switch (m_registered.value(id)) {
             case Action::ToggleMain:
                 m_panel.isVisible() ? m_panel.hide() : m_panel.showAtCursor();
@@ -201,6 +392,26 @@ Hotkeys::Hotkeys(PanelWindow& panel, CoreBridge& core, QObject* parent)
 Hotkeys::~Hotkeys() {
 #if defined(Q_OS_WIN)
     for (int id : m_registered.keys()) ::UnregisterHotKey(nullptr, id);
+#else
+    // Linux(M3):解掉本实例注册的全部抓键(命令 + 同步等待),并撤销回调目标。
+    // 若本实例就是登记的 owner,先等解抓完成再摘 owner —— 避免解抓期间事件
+    // 投递到将死对象(QPointer 兜底在,但时序上先清更干净)。
+    bool wasOwner = false;
+    {
+        QMutexLocker l(&g_x11Mutex);
+        wasOwner = (g_x11Owner == this);
+    }
+    if (wasOwner) {
+        auto cmd = QSharedPointer<X11HotkeyCmd>::create();
+        cmd->kind = X11HotkeyCmd::UngrabAll;
+        {
+            QMutexLocker l(&g_x11Mutex);
+            g_x11Cmds.enqueue(cmd);
+            QDeadlineTimer dl(2000);
+            while (!cmd->done && !dl.hasExpired()) g_x11Cond.wait(&g_x11Mutex, dl);
+            if (g_x11Owner == this) g_x11Owner = nullptr;
+        }
+    }
 #endif
     // ⚠️ 顺序很重要:显式摘掉过滤器,**再**让 m_filter 析构。
     //    HotkeyFilter 的析构里也做了一次(冗余保险),但这里显式摘更清楚 ——
@@ -213,6 +424,19 @@ void Hotkeys::applyFromSettings() {
     // 新 id,不清理的话旧组合键会一直留在系统里(改了等于没改,还多占一个组合键)。
 #if defined(Q_OS_WIN)
     for (int id : m_registered.keys()) ::UnregisterHotKey(nullptr, id);
+#else
+    // 重应用:解掉本实例全部旧抓键(命令 + 同步等待),注册表由线程清空
+    {
+        QMutexLocker l(&g_x11Mutex);
+        bool wasOwner = (g_x11Owner == this);
+        if (wasOwner) {
+            auto cmd = QSharedPointer<X11HotkeyCmd>::create();
+            cmd->kind = X11HotkeyCmd::UngrabAll;
+            g_x11Cmds.enqueue(cmd);
+            QDeadlineTimer dl(2000);
+            while (!cmd->done && !dl.hasExpired()) g_x11Cond.wait(&g_x11Mutex, dl);
+        }
+    }
 #endif
     m_registered.clear();
     m_failures.clear();
@@ -241,12 +465,42 @@ void Hotkeys::applyFromSettings() {
 
 void Hotkeys::registerAction(Action action, const QString& combo) {
 #if !defined(Q_OS_WIN)
-    // Linux(M0b):全局热键暂未接入 —— X11 XGrabKey / portal GlobalShortcuts 在
-    // M3(docs/29 §5.2/§8)。走同一"失败项"通道给可读提示(降级契约),注册表
-    // 语义与 Windows 保持对称:该动作不可用,不影响其他动作。
-    Q_UNUSED(action);
-    m_failures.append(QStringLiteral("%1(Linux 全局热键暂未接入)").arg(combo));
-    return;
+    // Linux(M3):X11 XGrabKey,经**热键线程的连接**执行(命令 + 同步等待)。
+    // 失败走同一"失败项"通道,语义与 Windows 对称:该动作不可用,不影响其他动作。
+    unsigned mods = 0, keysym = 0;
+    if (!parseCombo(combo, &mods, &keysym)) {
+        m_failures.append(QStringLiteral("%1(格式非法)").arg(combo));
+        qWarning() << "热键格式非法,跳过:" << combo;
+        return;
+    }
+    x11EnsureThread();
+    const int id = kHotkeyIdBase + g_nextHotkeyId.fetch_add(1);
+    auto cmd = QSharedPointer<X11HotkeyCmd>::create();
+    cmd->kind = X11HotkeyCmd::Grab;
+    cmd->keysym = keysym;
+    cmd->mods = mods;
+    cmd->id = id;
+    {
+        QMutexLocker l(&g_x11Mutex);
+        g_x11Owner = this;   // 活实例登记(事件回调目标)
+        g_x11Cmds.enqueue(cmd);
+        QDeadlineTimer dl(2000);
+        while (!cmd->done && !dl.hasExpired()) g_x11Cond.wait(&g_x11Mutex, dl);
+    }
+    if (!cmd->done) {
+        m_failures.append(QStringLiteral("%1(热键通道超时)").arg(combo));
+        qWarning() << "热键注册等待超时:" << combo;
+        return;
+    }
+    if (!cmd->ok) {
+        // 被占 = 已被别的客户端抓走(其他热键软件);文案与 Windows 对称
+        const QString why = QStringLiteral("组合键已被注册(本进程或其它程序)");
+        m_failures.append(QStringLiteral("%1(%2)").arg(combo, why));
+        qWarning() << "热键抓取失败(" << why << "):" << combo;
+        return;
+    }
+    m_registered.insert(cmd->id, action);
+    qInfo() << "热键已注册(X11):" << combo;
 #else
     unsigned mods = 0, vk = 0;
     if (!parseCombo(combo, &mods, &vk)) {
