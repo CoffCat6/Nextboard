@@ -255,14 +255,23 @@ if(WIN32)
         VERBATIM
     )
 else()
-    # Linux(M0b):ORT 的 libonnxruntime.so 尚未入仓(thirdparty 只有 win-x64 的
-    # dll,M4 补 linux-x64 so);模型文件跨平台,照常部署 —— OCR 首次使用时引擎
-    # 加载失败会走可读错误(与"系统后端不可用"同一降级口径)。
+    # Linux(M2):ORT linux-x64 so 入仓(onnxruntime-linux-x64-1.28.0/lib/)。
+    # Rust 侧 ORT_DYLIB 常量加载 exe 同级的 "libonnxruntime.so" → 部署版本化
+    # .so + 同目录符号链接(soname 链一并带上,防 dlopen 解析需要)。
     add_custom_target(nb_deploy_ocr_assets ALL
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${NB_THIRDPARTY}/ort/onnxruntime-linux-x64-1.28.0/lib/libonnxruntime.so.1.28.0"
+                "$<TARGET_FILE_DIR:nextboard>"
+        COMMAND ${CMAKE_COMMAND} -E create_symlink libonnxruntime.so.1.28.0
+                "$<TARGET_FILE_DIR:nextboard>/libonnxruntime.so.1.28"
+        COMMAND ${CMAKE_COMMAND} -E create_symlink libonnxruntime.so.1.28.0
+                "$<TARGET_FILE_DIR:nextboard>/libonnxruntime.so.1"
+        COMMAND ${CMAKE_COMMAND} -E create_symlink libonnxruntime.so.1.28.0
+                "$<TARGET_FILE_DIR:nextboard>/libonnxruntime.so"
         COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:nextboard>/models/ocr"
         COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
                 "${NB_THIRDPARTY}/models/ocr" "$<TARGET_FILE_DIR:nextboard>/models/ocr"
-        COMMENT "Deploy OCR assets (models/ocr;Linux ORT so 待 M4)"
+        COMMENT "Deploy OCR assets (ORT so + models/ocr)"
         VERBATIM
     )
 endif()

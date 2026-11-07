@@ -87,14 +87,29 @@ pub enum Backend {
 }
 
 impl Backend {
-    /// 解析设置项;未知值回退系统引擎并告警。
+    /// 平台默认引擎(docs/29 §5.4 B1):Windows = 系统内置(零依赖开箱即用);
+    /// 其余平台系统引擎不存在,默认 RapidOCR —— 否则开箱即坏。
+    pub fn default_backend() -> Self {
+        #[cfg(windows)]
+        {
+            Backend::System
+        }
+        #[cfg(not(windows))]
+        {
+            Backend::RapidOcr
+        }
+    }
+
+    /// 解析设置项;未知值回退平台默认引擎并告警。
     pub fn parse(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
-            "" | "system" | "windows" => Backend::System,
+            // 空 = "默认引擎";"system"/"windows" 在非 Windows 平台不可用,
+            // 归一为平台默认(存量 Windows 配置搬移场景的自动修复)。
+            "" | "system" | "windows" => Self::default_backend(),
             "rapidocr" | "rapid" => Backend::RapidOcr,
             other => {
-                warn!("未知 OCR 后端「{other}」,回退系统内置引擎");
-                Backend::System
+                warn!("未知 OCR 后端「{other}」,回退平台默认引擎");
+                Self::default_backend()
             }
         }
     }
@@ -111,7 +126,7 @@ pub struct OcrOptions {
 impl Default for OcrOptions {
     fn default() -> Self {
         Self {
-            backend: Backend::System,
+            backend: Backend::default_backend(),
             language: LanguageChoice::Auto,
             preprocess: Preprocess::default(),
         }
