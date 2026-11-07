@@ -7,8 +7,18 @@
 #include <QJsonObject>
 #include <QTimer>
 
+#include <chrono>
+#include <thread>
+
 #if defined(Q_OS_WIN)
 #include <windows.h>
+#else
+// Linux(M3):XTest 注入 + 前台 PID 检查(EWMH)。fail-safe 原则见
+// pasteToForegroundIfEnabled 的 Linux 分支注释。
+#include <X11/Xlib.h>
+#include <X11/keysym.h>
+#include <X11/extensions/XTest.h>
+#include <unistd.h>
 #endif
 
 namespace nb {
@@ -71,6 +81,48 @@ void sendCtrlV() {
         qInfo() << "auto-paste: 已投出 Ctrl+V(按下/抬起分两批)";
     }
 }
+#else
+    // Linux(M3):XTest 注入(自有 X 连接;Wayland 原生会话无注入能力 → 跳过)。
+    void sendCtrlV(Display* d) {
+        const KeyCode vkc = XKeysymToKeycode(d, XK_v);
+        const KeyCode ckc = XKeysymToKeycode(d, XK_Control_L);
+        if (vkc == 0 || ckc == 0) {
+            qWarning() << "auto-paste: 键码解析失败(V/Control_L),跳过注入";
+            return;
+        }
+        // 按下/抬起**分两批 + 中间让一拍**:与 Windows 分支同一实测依据
+        // (Electron 系/远程桌面只看到按下看不到抬起 → Ctrl 卡住)。
+        XTestFakeKeyEvent(d, ckc, True, CurrentTime);
+        XTestFakeKeyEvent(d, vkc, True, CurrentTime);
+        XSync(d, False);
+        std::this_thread::sleep_for(std::chrono::milliseconds(3));
+        XTestFakeKeyEvent(d, vkc, False, CurrentTime);
+        XTestFakeKeyEvent(d, ckc, False, CurrentTime);
+        XSync(d, False);
+        qInfo() << "auto-paste: 已投出 Ctrl+V(XTest,按下/抬起分两批)";
+    }
+
+    /// 前台窗口的 PID(读 _NET_WM_PID,EWMH);拿不到返回 0(WSLg 无 WM 的常见态)。
+    pid_t foregroundPid(Display* d) {
+        Window focus = None;
+        int revert = 0;
+        XGetInputFocus(d, &focus, &revert);
+        if (focus == None || focus == PointerRoot) return 0;
+        const Atom pidAtom = XInternAtom(d, "_NET_WM_PID", True);
+        if (pidAtom == None) return 0;
+        Atom type = None;
+        int fmt = 0;
+        unsigned long n = 0, rest = 0;
+        unsigned char* data = nullptr;
+        if (XGetWindowProperty(d, focus, pidAtom, 0, 1, False, XA_CARDINAL,
+                               &type, &fmt, &n, &rest, &data) != Success || !data) {
+            return 0;
+        }
+        pid_t pid = 0;
+        if (n > 0 && fmt == 32) pid = static_cast<pid_t>(*(reinterpret_cast<unsigned long*>(data)));
+        XFree(data);
+        return pid;
+    }
 #endif  // Q_OS_WIN
 
 } // namespace
@@ -97,10 +149,33 @@ void pasteToForegroundIfEnabled(int delayMs) {
         }
         sendCtrlV();
 #else
-        // Linux(M0b):键盘注入暂未接入 —— X11 走 XTest(M3),Wayland 无全局注入
-        // 能力(降级为"仅复制",docs/29 §5.3)。开关语义保留,此处只记一条日志:
-        // 用户感知为"复制了但没自动粘",与功能关闭时一致。
-        qInfo() << "auto-paste: Linux 暂未接入自动粘贴注入(M3/X11),仅保留复制";
+        // Linux(M3):前台检查与 Windows 同语义 —— 前台 PID == 本进程 → 跳过。
+        // ⚠️ fail-safe:前台 PID **拿不到**(_NET_WM_PID 缺失,WSLg 无 WM 常见态)
+        // 时**跳过注入**:拿"是谁在焦点"都做不到就按 Ctrl+V,正是本功能头注释里的
+        // 第一条硬约束要防的事故(粘到面板自己)。真机(KDE/GNOME)有 EWMH,可正常注入。
+#ifdef NB_HAVE_XTEST
+        Display* d = XOpenDisplay(nullptr);
+        if (!d) {
+            qWarning() << "auto-paste: XOpenDisplay 失败,跳过注入";
+            return;
+        }
+        const pid_t foreground = foregroundPid(d);
+        if (foreground == 0) {
+            qInfo() << "auto-paste: 前台 PID 未知(无 EWMH 环境),跳过注入(fail-safe)";
+            XCloseDisplay(d);
+            return;
+        }
+        if (foreground == ::getpid()) {
+            qInfo() << "auto-paste: 前台仍是本进程窗口,跳过";
+            XCloseDisplay(d);
+            return;
+        }
+        sendCtrlV(d);
+        XCloseDisplay(d);
+#else
+        // 无 libXtst 的构建:自动粘贴不可用(设置项保留,行为=仅复制)
+        qInfo() << "auto-paste: 本构建无 libXtst,自动粘贴不可用,仅保留复制";
+#endif
 #endif
     });
 }

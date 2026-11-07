@@ -172,10 +172,15 @@ if(WIN32)
         psapi.lib
     )
 else()
-    # Linux(M3):全局热键 XGrabKey(Xlib);xcb 事件头经 Qt 自带的 xcb 依赖可用,
-    # 但 keysym/XGrabKey 走 Xlib —— 链接 X11。
+    # Linux(M3):全局热键 XGrabKey(Xlib)+ 自动粘贴 XTest(libXtst 扩展)。
     find_package(X11 REQUIRED)
     target_link_libraries(nextboard PRIVATE X11::X11)
+    if(X11_Xtst_FOUND)
+        target_link_libraries(nextboard PRIVATE X11::Xtst)
+        target_compile_definitions(nextboard PRIVATE NB_HAVE_XTEST)
+    else()
+        message(WARNING "libXtst 未找到:自动粘贴功能将不可用")
+    endif()
 endif()
 # nbcore 走纯显式加载(Windows LoadLibrary / Linux dlopen,见 core_bridge.cpp):
 # 隐式链接 nbcore 导入库时,Rust cdylib 的 CRT/线程局部状态与 Qt 静态初始化
