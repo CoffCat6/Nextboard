@@ -279,7 +279,9 @@ else()
         COMMAND ${CMAKE_COMMAND} -E create_symlink libonnxruntime.so.1.28.0
                 "$<TARGET_FILE_DIR:nextboard>/libonnxruntime.so"
         COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:nextboard>/models/ocr"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
+        # ⚠️ copy_directory(非 if_different 变体):后者是 cmake 3.23+,VM 的
+        # 3.22 不支持(docs/29 §9.1);模型约 26MB,全量拷贝代价可接受。
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
                 "${NB_THIRDPARTY}/models/ocr" "$<TARGET_FILE_DIR:nextboard>/models/ocr"
         COMMENT "Deploy OCR assets (ORT so + models/ocr)"
         VERBATIM

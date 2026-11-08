@@ -27,3 +27,11 @@ lto = true
 codegen-units = 1
 strip = true
 opt-level = 3
+
+# M3/VM(2026-11-07):Ubuntu 22.04 PPA 的 pipewire 1.0.7 头与 libspa 0.10.1 的
+# screencast 结构定义存在版本偏差(仅 VM 验证环境需要;Windows 构建不含 pipewire)。
+# 若上游发布修复版本后可移除。
+[patch.crates-io]
+libspa = { git = "https://gitlab.freedesktop.org/pipewire/pipewire-rs.git" }
+libspa-sys = { git = "https://gitlab.freedesktop.org/pipewire/pipewire-rs.git" }
+pipewire = { git = "https://gitlab.freedesktop.org/pipewire/pipewire-rs.git" }
