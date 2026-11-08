@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Nextboard
+GenericName=Clipboard Manager
+Comment=剪贴板历史 / 截图标注 / 贴图 / OCR 取字 / 翻译 / 待办 / 便签
+Exec=@BINDIR@
+Icon=nextboard
+Terminal=false
+Categories=Utility;Accessibility;
+StartupWMClass=nextboard
+X-GNOME-UsesNotifications=true
+X-AppImage-Version=@VERSION@

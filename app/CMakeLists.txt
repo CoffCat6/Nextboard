@@ -206,7 +206,11 @@ target_compile_definitions(nextboard PRIVATE NB_APP_VERSION="${PROJECT_VERSION}"
 if(UNIX AND NOT APPLE)
     get_filename_component(NB_QT_PREFIX "${Qt6Core_DIR}/../../.." ABSOLUTE)
     set_target_properties(nextboard PROPERTIES
-        BUILD_RPATH "\$ORIGIN;${NB_QT_PREFIX}/lib")
+        BUILD_RPATH "\$ORIGIN;${NB_QT_PREFIX}/lib"
+        # 安装态(M4):dlopen("libnbcore.so") 与 Qt 运行库的搜索半径。
+        # 平铺布局(deb /opt/nextboard/bin)由 $ORIGIN 覆盖;分体布局
+        # (AppImage usr/bin + usr/lib)由 $ORIGIN/../lib 覆盖。qt.conf 只管插件。
+        INSTALL_RPATH "\$ORIGIN;\$ORIGIN/../lib")
 endif()
 
 # 更新检查地址(docs/07-auto-update.md §5):S6.4 v1 的**唯一配置点**,留空 = 功能禁用
