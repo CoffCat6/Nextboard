@@ -48,13 +48,43 @@ pub fn init_logging(data_dir: &std::path::Path) {
         let written = file.metadata().map(|m| m.len()).unwrap_or(0);
         let _ = log::set_boxed_logger(Box::new(SimpleFileLogger {
             file: std::sync::Mutex::new(LoggerState {
-                writer: Some(std::io::BufWriter::with_capacity(LOG_BUF_BYTES, file)),
+                writer: Some(std::io::LineWriter::new(file)),
                 written,
                 path: file_path.clone(),
             }),
         }));
         log::set_max_level(log::LevelFilter::Info);
     }
+    install_panic_logger();
+}
+
+/// 全局 panic 钩子:panic 消息+位置+线程名落 nbcore.log。
+///
+/// 为什么必须有:默认钩子只打 stderr,而托盘应用的 stderr 常被吞(宿主以
+/// `>/dev/null` 拉起是常态)——2026-11-08 排查 K6 时,剪贴板 monitor 线程
+/// 中途死亡只剩下游痕迹(arboard 的 manager 移交 WARN),panic 本体彻底丢失。
+/// 记录后线程 unwind 行为不变(钩子只记录,不 abort),FFI 的 catch_unwind
+/// 拦截照常工作。先取默认钩子再链式调用:保留 stderr 行为,调试时
+/// RUST_BACKTRACE 依旧有效。
+fn install_panic_logger() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let loc = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<未知位置>".into());
+        let thread = std::thread::current();
+        let thread_name = thread.name().unwrap_or("<unnamed>");
+        let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "(非字符串 payload)".into()
+        };
+        log::error!("panic 线程[{thread_name}] @ {loc}: {msg}");
+        default_hook(info);
+    }));
 }
 
 /// 若 `path` 已达/超过 `limit` 字节,把它改名为 `<path>.1`(覆盖旧归档)。
@@ -79,8 +109,13 @@ pub fn rotate_log_if_needed(path: &std::path::Path, limit: u64) -> bool {
 
 /// 极简文件日志器(单文件追加 + 单代滚动;排障用,不追求多代保留)。
 ///
-/// 带 8KB BufWriter:Info 级日志(剪贴板事件/待办 tick)不再每条一次 write
-/// 系统调用;Warn 及以上立即 flush,崩溃时诊断信息不丢。
+/// **每行一次 write(2)**:`LineWriter` 见 `\n` 即写穿到 OS 页缓存。此前用
+/// 8KB BufWriter、仅 Warn+ flush —— Info 行要等缓冲攒满才见系统调用,
+/// 2026-11-08 在 Ubuntu VM 实测暴露:干净启动零 WARN + 强杀退出 =
+/// nbcore.log 0 字节,Info 字节全堵在用户态缓冲里从未到达 OS(strace 证实
+/// openat 与时间戳格式化俱在、write 调用为零;宿主 nextboard.log 踩到 Qt
+/// QIODevice 的同款用户态写缓冲,docs/29 §9.1 K9)。日志量级(轮询事件,
+/// 每秒 ~10 行)下逐行 write(2) 的开销可忽略,可靠性优先。
 ///
 /// 滚动:累计已写字节数,跨过 `LOG_ROTATE_BYTES` 时把当前文件改名归档并新建
 /// 一个空文件继续写。**先写后滚**:那条让文件越线的日志先落盘,再换文件 ——
@@ -91,16 +126,14 @@ struct SimpleFileLogger {
 
 struct LoggerState {
     /// `None` = 文件句柄已被主动释放(滚动改名期间)。取 `Option` 而不是裸
-    /// BufWriter,是因为**Windows 上被本进程打开着的文件 rename 会静默失败** ——
+    /// LineWriter,是因为**Windows 上被本进程打开着的文件 rename 会静默失败** ——
     /// 必须先 drop 掉持有它的 writer 才能把 `x.log` 改名成 `x.log.1`。
-    writer: Option<std::io::BufWriter<std::fs::File>>,
+    writer: Option<std::io::LineWriter<std::fs::File>>,
     /// 当前文件已写字节数(打开时从文件实际大小起算,而不是 0 —— 否则
     /// 上次攒下的接近上限的日志要等到本次再写满一个阈值才会滚动)。
     written: u64,
     path: std::path::PathBuf,
 }
-
-const LOG_BUF_BYTES: usize = 8 * 1024;
 
 impl log::Log for SimpleFileLogger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
@@ -147,7 +180,7 @@ impl log::Log for SimpleFileLogger {
                 .append(true)
                 .open(&state.path)
             {
-                state.writer = Some(std::io::BufWriter::with_capacity(LOG_BUF_BYTES, file));
+                state.writer = Some(std::io::LineWriter::new(file));
             }
         }
     }

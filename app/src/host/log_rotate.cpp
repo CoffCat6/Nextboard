@@ -34,7 +34,14 @@ bool openLogFileAppend(QFile& file, const QString& path, qint64 limitBytes) {
     const QFileInfo info(path);
     if (info.exists() && info.size() >= limitBytes) rotateFile(path);
     file.setFileName(path);
-    return file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
+    // ⚠️ 必须 Unbuffered(2026-11-08):Qt 6.9 的 QIODevice 未加该标志时自带
+    // 用户态写缓冲,write() 不产生 write(2) 系统调用 —— Info 级日志要等 Warn+
+    // 的 flush() 或正常退出析构才落 OS。Ubuntu VM 实测:干净启动零 WARN + 强杀
+    // 退出 = nextboard.log 0 字节(strace:openat 与时间戳格式化俱在、write 为零;
+    // Rust 侧同款 8KB BufWriter 病因,docs/29 §9.1 K9)。"Info 交给 OS 页缓存"
+    // 的设计意图只有 Unbuffered 才真正成立。
+    return file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text
+                     | QIODevice::Unbuffered);
 }
 
 } // namespace nb

@@ -28,7 +28,6 @@ rqrr = { version = "0.7", features = ["image"] }
 xcap = "0.9"
 base64 = "0.22"
 zip = { version = "=8.0.0", default-features = false, features = ["deflate-flate2"] }
-ureq = { version = "3", default-features = false, features = ["socks-proxy", "native-tls"] }
 
 # ---- OCR 引擎(RapidOCR)的依赖 ----
 # 引擎实现已**内化**为 src/ocr/rapid/(派生自 rapid-ocr-rs v0.7.0, Apache-2.0;
@@ -46,6 +45,11 @@ num_cpus = "1.16"
 serde_yaml = "0.9"
 
 [target.'cfg(windows)'.dependencies]
+# SOCKS5 传输(translate/socks.rs)在 Windows 也走 ureq(WinHTTP 实测不支持
+# SOCKS5),故 ureq 双平台都有,只是 **TLS 后端按平台拆**:Windows=native-tls
+# (schannel,免 NASM —— rustls 的 ring 加密后端在 MSVC 上要 NASM,不拆则
+# Windows 构建直接挂在 ring 的 build script 上)。provider 在 socks.rs 显式设置。
+ureq = { version = "3", default-features = false, features = ["socks-proxy", "native-tls"] }
 # 剪贴板 Win32 直连(M0a 起按平台门控;非 Windows 由 clip.rs 的桩承担,M1 接入 arboard)
 clipboard-win = { version = "5.4", features = ["std"] }
 windows = { version = "0.62", features = [
@@ -73,6 +77,11 @@ windows = { version = "0.62", features = [
 # 监听:轮询通道(300ms,clip.rs monitor_thread)——XFixes 事件通道随 M3 接入
 # (docs/29 §12.1:事件优先、轮询兜底)。
 [target.'cfg(not(windows))'.dependencies]
+# HTTP 客户端(翻译):非 Windows 用 rustls(纯 Rust TLS,无 openssl 系统依赖,
+# AppImage 打包少一个包袱)。⚠️ TLS provider 必须与 socks.rs 的 tls_provider()
+# 显式设置一一对应 —— ureq 3.4 的默认 provider **永远是 Rustls**(NativeTls
+# "never picked up automatically"),不设就任何 https 请求都 panic。
+ureq = { version = "3", default-features = false, features = ["socks-proxy", "rustls"] }
 arboard = { version = "3", default-features = false, features = [
   "image-data",
   "wayland-data-control",

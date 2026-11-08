@@ -34,6 +34,7 @@
 #include <QKeyEvent>
 #include <QPainter>
 #include <QJsonObject>
+#include <QThread>
 #include <QTextEdit>
 #include <QStringList>
 #include <QLabel>
@@ -531,7 +532,18 @@ void runCaptureToolbarFlow() {
                                            Qt::LeftButton, Qt::NoModifier);
                         QApplication::sendEvent(lvp, &dpress);
                         QApplication::processEvents();
-                        const QString clip = QGuiApplication::clipboard()->text();
+                        // X11 选区是异步应答协议:写方是 nbcore(arboard,另一条 X 连接),
+                        // Qt 立即读回要靠自己 pump 等 SelectionNotify —— 实测(2026-11-08
+                        // VM)同栈一次读回为空,而 xclip/GTK(外部粘贴方)都能正常读到,
+                        // 即产品路径无缺陷,纯 Qt 即时读回的时序兼容性问题。重试自旋:
+                        // 每拍 processEvents + 50ms,最多 6 拍(~300ms)。
+                        QString clip;
+                        for (int i = 0; i < 6; ++i) {
+                            QApplication::processEvents();
+                            QThread::msleep(50);
+                            clip = QGuiApplication::clipboard()->text();
+                            if (!clip.isEmpty()) break;
+                        }
                         qInfo() << "CAPTURE-TOOLBAR  dblclick line0 clipboard =" << clip;
                         check(clip == QStringLiteral("第一行文本"),
                               QStringLiteral("双击行只复制该行(实际 %1)").arg(clip));

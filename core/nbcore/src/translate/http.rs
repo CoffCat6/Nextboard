@@ -324,6 +324,9 @@ mod ureq_http {
             Some(ProxyConfig::System) | None => proxy_from_env(),
         };
         let agent = ureq::Agent::config_builder()
+            // ⚠️ TLS provider 必须显式:ureq 3.4 默认永远 Rustls,不设则 https
+            // 全 panic(见 socks.rs::tls_provider 注释,2026-11-08 实测踩中)。
+            .tls_config(ureq::tls::TlsConfig::builder().provider(super::socks::tls_provider()).build())
             .proxy(proxy)
             // 与 WinHTTP 语义对齐:4xx/5xx 是**正常响应**(provider 要读错误 body
             // 做用户文案映射,如 openai 的鉴权错误)—— ureq 默认转 Err 会丢 body。

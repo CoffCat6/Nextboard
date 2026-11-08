@@ -12,12 +12,31 @@ use std::time::Duration;
 use super::{HttpMethod, HttpRequest, HttpResponse, ProxyAuth, ProxyEndpoint, MAX_RESPONSE_BYTES};
 use crate::error::{AppError, AppResult};
 
+/// 平台对应的 TLS provider(两条 ureq 传输——SOCKS5/HTTP——共用)。
+///
+/// ⚠️ **必须显式设置**:ureq 3.4 的默认 provider **永远是 Rustls**(源码
+/// `#[default]` 标注),而 `NativeTls` 注明 "The setting is never picked up
+/// automatically" —— 只开 native-tls feature 不在 Agent 里显式指定时,
+/// 任何 https 请求都会 panic("provider is Rustls but feature is not enabled:
+/// rustls")。2026-11-08 Linux 翻译实测踩中;Windows 的 SOCKS5+https 同样埋着
+/// 此雷(此前 E2E 全是 http:// fixture 才没爆)。feature 与此处的对应关系见
+/// Cargo.toml 两个 target 段:Windows=native-tls(schannel,免 NASM),
+/// 非 Windows=rustls(纯 Rust,免 openssl)。
+pub(super) fn tls_provider() -> ureq::tls::TlsProvider {
+    if cfg!(windows) {
+        ureq::tls::TlsProvider::NativeTls
+    } else {
+        ureq::tls::TlsProvider::Rustls
+    }
+}
+
 /// 经 SOCKS5 代理发送请求（ureq 3.x 的阻塞 API）。
 pub(super) fn send(req: &HttpRequest, endpoint: &ProxyEndpoint) -> AppResult<HttpResponse> {
     let proxy_uri = build_proxy_uri(endpoint);
     let proxy =
         ureq::Proxy::new(&proxy_uri).map_err(|_| AppError::Translate("代理配置无效".into()))?;
     let agent = ureq::Agent::config_builder()
+        .tls_config(ureq::tls::TlsConfig::builder().provider(tls_provider()).build())
         .proxy(Some(proxy))
         .timeout_global(Some(Duration::from_secs(
             req.timeout_secs.clamp(5, 120) as u64

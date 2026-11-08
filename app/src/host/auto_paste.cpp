@@ -103,19 +103,16 @@ void sendCtrlV() {
         qInfo() << "auto-paste: 已投出 Ctrl+V(XTest,按下/抬起分两批)";
     }
 
-    /// 前台窗口的 PID(读 _NET_WM_PID,EWMH);拿不到返回 0(WSLg 无 WM 的常见态)。
-    pid_t foregroundPid(Display* d) {
-        Window focus = None;
-        int revert = 0;
-        XGetInputFocus(d, &focus, &revert);
-        if (focus == None || focus == PointerRoot) return 0;
+    /// 单窗口的 _NET_WM_PID;没有/拿不到返回 0。
+    pid_t pidOfWindow(Display* d, Window w) {
+        if (w == None) return 0;
         const Atom pidAtom = XInternAtom(d, "_NET_WM_PID", True);
         if (pidAtom == None) return 0;
         Atom type = None;
         int fmt = 0;
         unsigned long n = 0, rest = 0;
         unsigned char* data = nullptr;
-        if (XGetWindowProperty(d, focus, pidAtom, 0, 1, False, XA_CARDINAL,
+        if (XGetWindowProperty(d, w, pidAtom, 0, 1, False, XA_CARDINAL,
                                &type, &fmt, &n, &rest, &data) != Success || !data) {
             return 0;
         }
@@ -123,6 +120,97 @@ void sendCtrlV() {
         if (n > 0 && fmt == 32) pid = static_cast<pid_t>(*(reinterpret_cast<unsigned long*>(data)));
         XFree(data);
         return pid;
+    }
+
+    /// 解析"前台窗口的 PID"。
+    ///
+    /// ⚠️ **不能只看 XGetInputFocus**:面板 hide 后 X 焦点按 RevertToPointerRoot
+    /// 回退,WM(xfwm4 实测 2026-11-08)可能整秒不设显式焦点 —— 期间
+    /// XGetInputFocus 返回 PointerRoot,而事件实际按**指针所在窗口**投递
+    /// (xdotool getwindowfocus 正是这么解析的,所以探针看得到 mousepad、
+    /// 我们的单发检查却是"未知")。两级解析:
+    /// ① _NET_ACTIVE_WINDOW(WM 权威口径,客户端窗,必带 _NET_WM_PID);
+    /// ② 回退 XGetInputFocus —— PointerRoot 时取指针下窗口,再沿框架向上爬
+    ///    找带 _NET_WM_PID 的客户端窗(框架窗本身不带)。
+    /// 都拿不到返回 0 = fail-safe 拒注(绝不盲注)。
+    pid_t resolveForegroundPid(Display* d) {
+        // ① EWMH 活动窗口
+        const Atom awAtom = XInternAtom(d, "_NET_ACTIVE_WINDOW", True);
+        if (awAtom != None) {
+            Window root = DefaultRootWindow(d);
+            Atom type = None;
+            int fmt = 0;
+            unsigned long n = 0, rest = 0;
+            unsigned char* data = nullptr;
+            if (XGetWindowProperty(d, root, awAtom, 0, 1, False, XA_WINDOW,
+                                   &type, &fmt, &n, &rest, &data) == Success && data) {
+                Window active = None;
+                if (n > 0 && fmt == 32) active = *(reinterpret_cast<Window*>(data));
+                XFree(data);
+                const pid_t pid = pidOfWindow(d, active);
+                if (pid != 0) return pid;
+            }
+        }
+        // ② 焦点回退
+        Window focus = None;
+        int revert = 0;
+        XGetInputFocus(d, &focus, &revert);
+        if (focus == None) return 0;
+        Window w = focus;
+        if (w == PointerRoot) {
+            Window root = DefaultRootWindow(d), child = None;
+            int rx = 0, ry = 0, wx = 0, wy = 0;
+            unsigned mask = 0;
+            if (!XQueryPointer(d, root, &root, &child, &rx, &ry, &wx, &wy, &mask)) {
+                return 0;   // 指针不在本屏:无人有焦点,拒注
+            }
+            w = child;
+        }
+        for (int hops = 0; w != None && hops < 8; ++hops) {
+            const pid_t pid = pidOfWindow(d, w);
+            if (pid != 0) return pid;
+            Window qroot = None, qparent = None;
+            Window* kids = nullptr;
+            unsigned n = 0;
+            if (!XQueryTree(d, w, &qroot, &qparent, &kids, &n)) return 0;
+            if (kids) XFree(kids);
+            if (qparent == None || qparent == qroot) return 0;
+            w = qparent;
+        }
+        return 0;
+    }
+
+    /// Linux(M3):等焦点就绪再投 Ctrl+V。
+    ///
+    /// 为什么不能单发:面板收起后 **WM 重设焦点有可感延迟** —— xfwm4 实测
+    /// (2026-11-08 Ubuntu VM):面板 hide 后 +80ms 时 XGetInputFocus 仍是 None
+    /// (fail-safe 拒注),+0.5s 时焦点已落在目标窗口且带 _NET_WM_PID。于是
+    /// 100ms 步进轮询、至多 ~1s:期间焦点回到本进程 → 跳过(防粘到自己);
+    /// 超时仍拿不到 → 拒绝注入。fail-safe 硬约束不变:**绝不盲注**。
+    void x11PasteWithFocusRetry(int attempt) {
+        constexpr int kMaxAttempts = 10;
+        Display* d = XOpenDisplay(nullptr);
+        if (!d) {
+            qWarning() << "auto-paste: XOpenDisplay 失败,跳过注入";
+            return;
+        }
+        const pid_t foreground = resolveForegroundPid(d);
+        if (foreground == ::getpid()) {
+            qInfo() << "auto-paste: 前台仍是本进程窗口,跳过";
+            XCloseDisplay(d);
+            return;
+        }
+        if (foreground == 0) {
+            XCloseDisplay(d);
+            if (attempt + 1 >= kMaxAttempts) {
+                qInfo() << "auto-paste: 前台 PID 未知(等待约1s仍拿不到焦点/EWMH),跳过注入(fail-safe)";
+                return;
+            }
+            QTimer::singleShot(100, qApp, [attempt] { x11PasteWithFocusRetry(attempt + 1); });
+            return;
+        }
+        sendCtrlV(d);
+        XCloseDisplay(d);
     }
 #endif  // Q_OS_WIN
 
@@ -150,29 +238,12 @@ void pasteToForegroundIfEnabled(int delayMs) {
         }
         sendCtrlV();
 #else
-        // Linux(M3):前台检查与 Windows 同语义 —— 前台 PID == 本进程 → 跳过。
-        // ⚠️ fail-safe:前台 PID **拿不到**(_NET_WM_PID 缺失,WSLg 无 WM 常见态)
-        // 时**跳过注入**:拿"是谁在焦点"都做不到就按 Ctrl+V,正是本功能头注释里的
-        // 第一条硬约束要防的事故(粘到面板自己)。真机(KDE/GNOME)有 EWMH,可正常注入。
+        // Linux(M3):前台检查与 Windows 同语义,但多一层**焦点就绪轮询** ——
+        // 面板收起后 WM(xfwm4)重设焦点有可感延迟,+80ms 单发必踩"焦点未知"
+        // fail-safe(2026-11-08 VM 实测)。详见 x11PasteWithFocusRetry 注释:
+        // 就绪即注、焦点回本进程即跳过、超时仍未知即拒注 —— 绝不盲注。
 #ifdef NB_HAVE_XTEST
-        Display* d = XOpenDisplay(nullptr);
-        if (!d) {
-            qWarning() << "auto-paste: XOpenDisplay 失败,跳过注入";
-            return;
-        }
-        const pid_t foreground = foregroundPid(d);
-        if (foreground == 0) {
-            qInfo() << "auto-paste: 前台 PID 未知(无 EWMH 环境),跳过注入(fail-safe)";
-            XCloseDisplay(d);
-            return;
-        }
-        if (foreground == ::getpid()) {
-            qInfo() << "auto-paste: 前台仍是本进程窗口,跳过";
-            XCloseDisplay(d);
-            return;
-        }
-        sendCtrlV(d);
-        XCloseDisplay(d);
+        x11PasteWithFocusRetry(0);
 #else
         // 无 libXtst 的构建:自动粘贴不可用(设置项保留,行为=仅复制)
         qInfo() << "auto-paste: 本构建无 libXtst,自动粘贴不可用,仅保留复制";
