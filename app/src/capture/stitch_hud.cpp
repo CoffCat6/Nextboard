@@ -263,6 +263,11 @@ void StitchHud::registerEsc() {
     }
     qApp->installNativeEventFilter(this);
     m_escRegistered = true;
+#else
+    // Linux(M3):采集期页面窗口持有键盘焦点,Esc 到不了本进程;X11 全局抓 Esc
+    // 要走 XGrabKey 且与热键线程的动态 Grab 命令队列协同 —— v1 先走与 Windows
+    // 「注册失败」相同的降级路径:面板状态条常显「(点「结束」收尾)」,按钮收尾。
+    m_escUnavailable = true;
 #endif
 }
 

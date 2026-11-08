@@ -16,6 +16,13 @@
 // UIA 元素级(S3)。只在 probeElementAt 里用到;窗口级(S1)完全不碰 COM ——
 // 这样"元素探测失败/超时"永远不会影响"至少还能按窗口框"。
 #include <UIAutomation.h>
+#else
+// Linux(M3):窗口级枚举用 Xlib(EWMH)。GUI 线程一次性短连接;热键线程
+// 另有自己的连接。Xlib 多线程约定:XInitThreads 必须先于任何 Xlib 调用 ——
+// Qt xcb 平台插件启动时已调,此处幂等重入只作显式声明。
+#include <X11/Xlib.h>
+#include <X11/Xatom.h>
+#include <unistd.h>
 #endif
 
 namespace nb::smart {
@@ -824,10 +831,148 @@ QVector<ElementNode> buildElementSnapshot(quintptr windowId, int maxNodes, int b
     return out;
 }
 #else
-// Linux(M0b):窗口枚举与 UIA 元素级未接入 —— 全部走**降级契约**(头注释:
-// 失败返回空表,不报错不阻塞,退化成纯手动框选)。Wayland 无枚举能力;
-// X11 窗口级(EWMH)与 AT-SPI2 元素级分别在 M2 / M2 二期接入(docs/29 §5.3)。
-QVector<Candidate> probeWindows() { return {}; }
+// Linux(M3):窗口级枚举 = EWMH/Xlib(本段);元素级(AT-SPI2)二期,仍走
+// 降级桩。契约与 Windows 段一一致:失败/未接入返回**空表**,不报错不阻塞,
+// 退化成纯手动框选。Wayland 原生会话无 X 枚举能力:XOpenDisplay 失败 → 空表。
+namespace {
+
+// 与 Windows 段一的同名常量同值(docs/23 §4.4 碎片过滤判据)。它们在 Windows
+// 匿名命名空间里,平台门控够不着,这里按同值另立(改一处须改两处)。
+constexpr int kMinCandidateEdge = 60;
+constexpr qreal kMaxCandidateAspect = 12.0;
+
+/// Xlib 错误默认 handler 会 exit 整个进程 —— 枚举期间目标窗口随时可能被
+/// 销毁(BadWindow 是正常竞态不是故障),局部吞掉。Xlib 错误 handler 是
+/// **线程级**的,只影响本线程的 Xlib 调用,不碰 Qt xcb 主连接(它不走 Xlib)。
+int ignoreXErrors(Display*, XErrorEvent*) { return 0; }
+
+/// 读 32-bit 格式属性,按 Xlib 约定落到 long 数组(ATOM/WINDOW/CARDINAL 通用)。
+QVector<long> readLongAtoms(Display* d, Window w, const char* name, unsigned long maxItems) {
+    QVector<long> out;
+    if (w == None) return out;
+    const Atom atom = XInternAtom(d, name, True);
+    if (atom == None) return out;
+    Atom type = None;
+    int fmt = 0;
+    unsigned long n = 0, rest = 0;
+    unsigned char* data = nullptr;
+    if (XGetWindowProperty(d, w, atom, 0, maxItems, False, AnyPropertyType,
+                           &type, &fmt, &n, &rest, &data) != Success) {
+        return out;
+    }
+    if (data) {
+        if (fmt == 32) {
+            const auto* items = reinterpret_cast<const long*>(data);
+            out.reserve(int(qMin<unsigned long>(n, maxItems)));
+            for (unsigned long i = 0; i < n && i < maxItems; ++i) out.append(items[i]);
+        }
+        XFree(data);
+    }
+    return out;
+}
+
+/// 窗口标题:_NET_WM_NAME(UTF-8)优先,WM_NAME 兜底;可空(同 Windows)。
+QString readWindowName(Display* d, Window w) {
+    for (const char* name : { "_NET_WM_NAME", "WM_NAME" }) {
+        const Atom atom = XInternAtom(d, name, True);
+        if (atom == None) continue;
+        Atom type = None;
+        int fmt = 0;
+        unsigned long n = 0, rest = 0;
+        unsigned char* data = nullptr;
+        if (XGetWindowProperty(d, w, atom, 0, 4096, False, AnyPropertyType,
+                               &type, &fmt, &n, &rest, &data) == Success && data) {
+            QString s;
+            if (fmt == 8 && n > 0) {
+                s = QString::fromUtf8(reinterpret_cast<const char*>(data), int(n));
+            }
+            XFree(data);
+            if (!s.isEmpty()) return s;
+        }
+    }
+    return {};
+}
+
+/// 窗口**外框**的绝对物理矩形:客户区(XGetGeometry + XTranslateCoordinates)
+/// 按 _NET_FRAME_EXTENTS(左/右/上/下)外扩 —— X11 版的
+/// DWMWA_EXTENDED_FRAME_BOUNDS(排除值是"装饰遮住的客户区"而非"不可见拖拽带",
+/// 语义对齐:候选框应覆盖用户看见的整扇窗,含标题栏)。没有 extents 的 WM
+/// 就退回客户区 —— 对齐 Windows 的 GetWindowRect 兜底。
+QRect windowOuterRect(Display* d, Window w) {
+    Window rootRet = None;
+    int x = 0, y = 0;
+    unsigned wu = 0, hu = 0, bw = 0, depth = 0;
+    if (!XGetGeometry(d, w, &rootRet, &x, &y, &wu, &hu, &bw, &depth)) return {};
+    int ax = 0, ay = 0;
+    Window child = None;
+    if (!XTranslateCoordinates(d, w, rootRet, 0, 0, &ax, &ay, &child)) return {};
+    QRect r(ax, ay, int(wu), int(hu));
+    const QVector<long> ext = readLongAtoms(d, w, "_NET_FRAME_EXTENTS", 4);
+    if (ext.size() == 4) {
+        r.adjust(int(-ext.at(0)), int(-ext.at(2)), int(ext.at(1)), int(ext.at(3)));
+    }
+    return r;
+}
+
+} // namespace
+
+QVector<Candidate> probeWindows() {
+    QVector<Candidate> out;
+    XInitThreads();   // 幂等;多线程约定见文件头 include 处注释
+    Display* d = XOpenDisplay(nullptr);
+    if (!d) return out;
+    const auto oldHandler = XSetErrorHandler(ignoreXErrors);
+    Window root = DefaultRootWindow(d);
+
+    // 排除用的原子提前 intern(only_if_exists=False:它们只是标识符,不存在就造)。
+    const Atom atomHidden = XInternAtom(d, "_NET_WM_STATE_HIDDEN", False);
+    const Atom atomDesktop = XInternAtom(d, "_NET_WM_WINDOW_TYPE_DESKTOP", False);
+    const Atom atomDock = XInternAtom(d, "_NET_WM_WINDOW_TYPE_DOCK", False);
+    const quint64 selfPid = quint64(::getpid());
+
+    // z 序:_NET_CLIENT_LIST_STACKING 自**底向顶**(EWMH 规格;_NET_CLIENT_LIST
+    // 只是初始映射序,不随堆叠变化)。**反向遍历 = 顶到底**,与 Windows
+    // EnumWindows(顶层在前)同序 —— 命中测试"点在上面那个窗口就选上面那个"
+    // 依赖这个顺序。
+    const QVector<long> stacking = readLongAtoms(d, root, "_NET_CLIENT_LIST_STACKING", 4096);
+    for (auto it = stacking.crbegin(); it != stacking.crend(); ++it) {
+        const Window w = static_cast<Window>(*it);
+        if (w == None) continue;
+
+        // 本进程窗口(面板/遮罩/贴图/便签):同 Windows 的 selfPid 排除。
+        const QVector<long> pid = readLongAtoms(d, w, "_NET_WM_PID", 1);
+        if (!pid.isEmpty() && quint64(pid.first()) == selfPid) continue;
+
+        // 最小化(_NET_WM_STATE_HIDDEN):屏幕上没有它的内容(同 IsIconic)。
+        if (readLongAtoms(d, w, "_NET_WM_STATE", 64).contains(long(atomHidden))) continue;
+
+        // 桌面/任务栏:同 Windows isShellClass 的排除口径(_DESKTOP/_DOCK)。
+        const QVector<long> ty = readLongAtoms(d, w, "_NET_WM_WINDOW_TYPE", 64);
+        if (ty.contains(long(atomDesktop)) || ty.contains(long(atomDock))) continue;
+
+        // 未映射(Withdrawn)与"枚举中被销毁"竞态:失败即跳过(错误已吞)。
+        XWindowAttributes attr {};
+        if (!XGetWindowAttributes(d, w, &attr) || attr.map_state != IsViewable) continue;
+
+        const QRect rect = windowOuterRect(d, w);
+        if (rect.width() < 8 || rect.height() < 8) continue;
+        // 碎片过滤(同 Windows 段一:最小边长 + 宽高比,判据是"框住它没有意义")。
+        if (rect.width() < kMinCandidateEdge || rect.height() < kMinCandidateEdge) continue;
+        const qreal ratio = static_cast<qreal>(rect.width()) / qMax(1, rect.height());
+        if (ratio > kMaxCandidateAspect || ratio < 1.0 / kMaxCandidateAspect) continue;
+
+        Candidate c;
+        c.physical = rect;
+        c.title = readWindowName(d, w);
+        c.id = quintptr(w);   // X Window id:同 HWND 的"稳定标识"角色
+        c.windowId = c.id;
+        c.level = 0;
+        out.append(c);
+    }
+    XSetErrorHandler(oldHandler);
+    XCloseDisplay(d);
+    return out;
+}
 bool worthProbing(quintptr) { return false; }
 QVector<Candidate> probeElementAt(quintptr, const QPoint&, qreal, int, int, int,
                                   ProbeStats*) { return {}; }
